@@ -1574,8 +1574,10 @@ milestone are welcome. **No trailers.** Push to main after each commit.
     accent border. `o` / enter toggles the focused card only while the open thread is the
     cursor thread; otherwise it opens the cursor thread.
   - `s` stars the targets unless every one is already starred, then it unstars. The reader's
-    Archive / Not spam, Trash / Restore and Star buttons use the same view-aware store helpers
-    (`archive_kind`, `trash_kind`, `spam_kind`, `star_kind`) as the keys.
+    Archive / Not spam and Trash / Restore buttons use the same view-aware store helpers
+    (`archive_kind`, `trash_kind`) as the keys, but every reader action-bar button acts on the
+    open thread only (`mutate_threads`), not on an `x` selection: its Star / Unstar label
+    describes that thread, so Star toggles that thread's own star.
   - `g n` / `g p` wrap round the account list.
   - `Store.syncs` counts `Synced` events so `expect:syncs=` can show that ctrl-r refreshed.
   - The "Not available yet" handlers live on the window root, so `c` (Mail) and ctrl-n

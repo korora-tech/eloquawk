@@ -279,10 +279,14 @@ impl ReaderView {
         Box::new(cx.listener(move |this, _: &ClickEvent, window, cx| f(this, window, cx)))
     }
 
+    /// The action bar acts on the thread it shows, never on an `x` selection the list may
+    /// hold: the buttons and their labels describe this thread.
     fn mutate(&self, kind: MutationKind, cx: &mut Context<Self>) {
         self.store.update(cx, |s, cx| {
-            s.mutate(kind);
-            cx.notify();
+            if let Some(open) = s.open.clone() {
+                s.mutate_threads(vec![open], kind);
+                cx.notify();
+            }
         });
     }
 
@@ -547,8 +551,18 @@ impl ReaderView {
                 "star",
                 if starred { "Unstar" } else { "Star" },
                 Some(self.click(cx, |this, _, cx| {
-                    let kind = this.store.read(cx).star_kind();
-                    this.mutate(kind, cx)
+                    let store = this.store.read(cx);
+                    let starred = store
+                        .open
+                        .as_ref()
+                        .and_then(|k| store.threads.get(k))
+                        .is_some_and(ThreadSummary::starred);
+                    let delta = if starred {
+                        LabelDelta::unstar()
+                    } else {
+                        LabelDelta::star()
+                    };
+                    this.mutate(MutationKind::Labels(delta), cx)
                 })),
             ))
             // Labels arrives in M7; Reply, Reply all and Forward in M8.
