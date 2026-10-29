@@ -1500,6 +1500,8 @@ milestone are welcome. **No trailers.** Push to main after each commit.
   - Dropping a focused body (thread change, card collapse, quote fold) hands the focus to the
     reader, so Mail keys keep working:
     `"open:0,selectall:0,j,j,expect:open=2,expect:focus=reader"` reports only `ok`.
+  - Escape in a body with a selection clears it; with none it closes the thread:
+    `"open:0,selectall:0,escape,expect:selection=,expect:open=0,escape,expect:open=none"`.
   - The "Copy" button copies the whole body.
   - Links in the demo newsletter are underlined, and the one whose text differs from its href
     shows the href. Clicking is verified by inspection of the handler (`open::that` is not
@@ -1523,6 +1525,8 @@ milestone are welcome. **No trailers.** Push to main after each commit.
   - A body takes focus on mouse down and ctrl-a. The reader never drops a body entity while
     it holds the focus without first focusing the reader itself (`ReaderView::drop_body`);
     otherwise keys would dispatch from the root, outside the Mail context.
+  - Escape is also bound in `ReadOnlyText` (`ClearSelection`); with no selection the handler
+    propagates and the Mail `BackToList` binding runs.
   - `niri msg action screenshot-window` also puts the PNG on the clipboard, so the ctrl-c
     check with `wl-paste -n` must run without a `screenshot.sh` capture (launch the binary
     in the dev shell with the same `--demo-actions` and read the clipboard before killing it).

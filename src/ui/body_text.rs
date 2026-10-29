@@ -4,7 +4,8 @@
 //! The reader keeps one entity per expanded message (and one per unfolded quote). Mouse
 //! down, drag and up select; a double-click selects a word; ctrl-c copies the selection and
 //! ctrl-a selects the whole body, both bound in the `ReadOnlyText` key context, which Mail keys
-//! do not exclude. A click (a press and release without a drag) on a link emits
+//! do not exclude. Escape first drops a selection; with none it falls through to the Mail
+//! binding. A click (a press and release without a drag) on a link emits
 //! [`BodyEvent::OpenLink`]; the reader decides what opening means. Only the targets that
 //! `mail/links.rs` produces (http, https and mailto) can ever be emitted.
 
@@ -28,6 +29,9 @@ actions!(
         Copy,
         /// Selects the whole body.
         SelectAll,
+        /// Drops the selection; with nothing selected the key falls through to the Mail
+        /// binding (escape closes the thread).
+        ClearSelection,
     ]
 );
 
@@ -36,6 +40,7 @@ pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("ctrl-c", Copy, ctx),
         KeyBinding::new("ctrl-a", SelectAll, ctx),
+        KeyBinding::new("escape", ClearSelection, ctx),
     ]);
 }
 
@@ -119,6 +124,14 @@ impl BodyText {
         self.anchor = 0;
         self.selection = 0..self.text.len();
         cx.notify();
+    }
+
+    fn escape(&mut self, _: &ClearSelection, _: &mut Window, cx: &mut Context<Self>) {
+        if self.selection.is_empty() {
+            cx.propagate();
+        } else {
+            self.clear_selection(cx);
+        }
     }
 
     fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
@@ -220,6 +233,7 @@ impl Render for BodyText {
             .track_focus(&self.focus)
             .on_action(cx.listener(Self::copy))
             .on_action(cx.listener(Self::select_all))
+            .on_action(cx.listener(Self::escape))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
