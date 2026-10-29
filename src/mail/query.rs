@@ -123,12 +123,14 @@ fn tokenize(input: &str) -> Vec<Token> {
 }
 
 fn parse_age(v: &str) -> Option<Age> {
-    let (num, unit) = v.split_at(v.len().checked_sub(1)?);
+    // Split on the last character, not the last byte: the unit may be multi-byte input.
+    let unit = v.chars().next_back()?;
+    let num = &v[..v.len() - unit.len_utf8()];
     let n: i64 = num.parse().ok().filter(|n| *n >= 0 && *n <= 10_000)?;
     match unit {
-        "d" => Some(Age::Days(n)),
-        "m" => Some(Age::Months(n)),
-        "y" => Some(Age::Years(n)),
+        'd' => Some(Age::Days(n)),
+        'm' => Some(Age::Months(n)),
+        'y' => Some(Age::Years(n)),
         _ => None,
     }
 }
@@ -195,8 +197,9 @@ impl Query {
         let mut join_next = false;
         for (i, tok) in tokens.iter().enumerate() {
             let is_or = !tok.quoted && !tok.negated && tok.text == "OR";
-            // `OR` joins its neighbours; leading, trailing or doubled `OR` is free text.
-            if is_or && !groups.is_empty() && !join_next && i + 1 < tokens.len() {
+            // `OR` joins its neighbours; repeated `OR`s collapse into one, and a leading or
+            // trailing `OR` is free text.
+            if is_or && !groups.is_empty() && i + 1 < tokens.len() {
                 join_next = true;
                 continue;
             }
@@ -499,6 +502,11 @@ mod tests {
         // A leading or trailing OR is plain text.
         assert_eq!(Query::parse("invoice OR"), Query::parse("invoice \"or\""));
         assert_eq!(Query::parse("OR invoice"), Query::parse("\"or\" invoice"));
+        // Repeated ORs collapse into one.
+        assert_eq!(
+            Query::parse("invoice OR OR receipt"),
+            Query::parse("invoice OR receipt")
+        );
     }
 
     #[test]
@@ -577,6 +585,9 @@ mod tests {
         assert!(m("is:bogus OR note", &s));
         assert!(!m("is:bogus", &s));
         assert!(!m("newer_than:soon", &s));
+        assert!(!m("newer_than:5é", &s));
+        assert!(!m("older_than:é", &s));
+        assert!(!m("newer_than:日", &s));
         assert!(!m("after:yesterday", &s));
         assert!(!m("from:", &s));
     }
