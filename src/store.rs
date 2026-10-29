@@ -187,6 +187,9 @@ struct Snapshot {
     key: ThreadKey,
     before: ThreadSummary,
     positions: Vec<(ViewKey, usize)>,
+    /// The lists whose membership of this thread the mutation changed; a rollback revisits
+    /// only these, so fresher membership elsewhere survives it.
+    touched: Vec<ViewKey>,
 }
 
 #[derive(Clone, Debug)]
@@ -395,7 +398,12 @@ impl Store {
         op
     }
 
+    /// Posts a toast. A toast without Undo replaces any that offered it, so the undo slot
+    /// goes too: `z` undoes only while its notice is showing (SPEC 8.1).
     fn post_notice(&mut self, text: String, action: Option<NoticeAction>) {
+        if action != Some(NoticeAction::Undo) {
+            self.undo = None;
+        }
         self.notice = Some(Notice {
             text,
             action,
@@ -839,6 +847,7 @@ impl Store {
                     key: k.clone(),
                     before: self.threads.get(k)?.clone(),
                     positions: self.positions_of(k),
+                    touched: Vec::new(),
                 })
             })
             .collect();
@@ -873,6 +882,16 @@ impl Store {
                     }
                 }
             }
+        }
+        let mut snapshots = snapshots;
+        for snap in &mut snapshots {
+            let was: HashSet<ViewKey> = snap.positions.iter().map(|(v, _)| v.clone()).collect();
+            let now: HashSet<ViewKey> = self
+                .positions_of(&snap.key)
+                .into_iter()
+                .map(|(v, _)| v)
+                .collect();
+            snap.touched = was.symmetric_difference(&now).cloned().collect();
         }
         let thread_ids: Vec<String> = keys.iter().map(|k| k.id.clone()).collect();
         let n = thread_ids.len();
@@ -944,26 +963,45 @@ impl Store {
             MutationKind::Trash => {
                 // One untrash per distinct set of labels to restore, so no thread gains a
                 // label it never had.
-                let mut groups: BTreeMap<Vec<String>, Vec<ThreadKey>> = BTreeMap::new();
+                let mut groups: BTreeMap<Vec<String>, Positions> = BTreeMap::new();
                 for s in &action.threads {
                     groups
                         .entry(restorable(&s.before.label_ids))
                         .or_default()
-                        .push(s.key.clone());
+                        .push((s.key.clone(), s.positions.clone()));
                 }
-                // The first op puts every thread back, so positions recorded relative to
-                // each other stay right across groups.
-                let mut positions = Some(positions);
-                for (add, keys) in groups {
+                // Each op puts back only its own threads, so a failed group rolls back alone.
+                // Positions were recorded with every thread present: an index shrinks by the
+                // threads of groups not yet restored that sit before it in the same list.
+                let groups: Vec<(Vec<String>, Positions)> = groups.into_iter().collect();
+                for (gi, (add, group)) in groups.iter().enumerate() {
+                    let later: Vec<&(ViewKey, usize)> = groups[gi + 1..]
+                        .iter()
+                        .flat_map(|(_, g)| g.iter().flat_map(|(_, places)| places))
+                        .collect();
+                    let adjusted: Positions = group
+                        .iter()
+                        .map(|(key, places)| {
+                            let places = places
+                                .iter()
+                                .map(|(view, ix)| {
+                                    let before =
+                                        later.iter().filter(|(v, i)| v == view && i < ix).count();
+                                    (view.clone(), ix - before)
+                                })
+                                .collect();
+                            (key.clone(), places)
+                        })
+                        .collect();
                     let restore = LabelDelta {
-                        add,
+                        add: add.clone(),
                         remove: vec![],
                     };
                     self.mutate_keys(
-                        keys,
+                        group.iter().map(|(k, _)| k.clone()).collect(),
                         MutationKind::Untrash { restore },
                         false,
-                        positions.take(),
+                        Some(adjusted),
                     );
                 }
             }
@@ -1037,13 +1075,24 @@ impl Store {
         s
     }
 
-    /// Whether a pending op took this thread out of a list of this kind.
-    fn pending_removes(&self, view: &ViewKey, id: &str) -> bool {
-        self.pending.values().any(|p| {
-            p.account == view.account
-                && p.threads.iter().any(|t| t.key.id == id)
-                && removed_by(&view.kind, &p.kind.effective())
-        })
+    /// Where pending ops leave a thread's membership of a list: `Some(false)` when the last
+    /// op to affect it took the thread out, `Some(true)` when it brought it in, `None` when
+    /// no pending op changes it.
+    fn pending_membership(&self, view: &ViewKey, key: &ThreadKey) -> Option<bool> {
+        let current = self.threads.get(key);
+        let mut member = None;
+        for p in self.pending.values() {
+            if p.account != view.account || !p.threads.iter().any(|t| t.key == *key) {
+                continue;
+            }
+            let delta = p.kind.effective();
+            if removed_by(&view.kind, &delta) {
+                member = Some(false);
+            } else if current.is_some_and(|s| gained_by(&view.kind, &delta, s)) {
+                member = Some(true);
+            }
+        }
+        member
     }
 
     fn upsert(&mut self, s: ThreadSummary) {
@@ -1065,7 +1114,13 @@ impl Store {
         let mut seen = HashSet::new();
         let ids: Vec<String> = ids
             .into_iter()
-            .filter(|id| seen.insert(id.clone()) && !self.pending_removes(&view, id))
+            .filter(|id| {
+                seen.insert(id.clone())
+                    && self.pending_membership(
+                        &view,
+                        &ThreadKey::new(view.account.as_str(), id.as_str()),
+                    ) != Some(false)
+            })
             .collect();
         let old_ids = self.current_ids();
         let list = self.lists.entry(view.clone()).or_default();
@@ -1099,6 +1154,21 @@ impl Store {
                 }
             }
         }
+        // A page listed before the worker applied a pending op lacks the threads that op
+        // brings into this view; put them back as the store already showed them.
+        let mut joining: Vec<ThreadKey> = self
+            .pending
+            .values()
+            .filter(|p| p.account == view.account)
+            .flat_map(|p| p.threads.iter().map(|t| t.key.clone()))
+            .collect();
+        joining.sort();
+        joining.dedup();
+        for key in joining {
+            if self.pending_membership(&view, &key) == Some(true) {
+                self.insert_sorted(&view, &key);
+            }
+        }
         if self.view.as_ref() == Some(&view) {
             self.settle(&old_ids, false);
         }
@@ -1112,28 +1182,45 @@ impl Store {
             return;
         };
         let old_ids = self.current_ids();
+        // The thread goes back to its snapshot with the deltas of other still-pending ops
+        // on it re-applied, and only the lists this op changed are put back.
+        let mut back: Positions = Vec::new();
+        let mut by_date: Vec<(ViewKey, ThreadKey)> = Vec::new();
         for snap in &p.threads {
+            let restored = self.reapply_pending(snap.before.clone());
             if let Some(current) = self.threads.get(&snap.key).cloned() {
-                self.adjust_counts(&current, &snap.before);
+                self.adjust_counts(&current, &restored);
             }
-            self.threads.insert(snap.key.clone(), snap.before.clone());
-        }
-        for (view, list) in self.lists.iter_mut() {
-            if view.account == p.account {
-                list.ids
-                    .retain(|id| !p.threads.iter().any(|s| s.key.id == *id));
+            self.threads.insert(snap.key.clone(), restored);
+            let mut places = Vec::new();
+            for view in &snap.touched {
+                let was = snap
+                    .positions
+                    .iter()
+                    .find(|(v, _)| v == view)
+                    .map(|(_, ix)| *ix);
+                let want = self
+                    .pending_membership(view, &snap.key)
+                    .unwrap_or(was.is_some());
+                let Some(list) = self.lists.get_mut(view) else {
+                    continue;
+                };
+                let present = list.ids.contains(&snap.key.id);
+                match (want, present, was) {
+                    (true, false, Some(ix)) => places.push((view.clone(), ix)),
+                    (true, false, None) => by_date.push((view.clone(), snap.key.clone())),
+                    (false, true, _) => list.ids.retain(|id| *id != snap.key.id),
+                    _ => {}
+                }
             }
+            back.push((snap.key.clone(), places));
         }
-        let positions: Vec<_> = p
-            .threads
-            .iter()
-            .map(|s| (s.key.clone(), s.positions.clone()))
-            .collect();
-        self.reinsert(&positions);
+        self.reinsert(&back);
+        for (view, key) in by_date {
+            self.insert_sorted(&view, &key);
+        }
         self.settle(&old_ids, false);
-        if self.undo.as_ref().is_some_and(|(u, _)| *u == op) {
-            self.undo = None;
-        }
+        // The failure toast replaces any Undo toast, and with it the undo slot.
         self.post_notice(format!("Couldn't {}: {error}", p.kind.verb()), None);
     }
 
@@ -1640,6 +1727,129 @@ mod tests {
         assert_eq!(notice.text, "Couldn't move to Trash: server said no");
         assert_eq!(notice.action, None);
         assert!(!s.undo(), "a rolled-back op cannot be undone");
+    }
+
+    #[test]
+    fn undo_goes_with_its_toast() {
+        let (mut s, rx) = inbox_store(4);
+        s.set_cursor_index(1);
+        s.mutate(MutationKind::Labels(LabelDelta::archive()));
+        s.apply(SyncEvent::Notice("Synced".into()));
+        assert!(
+            !s.undo(),
+            "a notice without Undo takes the undo slot with it"
+        );
+
+        // A different op's failure toast does the same.
+        s.set_cursor_index(0);
+        s.mutate(MutationKind::Labels(LabelDelta::archive()));
+        s.set_cursor_index(0);
+        let star = s.mutate(MutationKind::Labels(LabelDelta::star())).unwrap();
+        s.apply(SyncEvent::MutationFinished {
+            op: star,
+            error: Some("nope".into()),
+        });
+        assert!(!s.undo());
+        drain(&rx);
+    }
+
+    #[test]
+    fn rollback_keeps_other_pending_ops() {
+        let (mut s, rx) = inbox_store(4);
+        s.set_cursor_index(1);
+        let archive = s
+            .mutate(MutationKind::Labels(LabelDelta::archive()))
+            .unwrap();
+        // Starred after the archive's snapshot was taken, still pending when it fails.
+        let star = s
+            .mutate_keys(
+                vec![key("t1")],
+                MutationKind::Labels(LabelDelta::star()),
+                false,
+                None,
+            )
+            .unwrap();
+        drain(&rx);
+        assert_eq!(list(&s, &view("INBOX")), ["t0", "t2", "t3"]);
+        s.apply(SyncEvent::MutationFinished {
+            op: archive,
+            error: Some("server said no".into()),
+        });
+        let t1 = &s.threads[&key("t1")];
+        assert!(t1.in_label("INBOX"));
+        assert!(t1.starred(), "the still-pending star survives the rollback");
+        assert_eq!(list(&s, &view("INBOX")), ids(0..4));
+        assert_eq!(label_count(&s, "INBOX").1, 4);
+        s.apply(SyncEvent::MutationFinished {
+            op: star,
+            error: None,
+        });
+        assert!(s.threads[&key("t1")].starred());
+    }
+
+    #[test]
+    fn pending_join_survives_stale_page() {
+        let (mut s, rx) = inbox_store(4);
+        s.set_cursor_index(1);
+        let archive = s
+            .mutate(MutationKind::Labels(LabelDelta::archive()))
+            .unwrap();
+        s.apply(SyncEvent::MutationFinished {
+            op: archive,
+            error: None,
+        });
+        assert!(s.undo());
+        drain(&rx);
+        assert_eq!(list(&s, &view("INBOX")), ids(0..4));
+        // Listed before the worker applied the undo: t1 is missing.
+        s.apply(SyncEvent::ThreadPage {
+            view: view("INBOX"),
+            ids: vec!["t0".into(), "t2".into(), "t3".into()],
+            threads: vec![],
+            mode: PageMode::Replace,
+            has_more: false,
+        });
+        assert_eq!(list(&s, &view("INBOX")), ids(0..4));
+        s.apply(SyncEvent::ThreadPage {
+            view: view("INBOX"),
+            ids: vec!["t0".into(), "t2".into(), "t3".into()],
+            threads: vec![],
+            mode: PageMode::Refresh,
+            has_more: false,
+        });
+        assert_eq!(list(&s, &view("INBOX")), ids(0..4));
+    }
+
+    #[test]
+    fn grouped_untrash_restores_order_and_rolls_back_alone() {
+        let (mut s, rx) = inbox_store(4);
+        s.apply(SyncEvent::ThreadsUpdated(vec![summary(
+            0,
+            &["INBOX", "Label_1"],
+        )]));
+        s.toggle_select(key("t0"));
+        s.toggle_select(key("t2"));
+        s.mutate(MutationKind::Trash);
+        assert_eq!(list(&s, &view("INBOX")), ["t1", "t3"]);
+        drain(&rx);
+        assert!(s.undo());
+        assert_eq!(list(&s, &view("INBOX")), ids(0..4));
+        assert_eq!(list(&s, &all_mail()), ids(0..4));
+        let t0_op = drain(&rx)
+            .into_iter()
+            .find_map(|c| match c {
+                Command::Untrash { op, thread_ids, .. } if thread_ids == ["t0"] => Some(op),
+                _ => None,
+            })
+            .unwrap();
+        s.apply(SyncEvent::MutationFinished {
+            op: t0_op,
+            error: Some("server said no".into()),
+        });
+        assert_eq!(list(&s, &view("INBOX")), ["t1", "t2", "t3"]);
+        assert_eq!(list(&s, &all_mail()), ["t1", "t2", "t3"]);
+        assert!(s.threads[&key("t0")].in_label("TRASH"));
+        assert!(!s.threads[&key("t2")].in_label("TRASH"));
     }
 
     #[test]
