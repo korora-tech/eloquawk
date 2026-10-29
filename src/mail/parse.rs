@@ -94,9 +94,20 @@ fn is_attachment(part: &PartDto) -> bool {
 
 #[derive(Default)]
 struct Walk<'a> {
-    plain: Option<&'a PartDto>,
+    /// Every inline text/plain part, in order: a multipart/mixed body may be split around an
+    /// inline image or similar, and all of its text belongs in the body.
+    plain: Vec<&'a PartDto>,
     html: Option<&'a PartDto>,
     attachments: Vec<Attachment>,
+    /// A text part Gmail returned by `attachmentId` only (a large body); its text is not in
+    /// the payload, so the body is incomplete.
+    unfetched_text: bool,
+}
+
+fn is_unfetched(part: &PartDto) -> bool {
+    part.body
+        .as_ref()
+        .is_some_and(|b| b.attachment_id.is_some() && b.data.is_none())
 }
 
 fn walk<'a>(part: &'a PartDto, out: &mut Walk<'a>) {
@@ -125,10 +136,23 @@ fn walk<'a>(part: &'a PartDto, out: &mut Walk<'a>) {
             walk(p, out);
         }
     } else if mime == "text/plain" || (mime.is_empty() && part.body.is_some()) {
-        out.plain.get_or_insert(part);
+        out.unfetched_text |= is_unfetched(part);
+        out.plain.push(part);
     } else if mime == "text/html" {
+        out.unfetched_text |= is_unfetched(part);
         out.html.get_or_insert(part);
     }
+}
+
+/// Joins inline text parts with a blank line between them, trimming the trailing whitespace
+/// of each part.
+fn join_text_parts(texts: &[String]) -> String {
+    texts
+        .iter()
+        .map(|t| t.trim_end())
+        .filter(|t| !t.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n")
 }
 
 /// Converts a Gmail message (`format=full` or `metadata`) into a [`Message`]. Plain text is
@@ -142,17 +166,24 @@ pub fn parse_message(dto: &MessageDto) -> Message {
 
     let mut found = Walk::default();
     walk(payload, &mut found);
-    let plain = found
-        .plain
-        .and_then(part_text)
+    let texts: Vec<String> = found.plain.iter().filter_map(|p| part_text(p)).collect();
+    let plain = (!texts.is_empty())
+        .then(|| join_text_parts(&texts))
         .filter(|t| !t.trim().is_empty() || found.html.is_none());
     let (body, body_source, body_truncated) = match (plain, found.html) {
-        (Some(text), _) => (text.trim_end().to_string(), BodySource::Plain, false),
+        (Some(text), _) => (text, BodySource::Plain, found.unfetched_text),
         (None, Some(part)) => match part_text(part).map(|t| html_to_text(&t)) {
-            Some(Some(c)) => (c.text, BodySource::Html, c.truncated),
+            Some(Some(c)) => (
+                c.text,
+                BodySource::Html,
+                c.truncated || found.unfetched_text,
+            ),
             Some(None) => (snippet.clone(), BodySource::Html, true),
+            None if found.unfetched_text => (snippet.clone(), BodySource::Empty, true),
             None => (String::new(), BodySource::Empty, false),
         },
+        // Only an unfetched text part: show the snippet and flag the body as incomplete.
+        (None, None) if found.unfetched_text => (snippet.clone(), BodySource::Empty, true),
         (None, None) => (String::new(), BodySource::Empty, false),
     };
 
@@ -402,6 +433,53 @@ mod tests {
             ],
         );
         assert_eq!(parse_message(&msg(Some(p))).body, "real");
+    }
+
+    #[test]
+    fn mixed_body_split_around_an_inline_part_is_joined() {
+        let mut img = leaf("1", "image/png", vec![], b"\x89PNG");
+        img.headers = vec![hdr("Content-Disposition", "inline")];
+        img.body = Some(BodyDto {
+            attachment_id: Some("img".into()),
+            size: 4,
+            data: None,
+        });
+        let p = multipart(
+            "multipart/mixed",
+            vec![
+                leaf("0", "text/plain", vec![], b"before\r\n"),
+                img,
+                leaf("2", "text/plain", vec![], b"after\r\n"),
+            ],
+        );
+        let m = parse_message(&msg(Some(p)));
+        assert_eq!(m.body, "before\n\nafter");
+        assert_eq!(m.body_source, BodySource::Plain);
+        assert!(!m.body_truncated);
+        assert_eq!(m.attachments.len(), 1);
+    }
+
+    #[test]
+    fn text_body_by_attachment_id_only_is_flagged_truncated() {
+        let mut big = leaf("0", "text/plain", vec![], b"");
+        big.body = Some(BodyDto {
+            attachment_id: Some("big".into()),
+            size: 900_000,
+            data: None,
+        });
+        let m = parse_message(&msg(Some(big.clone())));
+        assert!(m.body_truncated);
+        assert_eq!(m.body, "the & snippet");
+        assert!(m.attachments.is_empty());
+
+        let p = multipart(
+            "multipart/mixed",
+            vec![leaf("1", "text/plain", vec![], b"intro\r\n"), big],
+        );
+        let m = parse_message(&msg(Some(p)));
+        assert_eq!(m.body, "intro");
+        assert_eq!(m.body_source, BodySource::Plain);
+        assert!(m.body_truncated);
     }
 
     #[test]
