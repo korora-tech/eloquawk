@@ -190,7 +190,6 @@ fn kind_of(token: &Token) -> Kind {
 
 impl Query {
     /// Parses a query. Never fails; unknown operators become free text.
-    #[allow(dead_code)] // consumed in M3
     pub fn parse(input: &str) -> Query {
         let tokens = tokenize(input);
         let mut groups: Vec<Vec<Term>> = Vec::new();
@@ -239,7 +238,6 @@ impl Query {
     /// Matches a thread. `detail`, when loaded, lets body text, To and Cc match; `labels` are
     /// the account's labels, for `label:` by name; `now` (with its time zone) anchors
     /// `newer_than:`, `older_than:`, `after:` and `before:`.
-    #[allow(dead_code)] // consumed in M3
     pub fn matches(
         &self,
         summary: &ThreadSummary,

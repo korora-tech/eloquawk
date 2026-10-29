@@ -218,7 +218,6 @@ impl fmt::Display for ParticipantsLabel {
 /// Builds the sender label for a thread (SPEC 4.2). `me` is the account's own address and is
 /// shown as "me". With more than two participants names shorten to first names; with more
 /// than three, the first and the last two are kept.
-#[allow(dead_code)] // consumed in M3
 pub fn participants_label(
     participants: &[(Address, bool)],
     me: &str,

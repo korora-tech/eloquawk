@@ -1,0 +1,566 @@
+//! `--demo` / `ELOQUAWK_DEMO=1`: a worker thread (`eloquawk-demo`) that answers the same
+//! [`Command`]s as the Google worker from the generated mailbox in `demo_data.rs` (SPEC 11).
+//!
+//! It never touches the network, the keyring or the disk. Mutations are applied in memory
+//! after a short sleep, and any thread whose subject contains "[fail]" refuses them so the
+//! store's rollback can be seen. Twenty seconds after start one new unread INBOX thread
+//! arrives, which exercises the new-mail path.
+
+use std::cmp::Reverse;
+use std::collections::HashMap;
+use std::sync::mpsc::{self, RecvTimeoutError};
+use std::time::{Duration, Instant};
+
+use jiff::{Timestamp, Zoned};
+
+use crate::config::Prefs;
+use crate::demo_data::{self, DemoThread, PERSONAL};
+use crate::mail::query::Query;
+use crate::model::{
+    AccountId, Attachment, BodySource, LabelDelta, Message, Outgoing, ThreadKey, ThreadSummary,
+    ViewKey, ViewKind, labels,
+};
+use crate::protocol::{AuthState, Command, OpId, PageMode, SyncEvent, SyncHandle};
+
+/// How long a mutation "takes", so pending states are visible.
+const LATENCY: Duration = Duration::from_millis(150);
+/// When the simulated new mail arrives.
+const NEW_MAIL_AFTER: Duration = Duration::from_secs(20);
+
+/// Starts the demo worker with the page size from `prefs`.
+pub fn start(prefs: &Prefs) -> std::io::Result<(SyncHandle, async_channel::Receiver<SyncEvent>)> {
+    start_with(prefs, NEW_MAIL_AFTER)
+}
+
+/// [`start`] with the new-mail delay injectable for tests.
+pub fn start_with(
+    prefs: &Prefs,
+    new_mail_after: Duration,
+) -> std::io::Result<(SyncHandle, async_channel::Receiver<SyncEvent>)> {
+    let (tx, rx) = mpsc::channel();
+    let (etx, erx) = async_channel::unbounded();
+    let page_size = prefs.page_size.max(1) as usize;
+    std::thread::Builder::new()
+        .name("eloquawk-demo".into())
+        .spawn(move || Demo::new(etx, page_size).run(rx, new_mail_after))?;
+    Ok((SyncHandle::from_sender(tx), erx))
+}
+
+/// The sort key of a list row: newest first, then by id so the order is total.
+type RowKey = (Reverse<Timestamp>, String);
+
+fn row_key(s: &ThreadSummary) -> RowKey {
+    (Reverse(s.last_date), s.key.id.clone())
+}
+
+struct Demo {
+    events: async_channel::Sender<SyncEvent>,
+    page_size: usize,
+    accounts: Vec<AccountId>,
+    threads: HashMap<ThreadKey, DemoThread>,
+    /// The last row sent for each view, so `more` continues after it even when rows above it
+    /// were archived meanwhile.
+    cursors: HashMap<ViewKey, RowKey>,
+    has_more: HashMap<ViewKey, bool>,
+    want: Option<ViewKey>,
+    next_history: u64,
+    next_sent: u64,
+}
+
+impl Demo {
+    fn new(events: async_channel::Sender<SyncEvent>, page_size: usize) -> Self {
+        let mailbox = demo_data::generate(Timestamp::now());
+        let next_history = 1000 + mailbox.threads.len() as u64;
+        Self {
+            events,
+            page_size,
+            accounts: mailbox.accounts,
+            threads: mailbox
+                .threads
+                .into_iter()
+                .map(|t| (t.0.key.clone(), t))
+                .collect(),
+            cursors: HashMap::new(),
+            has_more: HashMap::new(),
+            want: None,
+            next_history,
+            next_sent: 1,
+        }
+    }
+
+    fn emit(&self, ev: SyncEvent) {
+        let _ = self.events.send_blocking(ev);
+    }
+
+    fn run(mut self, rx: mpsc::Receiver<Command>, new_mail_after: Duration) {
+        self.emit(SyncEvent::Client(Some(
+            "demo.apps.googleusercontent.com".into(),
+        )));
+        self.emit(SyncEvent::Auth(AuthState::Demo));
+        self.emit(SyncEvent::Accounts(self.accounts.clone()));
+        for account in self.accounts.clone() {
+            self.emit(SyncEvent::Labels {
+                labels: self.labels(&account),
+                account,
+            });
+        }
+        self.emit(SyncEvent::Synced(Timestamp::now()));
+        let mut new_mail_at = Some(Instant::now() + new_mail_after);
+        loop {
+            let cmd = match new_mail_at {
+                Some(at) => match rx.recv_timeout(at.saturating_duration_since(Instant::now())) {
+                    Ok(cmd) => cmd,
+                    Err(RecvTimeoutError::Timeout) => {
+                        new_mail_at = None;
+                        self.deliver_new_mail();
+                        continue;
+                    }
+                    Err(RecvTimeoutError::Disconnected) => break,
+                },
+                None => match rx.recv() {
+                    Ok(cmd) => cmd,
+                    Err(_) => break,
+                },
+            };
+            if !self.handle(cmd) {
+                break;
+            }
+        }
+    }
+
+    /// Handles one command; false stops the worker. The match is exhaustive on purpose: a new
+    /// `Command` variant must break this build until the demo answers it.
+    fn handle(&mut self, cmd: Command) -> bool {
+        match cmd {
+            Command::SaveClient { .. }
+            | Command::ClearClient
+            | Command::AddAccount
+            | Command::CancelSignIn
+            | Command::RemoveAccount(_) => {
+                self.emit(SyncEvent::Notice("Demo mode: sign-in is disabled".into()))
+            }
+            Command::Refresh => {
+                for account in self.accounts.clone() {
+                    self.emit(SyncEvent::Labels {
+                        labels: self.labels(&account),
+                        account,
+                    });
+                }
+                if let Some(view) = self.want.clone() {
+                    self.page(&view, PageMode::Refresh);
+                }
+                self.emit(SyncEvent::Synced(Timestamp::now()));
+            }
+            Command::DismissProblems => self.emit(SyncEvent::Problem(None)),
+            Command::Want { view, more } => {
+                self.want = Some(view.clone());
+                if !more {
+                    self.page(&view, PageMode::Replace);
+                } else if self.has_more.get(&view).copied().unwrap_or(false) {
+                    self.page(&view, PageMode::Append);
+                }
+            }
+            Command::OpenThread(key) => match self.threads.get(&key) {
+                Some((_, detail)) => self.emit(SyncEvent::ThreadDetail(detail.clone())),
+                None => self.emit(SyncEvent::ThreadFailed {
+                    key,
+                    error: "Conversation not found".into(),
+                }),
+            },
+            Command::Modify {
+                op,
+                account,
+                thread_ids,
+                delta,
+            } => self.mutate(op, &account, &thread_ids, |_| delta.clone()),
+            Command::Trash {
+                op,
+                account,
+                thread_ids,
+            } => self.mutate(op, &account, &thread_ids, |_| LabelDelta {
+                add: vec![labels::TRASH.into()],
+                remove: vec![labels::INBOX.into()],
+            }),
+            Command::Untrash {
+                op,
+                account,
+                thread_ids,
+                restore,
+            } => self.mutate(op, &account, &thread_ids, |_| LabelDelta {
+                add: restore.add.clone(),
+                remove: [labels::TRASH.to_string()]
+                    .into_iter()
+                    .chain(restore.remove.iter().cloned())
+                    .collect(),
+            }),
+            Command::Send { op, outgoing } => self.send(op, outgoing),
+            Command::SaveAttachment { .. } => {
+                self.emit(SyncEvent::Notice("Demo mode doesn't save files".into()))
+            }
+            Command::Shutdown => return false,
+            Command::SignInFinished(..) => {}
+        }
+        true
+    }
+
+    fn labels(&self, account: &str) -> Vec<crate::model::Label> {
+        demo_data::with_counts(
+            &demo_data::label_defs(account),
+            self.threads
+                .values()
+                .map(|t| &t.0)
+                .filter(move |s| s.key.account == account),
+        )
+    }
+
+    /// The view's rows, newest first.
+    fn rows(&self, view: &ViewKey) -> Vec<&DemoThread> {
+        let all_labels = demo_data::label_defs(&view.account);
+        let now = Zoned::now();
+        let query = match &view.kind {
+            ViewKind::Search(q) => Some(Query::parse(q)),
+            _ => None,
+        };
+        let hidden = |s: &ThreadSummary| s.in_label(labels::SPAM) || s.in_label(labels::TRASH);
+        let mut rows: Vec<&DemoThread> = self
+            .threads
+            .values()
+            .filter(|(s, d)| {
+                s.key.account == view.account
+                    && match &view.kind {
+                        ViewKind::Label(id) if id == labels::SPAM || id == labels::TRASH => {
+                            s.in_label(id)
+                        }
+                        ViewKind::Label(id) => s.in_label(id) && !hidden(s),
+                        ViewKind::AllMail => !hidden(s),
+                        ViewKind::Search(_) => query
+                            .as_ref()
+                            .is_some_and(|q| q.matches(s, Some(d), &all_labels, &now)),
+                    }
+            })
+            .collect();
+        rows.sort_by_key(|(s, _)| row_key(s));
+        rows
+    }
+
+    fn page(&mut self, view: &ViewKey, mode: PageMode) {
+        let rows = self.rows(view);
+        let start = match mode {
+            PageMode::Append => match self.cursors.get(view) {
+                Some(last) => rows
+                    .iter()
+                    .position(|(s, _)| row_key(s) > *last)
+                    .unwrap_or(rows.len()),
+                None => 0,
+            },
+            PageMode::Replace | PageMode::Refresh => 0,
+        };
+        let end = (start + self.page_size).min(rows.len());
+        let slice: Vec<ThreadSummary> = rows[start..end].iter().map(|t| t.0.clone()).collect();
+        let has_more = end < rows.len();
+        // A refresh never moves the paging cursor, except to start one.
+        if mode != PageMode::Refresh || !self.cursors.contains_key(view) {
+            if let Some(last) = slice.last() {
+                self.cursors.insert(view.clone(), row_key(last));
+            }
+            self.has_more.insert(view.clone(), has_more);
+        }
+        self.emit(SyncEvent::ThreadPage {
+            view: view.clone(),
+            ids: slice.iter().map(|s| s.key.id.clone()).collect(),
+            threads: slice,
+            mode,
+            has_more,
+        });
+    }
+
+    fn bump_history(&mut self) -> u64 {
+        self.next_history += 1;
+        self.next_history
+    }
+
+    fn mutate(
+        &mut self,
+        op: OpId,
+        account: &str,
+        thread_ids: &[String],
+        delta_for: impl Fn(&ThreadSummary) -> LabelDelta,
+    ) {
+        std::thread::sleep(LATENCY);
+        let keys: Vec<ThreadKey> = thread_ids
+            .iter()
+            .map(|id| ThreadKey::new(account, id.as_str()))
+            .collect();
+        let refusal = keys.iter().find_map(|k| match self.threads.get(k) {
+            None => Some("Conversation not found".to_string()),
+            Some((s, _)) if s.subject.contains("[fail]") => {
+                Some("the demo server refused this change".to_string())
+            }
+            Some(_) => None,
+        });
+        if let Some(error) = refusal {
+            self.emit(SyncEvent::MutationFinished {
+                op,
+                error: Some(error),
+            });
+            return;
+        }
+        let mut updated = Vec::with_capacity(keys.len());
+        for key in &keys {
+            let history = self.bump_history();
+            if let Some((summary, detail)) = self.threads.get_mut(key) {
+                let delta = delta_for(summary);
+                apply_delta(&mut detail.messages, &delta);
+                detail.label_ids = detail
+                    .messages
+                    .iter()
+                    .flat_map(|m| m.label_ids.iter().cloned())
+                    .collect();
+                *summary = demo_data::summary_of(detail, history);
+                updated.push(summary.clone());
+            }
+        }
+        self.emit(SyncEvent::MutationFinished { op, error: None });
+        self.emit(SyncEvent::ThreadsUpdated(updated));
+        self.emit(SyncEvent::LabelCounts {
+            labels: self.labels(account),
+            account: account.to_string(),
+        });
+    }
+
+    fn send(&mut self, op: OpId, out: Outgoing) {
+        std::thread::sleep(LATENCY);
+        let existing = out
+            .thread_id
+            .as_ref()
+            .map(|id| ThreadKey::new(out.account.as_str(), id.as_str()))
+            .filter(|k| self.threads.contains_key(k));
+        let key = existing.unwrap_or_else(|| {
+            let n = self.next_sent;
+            self.next_sent += 1;
+            ThreadKey::new(out.account.as_str(), format!("sent-{n}"))
+        });
+        let index = self.threads.get(&key).map_or(0, |t| t.1.messages.len());
+        let message = Message {
+            id: format!("{}-m{index}", key.id),
+            thread_id: key.id.clone(),
+            label_ids: [labels::SENT.to_string()].into(),
+            from: out.from.clone(),
+            to: out.to.clone(),
+            cc: out.cc.clone(),
+            bcc: out.bcc.clone(),
+            reply_to: vec![],
+            date: Timestamp::now(),
+            subject: out.subject.clone(),
+            message_id: Some(format!("<{}.{index}@demo.eloquawk>", key.id)),
+            in_reply_to: out.in_reply_to.clone(),
+            references: out.references.clone(),
+            snippet: demo_data::snippet_of(&out.body),
+            body: out.body.clone(),
+            body_source: BodySource::Plain,
+            body_truncated: false,
+            attachments: out
+                .attachments
+                .iter()
+                .enumerate()
+                .map(|(i, a)| Attachment {
+                    part_id: (i + 1).to_string(),
+                    attachment_id: Some(format!("demo-sent-{i}")),
+                    filename: a.filename.clone(),
+                    mime_type: a.mime_type.clone(),
+                    size: a.size,
+                })
+                .collect(),
+        };
+        let history = self.bump_history();
+        let entry = self.threads.entry(key.clone()).or_insert_with(|| {
+            let detail = crate::model::ThreadDetail {
+                key: key.clone(),
+                subject: out.subject.clone(),
+                label_ids: Default::default(),
+                messages: vec![],
+            };
+            (demo_data::summary_of(&detail, history), detail)
+        });
+        entry.1.messages.push(message);
+        entry.1.label_ids = entry
+            .1
+            .messages
+            .iter()
+            .flat_map(|m| m.label_ids.iter().cloned())
+            .collect();
+        entry.0 = demo_data::summary_of(&entry.1, history);
+        let summary = entry.0.clone();
+        self.emit(SyncEvent::SendFinished { op, error: None });
+        self.emit(SyncEvent::ThreadsUpdated(vec![summary]));
+        self.emit(SyncEvent::LabelCounts {
+            labels: self.labels(&out.account),
+            account: out.account,
+        });
+    }
+
+    fn deliver_new_mail(&mut self) {
+        let detail = demo_data::new_mail_thread(PERSONAL, Timestamp::now());
+        if self.threads.contains_key(&detail.key) {
+            return;
+        }
+        let history = self.bump_history();
+        let summary = demo_data::summary_of(&detail, history);
+        self.threads
+            .insert(detail.key.clone(), (summary.clone(), detail));
+        self.emit(SyncEvent::ThreadsUpdated(vec![summary.clone()]));
+        let inbox = ViewKey {
+            account: PERSONAL.into(),
+            kind: ViewKind::Label(labels::INBOX.into()),
+        };
+        self.page(&inbox, PageMode::Refresh);
+        self.emit(SyncEvent::NewMail {
+            account: PERSONAL.into(),
+            threads: vec![summary],
+        });
+        self.emit(SyncEvent::LabelCounts {
+            labels: self.labels(PERSONAL),
+            account: PERSONAL.into(),
+        });
+        self.emit(SyncEvent::Synced(Timestamp::now()));
+    }
+}
+
+/// Applies a thread-level delta to its messages the way Gmail does: removals clear the label
+/// from every message; STARRED and UNREAD are added to the last message only, other labels to
+/// all of them.
+fn apply_delta(messages: &mut [Message], delta: &LabelDelta) {
+    for m in messages.iter_mut() {
+        for id in &delta.remove {
+            m.label_ids.remove(id);
+        }
+    }
+    for id in &delta.add {
+        if id == labels::STARRED || id == labels::UNREAD {
+            if let Some(last) = messages.last_mut() {
+                last.label_ids.insert(id.clone());
+            }
+        } else {
+            for m in messages.iter_mut() {
+                m.label_ids.insert(id.clone());
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn recv_until(
+        rx: &async_channel::Receiver<SyncEvent>,
+        timeout: Duration,
+        mut pred: impl FnMut(&SyncEvent) -> bool,
+    ) -> Option<SyncEvent> {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            match rx.try_recv() {
+                Ok(ev) if pred(&ev) => return Some(ev),
+                Ok(_) => {}
+                Err(_) => std::thread::sleep(Duration::from_millis(5)),
+            }
+        }
+        None
+    }
+
+    fn inbox() -> ViewKey {
+        ViewKey {
+            account: PERSONAL.into(),
+            kind: ViewKind::Label(labels::INBOX.into()),
+        }
+    }
+
+    #[test]
+    fn pages_continue_after_the_last_row_sent() {
+        let prefs = Prefs {
+            page_size: 20,
+            ephemeral: true,
+            ..Prefs::default()
+        };
+        let (sync, rx) = start(&prefs).unwrap();
+        sync.send(Command::Want {
+            view: inbox(),
+            more: false,
+        });
+        let first = recv_until(&rx, Duration::from_secs(2), |e| {
+            matches!(e, SyncEvent::ThreadPage { .. })
+        });
+        let Some(SyncEvent::ThreadPage {
+            ids: first, mode, ..
+        }) = first
+        else {
+            panic!("no first page");
+        };
+        assert_eq!((first.len(), mode), (20, PageMode::Replace));
+        sync.send(Command::Want {
+            view: inbox(),
+            more: true,
+        });
+        let Some(SyncEvent::ThreadPage {
+            ids: second, mode, ..
+        }) = recv_until(&rx, Duration::from_secs(2), |e| {
+            matches!(e, SyncEvent::ThreadPage { .. })
+        })
+        else {
+            panic!("no second page");
+        };
+        assert_eq!(mode, PageMode::Append);
+        assert!(second.iter().all(|id| !first.contains(id)));
+        sync.send(Command::Shutdown);
+    }
+
+    #[test]
+    fn new_mail_arrives_after_the_delay() {
+        let prefs = Prefs {
+            ephemeral: true,
+            ..Prefs::default()
+        };
+        let (sync, rx) = start_with(&prefs, Duration::from_millis(50)).unwrap();
+        let ev = recv_until(&rx, Duration::from_secs(3), |e| {
+            matches!(e, SyncEvent::NewMail { .. })
+        });
+        let Some(SyncEvent::NewMail { account, threads }) = ev else {
+            panic!("no new mail");
+        };
+        assert_eq!(account, PERSONAL);
+        assert!(threads[0].unread() && threads[0].in_label(labels::INBOX));
+        sync.send(Command::Shutdown);
+    }
+
+    #[test]
+    fn account_commands_are_refused_with_a_notice() {
+        let prefs = Prefs::default();
+        let (sync, rx) = start(&prefs).unwrap();
+        sync.send(Command::AddAccount);
+        let ev = recv_until(&rx, Duration::from_secs(2), |e| {
+            matches!(e, SyncEvent::Notice(_))
+        });
+        assert!(matches!(ev, Some(SyncEvent::Notice(n)) if n == "Demo mode: sign-in is disabled"));
+        sync.send(Command::Shutdown);
+    }
+
+    #[test]
+    fn stars_land_on_the_last_message_and_removals_clear_all() {
+        let detail = demo_data::generate(Timestamp::now())
+            .threads
+            .into_iter()
+            .find(|t| t.1.messages.len() > 2)
+            .unwrap()
+            .1;
+        let mut messages = detail.messages;
+        apply_delta(&mut messages, &LabelDelta::star());
+        assert!(messages.last().unwrap().label_ids.contains(labels::STARRED));
+        assert!(!messages[0].label_ids.contains(labels::STARRED));
+        apply_delta(&mut messages, &LabelDelta::unstar());
+        assert!(
+            messages
+                .iter()
+                .all(|m| !m.label_ids.contains(labels::STARRED))
+        );
+    }
+}

@@ -20,14 +20,12 @@ pub mod labels {
     pub const STARRED: &str = "STARRED";
     pub const IMPORTANT: &str = "IMPORTANT";
     pub const SENT: &str = "SENT";
-    #[allow(dead_code)] // consumed in M3
     pub const DRAFT: &str = "DRAFT";
     pub const SPAM: &str = "SPAM";
     pub const TRASH: &str = "TRASH";
 }
 
 /// A thread, identified by its account and Gmail thread id.
-#[allow(dead_code)] // consumed in M3
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ThreadKey {
     pub account: AccountId,
@@ -35,7 +33,6 @@ pub struct ThreadKey {
 }
 
 impl ThreadKey {
-    #[allow(dead_code)] // consumed in M3
     pub fn new(account: impl Into<AccountId>, id: impl Into<String>) -> Self {
         Self {
             account: account.into(),
@@ -51,29 +48,26 @@ impl fmt::Display for ThreadKey {
 }
 
 /// What a thread list shows.
-#[allow(dead_code)] // consumed in M3
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum ViewKind {
     Label(String),
     AllMail,
+    #[allow(dead_code)] // consumed in M7
     Search(String),
 }
 
-#[allow(dead_code)] // consumed in M3
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ViewKey {
     pub account: AccountId,
     pub kind: ViewKind,
 }
 
-#[allow(dead_code)] // consumed in M3
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LabelKind {
     System,
     User,
 }
 
-#[allow(dead_code)] // consumed in M3
 #[derive(Clone, Debug, PartialEq)]
 pub struct Label {
     pub account: AccountId,
@@ -89,7 +83,6 @@ pub struct Label {
     pub hidden: bool,
 }
 
-#[allow(dead_code)] // consumed in M3
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Address {
     pub name: Option<String>,
@@ -97,7 +90,6 @@ pub struct Address {
 }
 
 impl Address {
-    #[allow(dead_code)] // consumed in M3
     pub fn new(name: Option<&str>, email: &str) -> Self {
         Self {
             name: name.map(str::to_string),
@@ -106,7 +98,6 @@ impl Address {
     }
 }
 
-#[allow(dead_code)] // consumed in M3
 #[derive(Clone, Debug, PartialEq)]
 pub struct ThreadSummary {
     pub key: ThreadKey,
@@ -124,7 +115,6 @@ pub struct ThreadSummary {
     pub has_attachments: bool,
 }
 
-#[allow(dead_code)] // consumed in M3
 impl ThreadSummary {
     pub fn unread(&self) -> bool {
         self.in_label(labels::UNREAD)
@@ -157,7 +147,6 @@ pub enum BodySource {
     Empty,
 }
 
-#[allow(dead_code)] // consumed in M3
 #[derive(Clone, PartialEq)]
 pub struct Message {
     pub id: String,
@@ -193,7 +182,6 @@ impl fmt::Debug for Message {
     }
 }
 
-#[allow(dead_code)] // consumed in M3
 #[derive(Clone, PartialEq)]
 pub struct ThreadDetail {
     pub key: ThreadKey,
@@ -213,14 +201,12 @@ impl fmt::Debug for ThreadDetail {
 }
 
 /// Labels to add and remove in one mutation.
-#[allow(dead_code)] // consumed in M3
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LabelDelta {
     pub add: Vec<String>,
     pub remove: Vec<String>,
 }
 
-#[allow(dead_code)] // consumed in M3
 impl LabelDelta {
     fn of(add: &[&str], remove: &[&str]) -> Self {
         Self {
@@ -265,6 +251,7 @@ impl LabelDelta {
         }
     }
 
+    #[allow(dead_code)] // consumed in M11
     pub fn is_empty(&self) -> bool {
         self.add.is_empty() && self.remove.is_empty()
     }

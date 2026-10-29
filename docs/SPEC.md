@@ -325,6 +325,9 @@ pub struct Prefs {
 ```
 
 Every settings or store handler that changes a pref calls `save` only when `!ephemeral`.
+`save_to` itself returns early when `ephemeral`, so a forgotten check cannot write.
+**M3 note:** All Mail is not a label, so `last_view` stores it as the sentinel id
+`ALL_MAIL`; search views are not remembered.
 
 ---
 
@@ -370,7 +373,7 @@ pub enum SyncEvent {
     Problem(Option<String>), Notice(String),
     Labels { account: AccountId, labels: Vec<Label> },      // full list: replaces the account's labels
     LabelCounts { account: AccountId, labels: Vec<Label> }, // count refresh: upserts by label id
-    ThreadPage { view: ViewKey, threads: Vec<ThreadSummary>, mode: PageMode, has_more: bool },
+    ThreadPage { view: ViewKey, ids: Vec<String>, threads: Vec<ThreadSummary>, mode: PageMode, has_more: bool },
     /// Fresh summaries for threads anywhere (history sync, post-mutation). Upsert only.
     ThreadsUpdated(Vec<ThreadSummary>),
     ThreadsGone { account: AccountId, ids: Vec<String> },
@@ -387,6 +390,14 @@ pub struct SendError { pub message: String, pub maybe_sent: bool }
 ```
 
 The demo emits both `Labels` (at start and on Refresh) and `LabelCounts` (after mutations).
+
+**M3 notes:**
+- `ThreadPage` carries `ids`, the page in list order, next to `threads`, the summaries the
+  worker already has. Without it a page could not name the ids that 7.3 shows as skeleton
+  rows. The store dedupes `ids` and drops any id a pending mutation took out of that view.
+- `SignInFinished` carries only the sequence number until `google/oauth.rs` exists; M9 adds
+  the `Result<TokenResponse, AuthError>` payload.
+- `Send` holds `Outgoing` by value as written; clippy's `large_enum_variant` did not fire.
 
 Rules:
 - The demo worker must handle every `Command` with an exhaustive `match`, so adding a variant
@@ -1185,7 +1196,9 @@ percent-decoding and the RFC 6068 rules, with a strict whitelist:
 - **Generated mailbox** (`demo_data.rs`), seeded and deterministic, relative to `Timestamp::now()`:
   - **Accounts:** `you@example.com` (about 120 threads) and `you@work.example` (about 40).
   - **Labels:** INBOX, STARRED, IMPORTANT, SENT, DRAFT, SPAM, TRASH, and the user labels
-    "Receipts", "Travel", "Projects/Eloquawk" and "Projects/Website" with colours.
+    "Receipts", "Travel", "Projects/Eloquawk" and "Projects/Website" with colours. **M3:** a
+    "Projects" parent label is included too, because `labels_for` nests a label only under an
+    ancestor that exists (without one it shows the full name at depth 0).
   - **Content:**
     - A variety of threads of 1 to 6 messages.
     - Some unread and some starred.
