@@ -202,12 +202,7 @@ fn run_step(step: &Step, store: &Entity<Store>, cx: &mut App) {
         },
         Step::Type(text) => {
             for ch in text.chars() {
-                let ks = Keystroke {
-                    modifiers: Default::default(),
-                    key: ch.to_lowercase().to_string(),
-                    key_char: Some(ch.to_string()),
-                };
-                send_key(target, ks, cx);
+                send_key(target, typed_keystroke(ch), cx);
             }
         }
         Step::Keys(keys) => {
@@ -227,5 +222,47 @@ fn run_step(step: &Step, store: &Entity<Store>, cx: &mut App) {
             }
         }
         Step::Unknown(s) => report(format!("ELOQUAWK_EXPECT fail step {s}")),
+    }
+}
+
+/// The keystroke a `type:` step sends for one character, shaped like a real key press so it
+/// matches bindings the same way: a space is the `space` key and a capital letter is its
+/// lowercase key with shift held. The text itself always arrives through `key_char`.
+fn typed_keystroke(ch: char) -> Keystroke {
+    let mut modifiers = gpui::Modifiers::default();
+    let key = match ch {
+        ' ' => "space".to_string(),
+        c if c.is_uppercase() => {
+            modifiers.shift = true;
+            c.to_lowercase().to_string()
+        }
+        c => c.to_string(),
+    };
+    Keystroke {
+        modifiers,
+        key,
+        key_char: Some(ch.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn typed_keystrokes_look_like_key_presses() {
+        let space = typed_keystroke(' ');
+        assert_eq!(space.key, "space");
+        assert!(!space.modifiers.shift);
+        assert_eq!(space.key_char.as_deref(), Some(" "));
+
+        let capital = typed_keystroke('Q');
+        assert_eq!(capital.key, "q");
+        assert!(capital.modifiers.shift);
+        assert_eq!(capital.key_char.as_deref(), Some("Q"));
+
+        let plain = typed_keystroke(',');
+        assert_eq!(plain.key, ",");
+        assert!(!plain.modifiers.shift);
     }
 }
