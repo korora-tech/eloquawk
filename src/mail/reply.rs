@@ -52,7 +52,8 @@ fn dedupe(
 
 /// `Re: ` unless the subject already starts with `re:` (any case, after trimming).
 pub fn reply_subject(subject: &str) -> String {
-    let s = subject.trim();
+    let s = super::one_line(subject);
+    let s = s.trim();
     if s.get(..3).is_some_and(|p| p.eq_ignore_ascii_case("re:")) {
         s.to_string()
     } else {
@@ -62,7 +63,8 @@ pub fn reply_subject(subject: &str) -> String {
 
 /// `Fwd: ` unless the subject already starts with `fwd:` or `fw:`.
 pub fn forward_subject(subject: &str) -> String {
-    let s = subject.trim();
+    let s = super::one_line(subject);
+    let s = s.trim();
     let starts = |p: &str| s.get(..p.len()).is_some_and(|h| h.eq_ignore_ascii_case(p));
     if starts("fwd:") || starts("fw:") {
         s.to_string()
@@ -354,6 +356,9 @@ mod tests {
         assert_eq!(forward_subject("FWD: Lunch"), "FWD: Lunch");
         assert_eq!(forward_subject("Fw: Lunch"), "Fw: Lunch");
         assert_eq!(forward_subject("Re: Lunch"), "Fwd: Re: Lunch");
+        // A decoded header can carry line breaks; the subject stays on one line.
+        assert_eq!(reply_subject("Lunch\r\non Friday"), "Re: Lunch  on Friday");
+        assert_eq!(forward_subject("Lunch\nplans"), "Fwd: Lunch plans");
         // Non-ASCII first characters do not split a char.
         assert_eq!(reply_subject("Ré"), "Re: Ré");
     }

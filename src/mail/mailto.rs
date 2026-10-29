@@ -65,7 +65,7 @@ pub fn parse(url: &str, account: &AccountId, from: Address) -> Option<Outgoing> 
             "to" => out.to.extend(parse_list(&value)),
             "cc" => out.cc.extend(parse_list(&value)),
             "bcc" => out.bcc.extend(parse_list(&value)),
-            "subject" => out.subject = value,
+            "subject" => out.subject = super::one_line(&value),
             "body" => out.body = value.replace("\r\n", "\n"),
             // attach, attachment, from, in-reply-to, references and anything unknown.
             _ => {}
@@ -103,6 +103,14 @@ mod tests {
         assert_eq!(out.body, "Are you free?");
         assert_eq!(out.account, "you@example.com");
         assert_eq!(out.from, me());
+    }
+
+    #[test]
+    fn subject_line_breaks_become_spaces() {
+        let out = go("mailto:a@example.com?subject=x%0Ay%0D%0Az&body=one%0D%0Atwo");
+        assert_eq!(out.subject, "x y  z");
+        // The body keeps its line breaks.
+        assert_eq!(out.body, "one\ntwo");
     }
 
     #[test]

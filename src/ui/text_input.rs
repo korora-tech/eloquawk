@@ -103,7 +103,13 @@ impl TextInput {
     }
 
     pub fn set_text(&mut self, text: impl Into<SharedString>, cx: &mut Context<Self>) {
-        self.content = text.into();
+        // One line only, like typed text: gpui's `shape_line` asserts there is no newline.
+        let text: SharedString = text.into();
+        self.content = if text.contains(['\n', '\r']) {
+            crate::mail::one_line(&text).into()
+        } else {
+            text
+        };
         let end = self.content.len();
         self.selected_range = end..end;
         self.selection_reversed = false;
