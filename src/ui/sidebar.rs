@@ -43,8 +43,18 @@ impl MainView {
             .bg(rgb(p.sidebar))
             .border_r_1()
             .border_color(rgb(p.border))
-            // Compose arrives in M8.
-            .child(button(p, "compose", "Compose", ButtonStyle::Primary, None).h(px(34.0)))
+            .child(
+                button(
+                    p,
+                    "compose",
+                    "Compose",
+                    ButtonStyle::Primary,
+                    Some(Box::new(cx.listener(
+                        |this, _: &gpui::ClickEvent, _, cx| this.compose_new(cx),
+                    ))),
+                )
+                .h(px(34.0)),
+            )
             .child(accounts)
             .child(self.account_box(p, store))
     }

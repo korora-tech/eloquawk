@@ -1,6 +1,5 @@
-//! Wrapped, selectable text: the shared core under `BodyText` (and the compose `TextArea`
-//! from M8). gpui at the pinned rev has no selectable static text, so this lays the text out
-//! itself.
+//! Wrapped, selectable text: the shared core under `BodyText` and the compose `TextArea`.
+//! gpui at the pinned rev has no selectable static text, so this lays the text out itself.
 //!
 //! [`SelectableText`] is an element that measures with `window.request_measured_layout`, whose
 //! closure calls `shape_text(text, font_size, runs, Some(width), None)`, so the height follows
@@ -100,9 +99,7 @@ pub fn segments(len: usize, links: &[Range<usize>]) -> Vec<(Range<usize>, bool)>
 #[derive(Clone, PartialEq)]
 struct Signature {
     text: SharedString,
-    links: Vec<Range<usize>>,
-    color: Hsla,
-    link: Hsla,
+    runs: Vec<TextRun>,
     font_size: Pixels,
     line_height: Pixels,
 }
@@ -161,6 +158,157 @@ impl TextLayout {
             .signature
             .as_ref()
             .map_or(0, |s| s.text.len())
+    }
+
+    /// Records what the next [`TextLayout::shape`] shapes; a change drops the cached lines.
+    pub fn set_signature(
+        &self,
+        text: SharedString,
+        runs: Vec<TextRun>,
+        font_size: Pixels,
+        line_height: Pixels,
+    ) {
+        let signature = Signature {
+            text,
+            runs,
+            font_size,
+            line_height,
+        };
+        let mut state = self.0.borrow_mut();
+        if state.signature.as_ref() != Some(&signature) {
+            state.signature = Some(signature);
+            state.shaped = None;
+        }
+        state.line_height = line_height;
+    }
+
+    /// Shapes the text set by [`TextLayout::set_signature`] at `wrap_width`, reusing the last
+    /// shaping when nothing changed, and returns its size.
+    pub fn shape(
+        &self,
+        text: SharedString,
+        runs: &[TextRun],
+        wrap_width: Option<Pixels>,
+        window: &Window,
+    ) -> Size<Pixels> {
+        let (font_size, line_height) = {
+            let state = self.0.borrow();
+            if let Some(shaped) = state.shaped.as_ref()
+                && shaped.wrap_width == wrap_width
+            {
+                return shaped.size;
+            }
+            match state.signature.as_ref() {
+                Some(s) => (s.font_size, s.line_height),
+                None => return Size::default(),
+            }
+        };
+        let lines: Vec<WrappedLine> = match window
+            .text_system()
+            .shape_text(text, font_size, runs, wrap_width, None)
+        {
+            Ok(lines) => lines.into_iter().collect(),
+            Err(e) => {
+                eprintln!("eloquawk: could not shape text: {e}");
+                Vec::new()
+            }
+        };
+        let mut measured: Size<Pixels> = Size::default();
+        for line in &lines {
+            let s = line.size(line_height);
+            measured.height += s.height;
+            measured.width = measured.width.max(s.width).ceil();
+        }
+        // Even empty text is one line tall, so a caret has somewhere to go.
+        measured.height = measured.height.max(line_height);
+        self.0.borrow_mut().shaped = Some(Shaped {
+            lines,
+            wrap_width,
+            size: measured,
+        });
+        measured
+    }
+
+    /// Where the text sits in the window, for hit-testing and painting.
+    pub fn set_bounds(&self, bounds: Bounds<Pixels>) {
+        self.0.borrow_mut().bounds = Some(bounds);
+    }
+
+    pub fn line_height(&self) -> Pixels {
+        self.0.borrow().line_height
+    }
+
+    /// Paints the shaped lines from `origin`, skipping lines outside the content mask (long
+    /// bodies have thousands).
+    pub fn paint(
+        &self,
+        origin: Point<Pixels>,
+        align_to: Option<Bounds<Pixels>>,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let mask = window.content_mask().bounds;
+        let state = self.0.borrow();
+        let Some(shaped) = state.shaped.as_ref() else {
+            return;
+        };
+        let lh = state.line_height;
+        let width = align_to.map_or(shaped.size.width, |b| b.size.width);
+        let mut origin = origin;
+        for line in &shaped.lines {
+            let height = line.size(lh).height;
+            let band = Bounds::new(origin, size(width, height));
+            if mask.intersects(&band)
+                && let Err(e) = line.paint(origin, lh, gpui::TextAlign::Left, align_to, window, cx)
+            {
+                eprintln!("eloquawk: could not paint text: {e}");
+            }
+            origin.y += height;
+        }
+    }
+
+    /// The caret position (top left, window coordinates) for byte offset `ix`. An offset at a
+    /// wrap boundary sits at the start of the next visual line.
+    pub fn position_for_index(&self, ix: usize) -> Option<Point<Pixels>> {
+        let bounds = self.bounds()?;
+        let hit = self.for_each_line(|at, lh| {
+            let len = at.line.len();
+            if ix < at.start || ix > at.start + len {
+                return None;
+            }
+            let layout = &at.line.unwrapped_layout;
+            let offsets = boundary_offsets(at.line.wrap_boundaries(), |r, g| {
+                layout.runs.get(r)?.glyphs.get(g).map(|g| g.index)
+            });
+            let local = ix - at.start;
+            let vi = offsets.iter().filter(|&&o| o <= local && o > 0).count();
+            let vstart = if vi == 0 { 0 } else { offsets[vi - 1].min(len) };
+            let x = layout.x_for_index(local) - layout.x_for_index(vstart);
+            Some(point(bounds.left() + x, at.top + lh * vi as f32))
+        });
+        Some(hit.unwrap_or(bounds.origin))
+    }
+
+    /// The byte offsets (in the whole text) where soft wraps start a new visual line.
+    pub fn wrap_offsets(&self) -> Vec<usize> {
+        let state = self.0.borrow();
+        let Some(shaped) = state.shaped.as_ref() else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        let mut start = 0;
+        for line in &shaped.lines {
+            let layout = &line.unwrapped_layout;
+            for o in boundary_offsets(line.wrap_boundaries(), |r, g| {
+                layout.runs.get(r)?.glyphs.get(g).map(|g| g.index)
+            }) {
+                if o > 0 && o <= line.len() {
+                    out.push(start + o);
+                }
+            }
+            start += line.len() + 1;
+        }
+        out
     }
 
     /// The byte offset nearest to a window position, clamped into the text: above it is 0 and
@@ -311,22 +459,6 @@ impl gpui::Element for SelectableText {
         let style = window.text_style();
         let font_size = style.font_size.to_pixels(window.rem_size());
         let line_height = window.line_height();
-        let signature = Signature {
-            text: self.text.clone(),
-            links: self.links.clone(),
-            color: style.color,
-            link: self.link_color,
-            font_size,
-            line_height,
-        };
-        {
-            let mut state = self.layout.0.borrow_mut();
-            if state.signature.as_ref() != Some(&signature) {
-                state.signature = Some(signature);
-                state.shaped = None;
-            }
-            state.line_height = line_height;
-        }
         let base = style.to_run(0);
         let link_color = self.link_color;
         let runs: Vec<TextRun> = segments(self.text.len(), &self.links)
@@ -342,44 +474,17 @@ impl gpui::Element for SelectableText {
                 ..base.clone()
             })
             .collect();
+        self.layout
+            .set_signature(self.text.clone(), runs.clone(), font_size, line_height);
         let text = self.text.clone();
-        let state = self.layout.0.clone();
+        let layout = self.layout.clone();
         let layout_id =
             window.request_measured_layout(Style::default(), move |known, available, window, _| {
                 let wrap_width = known.width.or(match available.width {
                     AvailableSpace::Definite(w) => Some(w),
                     _ => None,
                 });
-                if let Some(shaped) = state.borrow().shaped.as_ref()
-                    && shaped.wrap_width == wrap_width
-                {
-                    return shaped.size;
-                }
-                let lines: Vec<WrappedLine> = match window.text_system().shape_text(
-                    text.clone(),
-                    font_size,
-                    &runs,
-                    wrap_width,
-                    None,
-                ) {
-                    Ok(lines) => lines.into_iter().collect(),
-                    Err(e) => {
-                        eprintln!("eloquawk: could not shape message text: {e}");
-                        Vec::new()
-                    }
-                };
-                let mut measured: Size<Pixels> = Size::default();
-                for line in &lines {
-                    let s = line.size(line_height);
-                    measured.height += s.height;
-                    measured.width = measured.width.max(s.width).ceil();
-                }
-                state.borrow_mut().shaped = Some(Shaped {
-                    lines,
-                    wrap_width,
-                    size: measured,
-                });
-                measured
+                layout.shape(text.clone(), &runs, wrap_width, window)
             });
         (layout_id, ())
     }
@@ -426,26 +531,7 @@ impl gpui::Element for SelectableText {
                 window.paint_quad(fill(*rect, self.selection_color));
             }
         }
-        {
-            let state = self.layout.0.borrow();
-            if let Some(shaped) = state.shaped.as_ref() {
-                let lh = state.line_height;
-                let mut origin = bounds.origin;
-                for line in &shaped.lines {
-                    let height = line.size(lh).height;
-                    // Only the lines inside the scroll viewport are painted; long bodies have
-                    // thousands.
-                    let band = Bounds::new(origin, size(bounds.size.width, height));
-                    if mask.intersects(&band)
-                        && let Err(e) =
-                            line.paint(origin, lh, gpui::TextAlign::Left, Some(bounds), window, cx)
-                    {
-                        eprintln!("eloquawk: could not paint message text: {e}");
-                    }
-                    origin.y += height;
-                }
-            }
-        }
+        self.layout.paint(bounds.origin, Some(bounds), window, cx);
         if let Some(listener) = self.on_mouse_move.take() {
             window.on_mouse_event(move |ev: &MouseMoveEvent, phase, window, cx| {
                 if phase == DispatchPhase::Bubble {

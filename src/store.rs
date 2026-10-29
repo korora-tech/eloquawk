@@ -267,6 +267,8 @@ pub struct Store {
     pending: BTreeMap<OpId, Pending>,
     undo: Option<(OpId, UndoAction)>,
     sends: HashMap<OpId, SendState>,
+    /// The thread each reply or forward went into.
+    send_threads: HashMap<OpId, ThreadKey>,
     next_op: OpId,
     new_mail: Vec<ThreadSummary>,
 }
@@ -392,6 +394,7 @@ impl Store {
             pending: BTreeMap::new(),
             undo: None,
             sends: HashMap::new(),
+            send_threads: HashMap::new(),
             next_op: 1,
             new_mail: Vec::new(),
         }
@@ -580,7 +583,6 @@ impl Store {
             .any(|p| p.threads.iter().any(|s| s.key == *key))
     }
 
-    #[allow(dead_code)] // consumed in M8
     pub fn send_state(&self, op: OpId) -> Option<&SendState> {
         self.sends.get(&op)
     }
@@ -1213,11 +1215,15 @@ impl Store {
         true
     }
 
-    /// Sends a message; the outcome arrives as `SendFinished`.
-    #[allow(dead_code)] // consumed in M8
+    /// Sends a message; the outcome arrives as `SendFinished`. A reply's thread is
+    /// remembered so its detail is fetched again once the message is in it.
     pub fn send(&mut self, outgoing: Outgoing) -> OpId {
         let op = self.alloc_op();
         self.sends.insert(op, SendState::Sending);
+        if let Some(id) = &outgoing.thread_id {
+            self.send_threads
+                .insert(op, ThreadKey::new(outgoing.account.as_str(), id.as_str()));
+        }
         self.send_command(Command::Send { op, outgoing });
         op
     }
@@ -1560,15 +1566,25 @@ impl Store {
                 self.details.insert(key, DetailState::Failed(error));
             }
             SyncEvent::MutationFinished { op, error } => self.on_mutation_finished(op, error),
-            SyncEvent::SendFinished { op, error } => match error {
-                None => {
-                    self.sends.insert(op, SendState::Sent);
-                    self.post_notice("Message sent".into(), None);
+            SyncEvent::SendFinished { op, error } => {
+                let thread = self.send_threads.remove(&op);
+                match error {
+                    None => {
+                        self.sends.insert(op, SendState::Sent);
+                        self.post_notice("Message sent".into(), None);
+                        // The cached detail lacks the new message: fetch it again, keeping
+                        // the old one on screen until the new one arrives.
+                        if let Some(key) = thread
+                            && self.details.contains_key(&key)
+                        {
+                            self.send_command(Command::OpenThread(key));
+                        }
+                    }
+                    Some(e) => {
+                        self.sends.insert(op, SendState::Failed(e));
+                    }
                 }
-                Some(e) => {
-                    self.sends.insert(op, SendState::Failed(e));
-                }
-            },
+            }
             SyncEvent::NewMail { threads, .. } => {
                 if self.prefs.notifications {
                     self.new_mail.extend(threads);
@@ -2830,6 +2846,39 @@ mod tests {
                 t.key
             );
         }
+
+        // Sending a reply appends to the thread, and the open detail is fetched again.
+        let detail = match s.details.get(&first) {
+            Some(DetailState::Loaded(d)) => d.clone(),
+            other => panic!("no detail for the first thread: {other:?}"),
+        };
+        let before = detail.messages.len();
+        let replied_to = crate::mail::reply::target(&detail).and_then(|m| m.message_id.clone());
+        let out = crate::mail::reply::prefill(
+            &detail,
+            crate::model::ComposeKind::Reply,
+            &Address::new(None, ME),
+            &|_| "today".into(),
+        )
+        .unwrap();
+        let op = s.send(out);
+        assert_eq!(s.send_state(op), Some(&SendState::Sending));
+        assert!(pump(&mut s, &events, Duration::from_secs(2), |s, _| {
+            s.send_state(op) == Some(&SendState::Sent)
+        }));
+        assert_eq!(s.notice.as_ref().unwrap().text, "Message sent");
+        assert!(pump(&mut s, &events, Duration::from_secs(2), |s, _| {
+            matches!(s.details.get(&first), Some(DetailState::Loaded(d)) if d.messages.len() == before + 1)
+        }));
+        assert_eq!(s.threads[&first].message_count as usize, before + 1);
+        let Some(DetailState::Loaded(d)) = s.details.get(&first) else {
+            unreachable!()
+        };
+        let sent = d.messages.last().unwrap();
+        assert!(sent.label_ids.contains(labels::SENT));
+        assert_eq!(sent.in_reply_to, replied_to);
+        assert!(sent.body.contains("wrote:"));
+        assert!(s.threads[&first].in_label(labels::SENT));
         sync.send(Command::Shutdown);
     }
 }

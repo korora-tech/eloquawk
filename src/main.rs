@@ -22,7 +22,7 @@ use std::time::Duration;
 use gpui::{AnyWindowHandle, App, AppContext, Entity, Keystroke, QuitMode};
 use gpui_platform::application;
 
-use demo_script::Step;
+use demo_script::{Cond, FocusTarget, Step};
 use protocol::{Command, SyncEvent, SyncHandle};
 use store::{Mode, Store};
 use ui::theme::{self, ThemeOverride};
@@ -180,7 +180,11 @@ fn run_step(step: &Step, store: &Entity<Store>, cx: &mut App) {
                 .update(cx, |_, window, _| window.window_title())
                 .unwrap_or_default();
             let main_any: AnyWindowHandle = main.into();
-            let title = if title.is_empty() && target == main_any {
+            let title = if !title.is_empty() {
+                title
+            } else if let Some(view) = ui::compose::compose_view(target, cx) {
+                view.read(cx).title().to_string()
+            } else if target == main_any {
                 ui::windows::MAIN_TITLE.to_string()
             } else {
                 title
@@ -232,8 +236,34 @@ fn run_step(step: &Step, store: &Entity<Store>, cx: &mut App) {
                 }
             }
         }
+        Step::Attach(path) => match ui::compose::compose_view(target, cx) {
+            Some(view) => view.update(cx, |v, cx| {
+                v.attach_paths(vec![std::path::PathBuf::from(path)], cx)
+            }),
+            None => report(format!(
+                "ELOQUAWK_EXPECT fail step attach:{path} (no compose window)"
+            )),
+        },
         Step::Expect { raw, cond } => {
-            let result = main.update(cx, |view, window, cx| view.check(cond, window, cx));
+            // A focused compose window answers the focus and its own conditions; the main
+            // window answers the rest.
+            let from_compose = ui::compose::compose_view(target, cx).and_then(|view| {
+                target
+                    .update(cx, |_, window, cx| match cond {
+                        Cond::Focus(want) => Some(if *want == FocusTarget::Compose {
+                            Ok(())
+                        } else {
+                            Err("compose".to_string())
+                        }),
+                        _ => view.read(cx).check(cond, window, cx),
+                    })
+                    .ok()
+                    .flatten()
+            });
+            let result = match from_compose {
+                Some(r) => Ok(r),
+                None => main.update(cx, |view, window, cx| view.check(cond, window, cx)),
+            };
             match result {
                 Ok(Ok(())) => report(format!("ELOQUAWK_EXPECT ok {raw}")),
                 Ok(Err(actual)) => report(format!("ELOQUAWK_EXPECT fail {raw} (actual {actual})")),

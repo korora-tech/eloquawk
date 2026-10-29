@@ -357,12 +357,10 @@ impl ReaderView {
                     return;
                 };
                 let from = Address::new(None, &account);
-                if mailto::parse(url, &account, from).is_some() {
-                    // The composer arrives in M8, which opens the prefill here.
-                    self.store.update(cx, |s, cx| {
-                        s.inform("Writing mail is not available yet");
-                        cx.notify();
-                    });
+                if let Some(prefill) = mailto::parse(url, &account, from) {
+                    // Only ever a prefill: the user reviews and sends it.
+                    let store = self.store.clone();
+                    cx.defer(move |cx| super::windows::open_compose_window(&store, prefill, cx));
                 } else {
                     eprintln!("eloquawk: ignored a link that is not a mailto URL");
                 }
@@ -582,10 +580,28 @@ impl ReaderView {
                     }
                 })),
             ))
-            // Reply, Reply all and Forward arrive in M8.
-            .child(tool("reply", "Reply", None))
-            .child(tool("reply-all", "Reply all", None))
-            .child(tool("forward", "Forward", None))
+            // The main view answers the open thread, which is the one shown here.
+            .child(tool(
+                "reply",
+                "Reply",
+                Some(self.click(cx, |_, window, cx| {
+                    window.dispatch_action(Box::new(super::Reply), cx)
+                })),
+            ))
+            .child(tool(
+                "reply-all",
+                "Reply all",
+                Some(self.click(cx, |_, window, cx| {
+                    window.dispatch_action(Box::new(super::ReplyAll), cx)
+                })),
+            ))
+            .child(tool(
+                "forward",
+                "Forward",
+                Some(self.click(cx, |_, window, cx| {
+                    window.dispatch_action(Box::new(super::Forward), cx)
+                })),
+            ))
             .child(div().flex_1())
             // A change to this thread is waiting for the worker.
             .when(self.last.pending, |d| d.child(caption(p, "Saving…")))

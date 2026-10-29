@@ -2,7 +2,8 @@
 //! the sidebar, thread list and reader panes (or an auth card), the toast, the shortcut
 //! overlay and the label picker. It owns the Mail key context and handles every Mail action
 //! of SPEC 9 (keys whose feature lands later post "Not available yet"), runs searches from the
-//! header's `Search` context, and answers the demo script's `expect:` checks.
+//! header's `Search` context, opens compose windows (new, reply, reply-all, forward), and
+//! answers the demo script's `expect:` checks.
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -16,6 +17,7 @@ use gpui::{
 };
 
 use super::auth::Screen;
+use super::compose;
 use super::label_picker::{LabelPicker, PickerEvent};
 use super::reader::{ReaderEvent, ReaderView};
 use super::text_input::{Submit, TextInput};
@@ -29,9 +31,9 @@ use super::{
     ScrollReaderUp, ToggleHelp, ToggleSelect, ToggleStar, Trash, Undo,
 };
 use crate::demo_script::{Cond, FocusTarget};
-use crate::model::{LabelDelta, ThreadKey, ViewKind, labels};
+use crate::model::{ComposeKind, LabelDelta, ThreadKey, ViewKind, labels};
 use crate::protocol::Command;
-use crate::store::{MutationKind, NoticeAction, Row, Store};
+use crate::store::{DetailState, MutationKind, NoticeAction, Row, Store};
 
 /// The notice for keys whose feature lands in a later milestone.
 pub const NOT_YET: &str = "Not available yet";
@@ -65,6 +67,8 @@ pub struct MainView {
     /// The search query the field was last filled from, so a change of view refills or
     /// clears it once instead of overwriting what the user types.
     shown_search: Option<String>,
+    /// A reply or forward waiting for its thread's detail to load.
+    pending_compose: Option<(ThreadKey, ComposeKind)>,
     /// The notice the toast timer is running for, and the timer (one, never per frame).
     toast_for: Option<Instant>,
     _toast_timer: Option<Task<()>>,
@@ -79,6 +83,7 @@ impl MainView {
             cx.observe(&store, |this, store, cx| {
                 this.schedule_toast_expiry(&store, cx);
                 this.sync_search_field(&store, cx);
+                this.fulfil_pending_compose(cx);
                 cx.notify();
             }),
             cx.subscribe_in(&reader, window, |this, _, event, window, cx| match event {
@@ -102,6 +107,7 @@ impl MainView {
             picker: None,
             reader_bounds: Rc::new(Cell::new(None)),
             shown_search: None,
+            pending_compose: None,
             toast_for: None,
             _toast_timer: None,
             _subscriptions: subscriptions,
@@ -442,8 +448,89 @@ impl MainView {
         self.go(kind, window, cx);
     }
 
-    /// Keys bound from M6 whose feature lands later (`c`, `r`, `a`, `f`, ctrl-n, ctrl-,): the
-    /// owning milestone replaces the handler.
+    // ----- compose -------------------------------------------------------------------------
+
+    /// `c`, ctrl-n and the sidebar's Compose: a new message from the current account.
+    pub(super) fn compose_new(&mut self, cx: &mut Context<Self>) {
+        let Some(account) = self.store.read(cx).current_account() else {
+            self.store.update(cx, |s, cx| {
+                s.inform("Add an account to write mail");
+                cx.notify();
+            });
+            return;
+        };
+        super::windows::open_compose_window(&self.store, compose::blank(&account), cx);
+    }
+
+    /// `r`, `a`, `f` and the reader's buttons: answers the open thread, else the cursor row.
+    /// Without its detail yet, the thread opens and the window follows once it loads.
+    fn compose_reply(&mut self, kind: ComposeKind, cx: &mut Context<Self>) {
+        let key = {
+            let s = self.store.read(cx);
+            s.open.clone().or_else(|| s.cursor.clone())
+        };
+        let Some(key) = key else {
+            let text = if kind == ComposeKind::Forward {
+                "No conversation to forward"
+            } else {
+                "No conversation to reply to"
+            };
+            self.store.update(cx, |s, cx| {
+                s.inform(text);
+                cx.notify();
+            });
+            return;
+        };
+        self.pending_compose = Some((key.clone(), kind));
+        let loaded = matches!(
+            self.store.read(cx).details.get(&key),
+            Some(DetailState::Loaded(_))
+        );
+        if !loaded || self.store.read(cx).open.as_ref() != Some(&key) {
+            self.store.update(cx, |s, cx| {
+                s.open_thread(key);
+                cx.notify();
+            });
+        }
+        self.fulfil_pending_compose(cx);
+    }
+
+    /// Opens the waiting reply or forward once its detail has loaded (or gives up when it
+    /// failed to).
+    fn fulfil_pending_compose(&mut self, cx: &mut Context<Self>) {
+        let Some((key, kind)) = self.pending_compose.clone() else {
+            return;
+        };
+        let prefill = {
+            let s = self.store.read(cx);
+            match s.details.get(&key) {
+                Some(DetailState::Loaded(d)) => {
+                    Some(compose::reply_prefill(d, kind, s.prefs.clock_24h))
+                }
+                Some(DetailState::Failed(_)) => Some(None),
+                Some(DetailState::Loading) => None,
+                None => Some(None),
+            }
+        };
+        let Some(prefill) = prefill else {
+            return;
+        };
+        self.pending_compose = None;
+        match prefill {
+            Some(prefill) => {
+                // Not from inside the store's notification.
+                let store = self.store.clone();
+                cx.defer(move |cx| super::windows::open_compose_window(&store, prefill, cx));
+            }
+            None => self.store.update(cx, |s, cx| {
+                s.inform("Couldn't load the conversation");
+                cx.notify();
+            }),
+        }
+    }
+
+    /// Keys bound from M6 whose feature lands later (ctrl-,): the owning milestone replaces
+    /// the handler.
     fn not_yet(&mut self, cx: &mut Context<Self>) {
         self.store.update(cx, |s, cx| {
             s.inform(NOT_YET);
@@ -648,6 +735,27 @@ impl MainView {
                     }
                     None => (false, "no such label".into()),
                 }
+            }
+            Cond::Messages(want) => {
+                let n = store
+                    .open
+                    .as_ref()
+                    .and_then(|k| match store.details.get(k) {
+                        Some(DetailState::Loaded(d)) => Some(d.messages.len()),
+                        _ => None,
+                    });
+                (
+                    n == Some(*want),
+                    n.map_or("no open thread".into(), |n| n.to_string()),
+                )
+            }
+            Cond::Composers(want) => {
+                let n = compose::open_count(cx);
+                (n == *want, n.to_string())
+            }
+            // Checked against the focused compose window; here none is focused.
+            Cond::Compose(_) | Cond::ComposeError(_) | Cond::Attached(_) | Cond::Discard(_) => {
+                (false, "the main window is focused".into())
             }
         };
         if ok { Ok(()) } else { Err(actual) }
@@ -919,11 +1027,17 @@ impl Render for MainView {
             .on_action(cx.listener(unless_help(Self::open_label_picker)))
             .on_action(cx.listener(unless_help(Self::focus_search)))
             .on_action(cx.listener(Self::close_search))
-            // Later milestones: compose (M8), settings (M9).
-            .on_action(cx.listener(|this, _: &Compose, _, cx| this.not_yet(cx)))
-            .on_action(cx.listener(|this, _: &Reply, _, cx| this.not_yet(cx)))
-            .on_action(cx.listener(|this, _: &ReplyAll, _, cx| this.not_yet(cx)))
-            .on_action(cx.listener(|this, _: &Forward, _, cx| this.not_yet(cx)))
+            .on_action(cx.listener(unless_help(|this, _: &Compose, _, cx| this.compose_new(cx))))
+            .on_action(cx.listener(unless_help(|this, _: &Reply, _, cx| {
+                this.compose_reply(ComposeKind::Reply, cx)
+            })))
+            .on_action(cx.listener(unless_help(|this, _: &ReplyAll, _, cx| {
+                this.compose_reply(ComposeKind::ReplyAll, cx)
+            })))
+            .on_action(cx.listener(unless_help(|this, _: &Forward, _, cx| {
+                this.compose_reply(ComposeKind::Forward, cx)
+            })))
+            // Settings arrives in M9.
             .on_action(cx.listener(|this, _: &OpenSettings, _, cx| this.not_yet(cx)))
             .on_action(cx.listener(|_, _: &Quit, _, cx| cx.quit()))
             .when_some(theme::ui_font(cx), |d, font| d.font_family(font))

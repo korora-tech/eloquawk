@@ -30,6 +30,31 @@ impl FocusTarget {
     }
 }
 
+/// A compose window field, for `compose=`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ComposeField {
+    To,
+    Cc,
+    Bcc,
+    Subject,
+    Body,
+    /// Any field, or none: only that the focused window is a compose window.
+    Open,
+}
+
+impl ComposeField {
+    pub fn name(self) -> &'static str {
+        match self {
+            ComposeField::To => "to",
+            ComposeField::Cc => "cc",
+            ComposeField::Bcc => "bcc",
+            ComposeField::Subject => "subject",
+            ComposeField::Body => "body",
+            ComposeField::Open => "open",
+        }
+    }
+}
+
 /// An `expect:` condition.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Cond {
@@ -81,6 +106,19 @@ pub enum Cond {
         name: String,
         count: Option<u32>,
     },
+    /// The focused window is a compose window with this field focused (`compose=to|cc|bcc|
+    /// subject|body|none`), or any (`compose=open`). M8.
+    Compose(Option<ComposeField>),
+    /// The focused compose window's inline error, or `none`. M8.
+    ComposeError(Option<String>),
+    /// How many attachment chips the focused compose window shows. M8.
+    Attached(usize),
+    /// The focused compose window asks "Discard this message?" (`discard=asking|no`). M8.
+    Discard(bool),
+    /// How many compose windows are open. M8.
+    Composers(usize),
+    /// How many messages the open thread has. M8.
+    Messages(usize),
 }
 
 /// One script step.
@@ -100,6 +138,9 @@ pub enum Step {
     /// Show this label of the current account (`ALL_MAIL` for All Mail); a fallback for
     /// views no key reaches, such as Spam and Trash.
     View(String),
+    /// Attach a local file to the focused compose window as if chosen in the file chooser
+    /// (the portal cannot be scripted). M8.
+    Attach(String),
     /// Dispatch the named action (see [`demo_action`]).
     Act(String),
     /// Send each character as a keystroke.
@@ -251,6 +292,26 @@ fn parse_cond(value: &str) -> Option<Cond> {
                 count,
             }
         }
+        "compose" => Cond::Compose(match arg {
+            "to" => Some(ComposeField::To),
+            "cc" => Some(ComposeField::Cc),
+            "bcc" => Some(ComposeField::Bcc),
+            "subject" => Some(ComposeField::Subject),
+            "body" => Some(ComposeField::Body),
+            "open" => Some(ComposeField::Open),
+            "none" => None,
+            _ => return None,
+        }),
+        "compose-error" if arg == "none" => Cond::ComposeError(None),
+        "compose-error" if !arg.is_empty() => Cond::ComposeError(Some(arg.to_string())),
+        "attached" => Cond::Attached(arg.parse().ok()?),
+        "discard" => Cond::Discard(match arg {
+            "asking" => true,
+            "no" => false,
+            _ => return None,
+        }),
+        "composers" => Cond::Composers(arg.parse().ok()?),
+        "messages" => Cond::Messages(arg.parse().ok()?),
         _ => return None,
     };
     Some(cond)
@@ -280,6 +341,7 @@ fn parse_step(step: &str) -> Step {
                 .unwrap_or_else(|_| unknown()),
             "view" if !value.is_empty() => Step::View(value.to_string()),
             "search" => Step::Search(value.to_string()),
+            "attach" if !value.is_empty() => Step::Attach(value.to_string()),
             "act" if demo_action(value).is_some() => Step::Act(value.to_string()),
             "type" if !value.is_empty() => Step::Type(value.to_string()),
             "expect" => match parse_cond(value) {
@@ -342,9 +404,13 @@ pub const DEMO_ACTIONS: &[&str] = &[
     "CloseSearch",
     "OpenSettings",
     "Refresh",
+    "Send",
+    "CloseCompose",
+    "DiscardCompose",
 ];
 
-/// The action for an `act:` step: every Mail and app action except closing and quitting.
+/// The action for an `act:` step: every Mail and app action except closing the main window
+/// and quitting, plus the compose window's Send, CloseCompose and DiscardCompose.
 pub fn demo_action(name: &str) -> Option<Box<dyn Action>> {
     let action: Box<dyn Action> = match name {
         "NextThread" => Box::new(ui::NextThread),
@@ -382,6 +448,9 @@ pub fn demo_action(name: &str) -> Option<Box<dyn Action>> {
         "CloseSearch" => Box::new(ui::CloseSearch),
         "OpenSettings" => Box::new(ui::OpenSettings),
         "Refresh" => Box::new(ui::Refresh),
+        "Send" => Box::new(ui::Send),
+        "CloseCompose" => Box::new(ui::CloseCompose),
+        "DiscardCompose" => Box::new(ui::DiscardCompose),
         _ => return None,
     };
     Some(action)
@@ -399,7 +468,7 @@ mod tests {
     fn every_step_kind_parses() {
         let steps = parse_steps(
             "wait:800,theme:light,theme:dark,shot,open:3,act:NextThread,type:hello,\
-             expect:cursor=2,selectall:0,view:TRASH,search:from:zoë,j,g i",
+             expect:cursor=2,selectall:0,view:TRASH,search:from:zoë,attach:/tmp/a b.pdf,j,g i",
         );
         assert_eq!(
             steps,
@@ -418,6 +487,7 @@ mod tests {
                 Step::SelectAll(0),
                 Step::View("TRASH".into()),
                 Step::Search("from:zoë".into()),
+                Step::Attach("/tmp/a b.pdf".into()),
                 keys(&["j"]),
                 keys(&["g", "i"]),
             ]
@@ -496,6 +566,33 @@ mod tests {
                 count: None
             })
         );
+        assert_eq!(
+            cond("compose=to"),
+            Some(Cond::Compose(Some(ComposeField::To)))
+        );
+        assert_eq!(
+            cond("compose=body"),
+            Some(Cond::Compose(Some(ComposeField::Body)))
+        );
+        assert_eq!(
+            cond("compose=open"),
+            Some(Cond::Compose(Some(ComposeField::Open)))
+        );
+        assert_eq!(cond("compose=none"), Some(Cond::Compose(None)));
+        assert_eq!(cond("compose-error=none"), Some(Cond::ComposeError(None)));
+        assert_eq!(
+            cond("compose-error=Attachments can't exceed 25 MB in total"),
+            Some(Cond::ComposeError(Some(
+                "Attachments can't exceed 25 MB in total".into()
+            )))
+        );
+        assert_eq!(cond("attached=1"), Some(Cond::Attached(1)));
+        assert_eq!(cond("discard=asking"), Some(Cond::Discard(true)));
+        assert_eq!(cond("discard=no"), Some(Cond::Discard(false)));
+        assert_eq!(cond("composers=0"), Some(Cond::Composers(0)));
+        assert_eq!(cond("messages=4"), Some(Cond::Messages(4)));
+        assert_eq!(cond("compose=from"), None);
+        assert_eq!(cond("discard=maybe"), None);
         assert_eq!(cond("picker=ajar"), None);
         assert_eq!(cond("label=Travel"), None);
         assert_eq!(cond("label=:yes"), None);
@@ -542,7 +639,9 @@ mod tests {
     #[test]
     fn unknown_steps_are_reported() {
         assert_eq!(
-            parse_steps("bogus:1,wait:x,theme:sepia,act:Nope,selectall:x,view:,frobnicate,,"),
+            parse_steps(
+                "bogus:1,wait:x,theme:sepia,act:Nope,selectall:x,view:,attach:,frobnicate,,"
+            ),
             vec![
                 Step::Unknown("bogus:1".into()),
                 Step::Unknown("wait:x".into()),
@@ -550,6 +649,7 @@ mod tests {
                 Step::Unknown("act:Nope".into()),
                 Step::Unknown("selectall:x".into()),
                 Step::Unknown("view:".into()),
+                Step::Unknown("attach:".into()),
                 Step::Unknown("frobnicate".into()),
             ]
         );

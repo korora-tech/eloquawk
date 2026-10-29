@@ -264,7 +264,6 @@ impl LabelDelta {
     }
 }
 
-#[allow(dead_code)] // consumed in M8
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ComposeKind {
     New,
@@ -273,7 +272,6 @@ pub enum ComposeKind {
     Forward,
 }
 
-#[allow(dead_code)] // consumed in M8
 #[derive(Clone)]
 pub struct Outgoing {
     pub account: AccountId,
@@ -305,14 +303,12 @@ impl fmt::Debug for Outgoing {
     }
 }
 
-#[allow(dead_code)] // consumed in M12
 #[derive(Clone, Debug)]
 pub enum AttachmentSource {
     Local(PathBuf),
     Gmail { message_id: String, part_id: String },
 }
 
-#[allow(dead_code)] // consumed in M8
 #[derive(Clone, Debug)]
 pub struct OutgoingAttachment {
     pub filename: String,
@@ -322,7 +318,6 @@ pub struct OutgoingAttachment {
 }
 
 /// Summed `size` limit of an outgoing message's attachments (SPEC 8.5).
-#[allow(dead_code)] // consumed in M8
 pub const MAX_OUTGOING_ATTACHMENTS: u64 = 25 * 1024 * 1024;
 
 #[cfg(test)]

@@ -3,19 +3,22 @@
 //!
 //! Key contexts: `Eloquawk` on the main window root (always active), `Mail` on the panes
 //! container, `ReadOnlyText` on each message body (ctrl-c, ctrl-a), `Search` on the header's
-//! search field wrapper and `LabelPicker` on the label picker popover. Mail bindings use the
+//! search field wrapper, `LabelPicker` on the label picker popover and `Compose` on each compose
+//! window's root. Mail bindings use the
 //! predicate [`MAIL`], so no Mail key fires while a text field anywhere inside is focused; a
 //! focused body does not block them. The help overlay lists the same table ([`help::SHORTCUTS`]),
 //! and a test keeps the two in step.
 
 pub mod auth;
 pub mod body_text;
+pub mod compose;
 pub mod format;
 pub mod help;
 pub mod label_picker;
 pub mod main_view;
 pub mod reader;
 pub mod sidebar;
+pub mod text_area;
 pub mod text_input;
 pub mod text_layout;
 pub mod theme;
@@ -83,6 +86,12 @@ actions!(
         CancelSearch,
         /// The search results' ✕: returns to the view the search replaced (not bound to a key).
         CloseSearch,
+        /// Sends the message in a compose window.
+        Send,
+        /// Closes a compose window, asking first when it was edited.
+        CloseCompose,
+        /// The compose window's "Discard" answer (not bound to a key).
+        DiscardCompose,
         OpenSettings,
         Refresh,
         CloseWindow,
@@ -93,7 +102,7 @@ actions!(
 /// The predicate every Mail binding uses: never while typing in a field.
 pub const MAIL: &str = "Mail && !TextInput && !TextArea";
 
-/// The Mail, LabelPicker, Search and Eloquawk key map of SPEC 9 (the field and body contexts
+/// The Mail, LabelPicker, Search, Compose and Eloquawk key map of SPEC 9 (the field and body contexts
 /// bind their own; enter in the search field and the picker's filter is the field's `Submit`).
 /// Linux reports `#`, `!`, `?`, `:` without shift, so those are bound as bare characters.
 pub fn bindings() -> Vec<KeyBinding> {
@@ -142,6 +151,11 @@ pub fn bindings() -> Vec<KeyBinding> {
         KeyBinding::new("up", PickerUp, Some("LabelPicker")),
         KeyBinding::new("down", PickerDown, Some("LabelPicker")),
         KeyBinding::new("escape", CancelSearch, Some("Search")),
+        KeyBinding::new("ctrl-enter", Send, Some("Compose")),
+        KeyBinding::new("escape", CloseCompose, Some("Compose")),
+        KeyBinding::new("ctrl-w", CloseCompose, Some("Compose")),
+        // Quit from a compose window asks about its edits first.
+        KeyBinding::new("ctrl-q", Quit, Some("Compose")),
         KeyBinding::new("ctrl-r", Refresh, app),
         KeyBinding::new("ctrl-,", OpenSettings, app),
         KeyBinding::new("ctrl-n", Compose, app),
@@ -153,6 +167,7 @@ pub fn bindings() -> Vec<KeyBinding> {
 
 pub fn bind_keys(cx: &mut App) {
     text_input::bind_keys(cx);
+    text_area::bind_keys(cx);
     body_text::bind_keys(cx);
     cx.bind_keys(bindings());
 }

@@ -118,7 +118,6 @@ fn is_bare_email(s: &str) -> bool {
 
 /// Formats an address for a header or an editable field: `Name <a@b>`, quoting the name when
 /// it holds specials.
-#[allow(dead_code)] // consumed in M8
 pub fn format_address(a: &Address) -> String {
     match a.name.as_deref().filter(|n| !n.is_empty()) {
         None => a.email.clone(),
@@ -134,7 +133,6 @@ pub fn format_address(a: &Address) -> String {
 }
 
 /// Formats an address list, comma-separated.
-#[allow(dead_code)] // consumed in M8
 pub fn format_list(list: &[Address]) -> String {
     list.iter()
         .map(format_address)

@@ -72,6 +72,8 @@ pub struct TextInput {
     last_layout: Option<ShapedLine>,
     last_bounds: Option<Bounds<Pixels>>,
     is_selecting: bool,
+    /// Draws a red border (an address field that does not parse).
+    invalid: bool,
 }
 
 impl TextInput {
@@ -92,6 +94,7 @@ impl TextInput {
             last_layout: None,
             last_bounds: None,
             is_selecting: false,
+            invalid: false,
         }
     }
 
@@ -106,6 +109,14 @@ impl TextInput {
         self.selection_reversed = false;
         self.marked_range = None;
         cx.notify();
+    }
+
+    /// Marks the content as invalid (a red border) or valid.
+    pub fn set_invalid(&mut self, invalid: bool, cx: &mut Context<Self>) {
+        if self.invalid != invalid {
+            self.invalid = invalid;
+            cx.notify();
+        }
     }
 
     #[allow(dead_code)] // consumed in M9
@@ -450,6 +461,13 @@ impl EntityInputHandler for TextInput {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // One line only: an enter that reaches the field as text is dropped, and pasted or
+        // composed line breaks become spaces.
+        if new_text.chars().all(|c| c == '\n' || c == '\r') && !new_text.is_empty() {
+            return;
+        }
+        let flat = new_text.replace(['\n', '\r'], " ");
+        let new_text = flat.as_str();
         let range = range_utf16
             .as_ref()
             .map(|range_utf16| self.range_from_utf16(range_utf16))
@@ -473,6 +491,9 @@ impl EntityInputHandler for TextInput {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Same length, so the selected range still lines up.
+        let flat = new_text.replace(['\n', '\r'], " ");
+        let new_text = flat.as_str();
         let range = range_utf16
             .as_ref()
             .map(|range_utf16| self.range_from_utf16(range_utf16))
@@ -789,7 +810,9 @@ impl Render for TextInput {
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .rounded_md()
             .border_1()
-            .border_color(rgb(if focused {
+            .border_color(rgb(if self.invalid {
+                pal.red
+            } else if focused {
                 pal.accent
             } else {
                 pal.input_border

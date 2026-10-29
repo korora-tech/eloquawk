@@ -68,7 +68,6 @@ pub enum Command {
         thread_ids: Vec<String>,
         restore: LabelDelta,
     },
-    #[allow(dead_code)] // consumed in M8
     Send {
         op: OpId,
         outgoing: Outgoing,
