@@ -13,7 +13,7 @@ use std::collections::BTreeSet;
 use gpui::prelude::*;
 use gpui::{
     App, ClickEvent, Context, Entity, EventEmitter, FocusHandle, Focusable, FontWeight,
-    SharedString, Subscription, Window, div, px, rgb,
+    ScrollHandle, SharedString, Subscription, Window, div, px, rgb,
 };
 
 use super::text_input::{Submit, TextInput};
@@ -95,6 +95,8 @@ pub struct LabelPicker {
     highlight: usize,
     /// The filter text the highlight was last reset for.
     last_filter: String,
+    /// The rows' scroll, kept on the highlighted row.
+    scroll: ScrollHandle,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -113,6 +115,7 @@ impl LabelPicker {
             filter,
             highlight: 0,
             last_filter: String::new(),
+            scroll: ScrollHandle::new(),
             _subscriptions: subscriptions,
         }
     }
@@ -147,22 +150,27 @@ impl LabelPicker {
         if text != self.last_filter {
             self.last_filter = text.to_string();
             self.highlight = 0;
+            self.scroll.scroll_to_item(0);
         }
         self.highlight = self.highlight.min(len.saturating_sub(1));
     }
 
-    fn up(&mut self, _: &PickerUp, _: &mut Window, cx: &mut Context<Self>) {
+    /// Moves the highlight and scrolls the rows just enough to show it, so enter never
+    /// toggles a label out of sight.
+    fn move_highlight(&mut self, delta: isize, cx: &mut Context<Self>) {
         let len = self.rows(cx).len();
         self.sync_highlight(len, cx);
-        self.highlight = step(self.highlight, -1, len);
+        self.highlight = step(self.highlight, delta, len);
+        self.scroll.scroll_to_item(self.highlight);
         cx.notify();
     }
 
+    fn up(&mut self, _: &PickerUp, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_highlight(-1, cx);
+    }
+
     fn down(&mut self, _: &PickerDown, _: &mut Window, cx: &mut Context<Self>) {
-        let len = self.rows(cx).len();
-        self.sync_highlight(len, cx);
-        self.highlight = step(self.highlight, 1, len);
-        cx.notify();
+        self.move_highlight(1, cx);
     }
 
     fn close(&mut self, _: &ClosePicker, _: &mut Window, cx: &mut Context<Self>) {
@@ -277,6 +285,7 @@ impl Render for LabelPicker {
             .id("picker-rows")
             .max_h(px(320.0))
             .overflow_y_scroll()
+            .track_scroll(&self.scroll)
             .flex()
             .flex_col()
             .gap(px(1.0))

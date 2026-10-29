@@ -4,13 +4,15 @@
 //! of SPEC 9 (keys whose feature lands later post "Not available yet"), runs searches from the
 //! header's `Search` context, and answers the demo script's `expect:` checks.
 
+use std::cell::Cell;
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, ClickEvent, Context, Div, Entity, FocusHandle, Focusable, FontWeight,
-    ScrollStrategy, StyleRefinement, Subscription, Task, UniformListScrollHandle, Window, div, px,
-    rgb,
+    AnyElement, Bounds, ClickEvent, Context, Div, Entity, FocusHandle, Focusable, FontWeight,
+    Pixels, ScrollStrategy, StyleRefinement, Subscription, Task, UniformListScrollHandle, Window,
+    canvas, div, px, rgb,
 };
 
 use super::auth::Screen;
@@ -37,6 +39,11 @@ pub const NOT_YET: &str = "Not available yet";
 /// How long a toast stays up.
 const TOAST_FOR: Duration = Duration::from_secs(5);
 
+/// Where the label picker sits within the reader pane: below its action bar, inset from the
+/// pane's left edge.
+const PICKER_TOP: f32 = 52.0;
+const PICKER_LEFT: f32 = 20.0;
+
 pub struct MainView {
     pub(super) store: Entity<Store>,
     reader: Entity<ReaderView>,
@@ -52,6 +59,9 @@ pub struct MainView {
     pub(super) help_open: bool,
     /// The label picker, while it shows, with its event subscription.
     picker: Option<(Entity<LabelPicker>, Subscription)>,
+    /// The reader pane's bounds as last laid out (window coordinates, so below the header and
+    /// any banner), which the picker hangs from.
+    reader_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     /// The search query the field was last filled from, so a change of view refills or
     /// clears it once instead of overwriting what the user types.
     shown_search: Option<String>,
@@ -90,6 +100,7 @@ impl MainView {
             screen: Screen::Auth,
             help_open: false,
             picker: None,
+            reader_bounds: Rc::new(Cell::new(None)),
             shown_search: None,
             toast_for: None,
             _toast_timer: None,
@@ -226,9 +237,18 @@ impl MainView {
         }
     }
 
-    /// The picker under the reader's action bar, over a scrim that closes it on click.
+    /// The picker under the reader's action bar, over a scrim that closes it on click. It
+    /// hangs from the reader pane as last laid out, so it follows the banner and the pane
+    /// widths; before the first layout it falls back to where the pane starts without them.
     fn picker_overlay(&self, cx: &Context<Self>) -> Option<AnyElement> {
         let (picker, _) = self.picker.as_ref()?;
+        let (top, left) = match self.reader_bounds.get() {
+            Some(b) => (b.top() + px(PICKER_TOP), b.left() + px(PICKER_LEFT)),
+            None => (
+                px(HEADER_H + PICKER_TOP),
+                px(SIDEBAR_W + LIST_W + PICKER_LEFT),
+            ),
+        };
         Some(
             div()
                 .id("picker-scrim")
@@ -239,13 +259,7 @@ impl MainView {
                 .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                     this.close_picker(window, cx);
                 }))
-                .child(
-                    div()
-                        .absolute()
-                        .top(px(HEADER_H + 52.0))
-                        .left(px(SIDEBAR_W + LIST_W + 20.0))
-                        .child(picker.clone()),
-                )
+                .child(div().absolute().top(top).left(left).child(picker.clone()))
                 .into_any_element(),
         )
     }
@@ -817,11 +831,23 @@ impl MainView {
             .child(self.sidebar(store, cx))
             .child(self.thread_list(store, cx))
             .child(
-                div().flex_1().min_w(px(0.0)).h_full().child(
-                    self.reader
-                        .clone()
-                        .cached(StyleRefinement::default().size_full()),
-                ),
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .h_full()
+                    .child({
+                        // Records the pane's bounds for the label picker; paints nothing.
+                        let cell = self.reader_bounds.clone();
+                        canvas(move |bounds, _, _| cell.set(Some(bounds)), |_, _, _, _| {})
+                            .absolute()
+                            .size_full()
+                    })
+                    .child(
+                        self.reader
+                            .clone()
+                            .cached(StyleRefinement::default().size_full()),
+                    ),
             )
             .into_any_element()
     }
@@ -855,6 +881,11 @@ impl Render for MainView {
             if screen == Screen::Mail {
                 cx.defer_in(window, |this, window, cx| this.focus_mail(window, cx));
             }
+        }
+        // The picker only exists with the panes: leaving Mail (a sign-out, an auth failure)
+        // drops it, so it neither keeps the focus unseen nor comes back later.
+        if screen != Screen::Mail {
+            self.picker = None;
         }
         let store_entity = self.store.clone();
         let store = store_entity.read(cx);

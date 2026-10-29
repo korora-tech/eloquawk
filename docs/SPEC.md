@@ -1620,7 +1620,9 @@ milestone are welcome. **No trailers.** Push to main after each commit.
     sidebar), sorted by full name and filtered case-insensitively by substring. Each row shows
     ✓ when every target has the label, – when some do. Enter or a click adds the label to all
     targets unless all have it, in which case it removes it; the picker stays open for more
-    toggles. `Store::set_label` makes it an undoable `Modify` with the toast
+    toggles. Up and down keep the highlighted row scrolled into view. The card hangs from the
+    reader pane's last laid-out bounds (so it follows the banner), and leaving the Mail screen
+    drops it. `Store::set_label` makes it an undoable `Modify` with the toast
     "Added “Travel” to 1 conversation" / "Removed “Travel” from …".
   - `l` targets the selection, else the open thread, else the cursor row; the reader's
     "Labels…" button targets the open thread only (as its other buttons do). With no target,
