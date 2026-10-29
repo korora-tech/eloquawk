@@ -1563,7 +1563,13 @@ milestone are welcome. **No trailers.** Push to main after each commit.
     `j,o,e` shows the rollback notice instead of an archive.
   - Escape (and `u`, the same action) closes the help overlay first when it shows, then the
     reader, then clears the selection. The overlay also closes on `?` and on a click outside
-    the card; it leaves the focus on the list.
+    the card; it leaves the focus on the list. Escape with the reader open does not also clear
+    the selection (section 9 reads otherwise): `u` and escape share `BackToList`, and each
+    press undoes one layer.
+  - While the overlay shows, every other Mail action does nothing (`unless_help` in
+    `ui/main_view.rs`), so `e`, `#` or `j` cannot change threads hidden behind it. The scrim
+    `.occlude()`s, so a click on it closes the overlay without reaching the row, star or
+    sidebar underneath, and hover and scroll do not reach the panes either.
   - `n` / `p` with no card focused start at the first / last card. The focused card has an
     accent border. `o` / enter toggles the focused card only while the open thread is the
     cursor thread; otherwise it opens the cursor thread.

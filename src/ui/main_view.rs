@@ -600,6 +600,19 @@ impl MainView {
     }
 }
 
+/// Wraps a Mail action handler so it does nothing while the shortcut overlay shows: the list
+/// keeps the focus under the overlay, and without this `e`, `#` or `j` would act on threads the
+/// user cannot see. `?` and escape/`u` are not wrapped; they close the overlay.
+fn unless_help<A>(
+    f: impl Fn(&mut MainView, &A, &mut Window, &mut Context<MainView>) + 'static,
+) -> impl Fn(&mut MainView, &A, &mut Window, &mut Context<MainView>) + 'static {
+    move |this, action, window, cx| {
+        if !this.help_open {
+            f(this, action, window, cx);
+        }
+    }
+}
+
 impl Focusable for MainView {
     fn focus_handle(&self, _: &gpui::App) -> FocusHandle {
         self.focus.clone()
@@ -667,46 +680,56 @@ impl Render for MainView {
                     .when(screen == Screen::Mail, |d| {
                         d.key_context("Mail")
                             .track_focus(&self.focus)
-                            .on_action(cx.listener(Self::next_thread))
-                            .on_action(cx.listener(Self::prev_thread))
-                            .on_action(cx.listener(Self::open_thread))
+                            .on_action(cx.listener(unless_help(Self::next_thread)))
+                            .on_action(cx.listener(unless_help(Self::prev_thread)))
+                            .on_action(cx.listener(unless_help(Self::open_thread)))
                             .on_action(cx.listener(Self::back_to_list))
-                            .on_action(cx.listener(Self::next_message))
-                            .on_action(cx.listener(Self::prev_message))
-                            .on_action(cx.listener(Self::scroll_down))
-                            .on_action(cx.listener(Self::scroll_up))
-                            .on_action(cx.listener(Self::toggle_select))
-                            .on_action(cx.listener(Self::archive))
-                            .on_action(cx.listener(Self::trash))
-                            .on_action(cx.listener(Self::toggle_star))
-                            .on_action(cx.listener(Self::mark_read))
-                            .on_action(cx.listener(Self::mark_unread))
-                            .on_action(cx.listener(Self::report_spam))
-                            .on_action(cx.listener(Self::undo))
-                            .on_action(cx.listener(Self::expand_all))
-                            .on_action(cx.listener(Self::collapse_all))
+                            .on_action(cx.listener(unless_help(Self::next_message)))
+                            .on_action(cx.listener(unless_help(Self::prev_message)))
+                            .on_action(cx.listener(unless_help(Self::scroll_down)))
+                            .on_action(cx.listener(unless_help(Self::scroll_up)))
+                            .on_action(cx.listener(unless_help(Self::toggle_select)))
+                            .on_action(cx.listener(unless_help(Self::archive)))
+                            .on_action(cx.listener(unless_help(Self::trash)))
+                            .on_action(cx.listener(unless_help(Self::toggle_star)))
+                            .on_action(cx.listener(unless_help(Self::mark_read)))
+                            .on_action(cx.listener(unless_help(Self::mark_unread)))
+                            .on_action(cx.listener(unless_help(Self::report_spam)))
+                            .on_action(cx.listener(unless_help(Self::undo)))
+                            .on_action(cx.listener(unless_help(Self::expand_all)))
+                            .on_action(cx.listener(unless_help(Self::collapse_all)))
                             .on_action(cx.listener(Self::toggle_help))
-                            .on_action(cx.listener(|this, _: &GoInbox, window, cx| {
+                            .on_action(cx.listener(unless_help(|this, _: &GoInbox, window, cx| {
                                 this.go_label(labels::INBOX, window, cx)
-                            }))
-                            .on_action(cx.listener(|this, _: &GoStarred, window, cx| {
-                                this.go_label(labels::STARRED, window, cx)
-                            }))
-                            .on_action(cx.listener(|this, _: &GoSent, window, cx| {
+                            })))
+                            .on_action(cx.listener(unless_help(
+                                |this, _: &GoStarred, window, cx| {
+                                    this.go_label(labels::STARRED, window, cx)
+                                },
+                            )))
+                            .on_action(cx.listener(unless_help(|this, _: &GoSent, window, cx| {
                                 this.go_label(labels::SENT, window, cx)
-                            }))
-                            .on_action(cx.listener(|this, _: &GoDrafts, window, cx| {
-                                this.go_label(labels::DRAFT, window, cx)
-                            }))
-                            .on_action(cx.listener(|this, _: &GoAllMail, window, cx| {
-                                this.go(ViewKind::AllMail, window, cx)
-                            }))
-                            .on_action(cx.listener(|this, _: &NextAccount, window, cx| {
-                                this.switch_account(1, window, cx)
-                            }))
-                            .on_action(cx.listener(|this, _: &PrevAccount, window, cx| {
-                                this.switch_account(-1, window, cx)
-                            }))
+                            })))
+                            .on_action(cx.listener(unless_help(
+                                |this, _: &GoDrafts, window, cx| {
+                                    this.go_label(labels::DRAFT, window, cx)
+                                },
+                            )))
+                            .on_action(cx.listener(unless_help(
+                                |this, _: &GoAllMail, window, cx| {
+                                    this.go(ViewKind::AllMail, window, cx)
+                                },
+                            )))
+                            .on_action(cx.listener(unless_help(
+                                |this, _: &NextAccount, window, cx| {
+                                    this.switch_account(1, window, cx)
+                                },
+                            )))
+                            .on_action(cx.listener(unless_help(
+                                |this, _: &PrevAccount, window, cx| {
+                                    this.switch_account(-1, window, cx)
+                                },
+                            )))
                     })
                     .child(main),
             )

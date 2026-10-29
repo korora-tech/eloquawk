@@ -269,6 +269,9 @@ impl MainView {
         let [a, b, c] = columns(p);
         div()
             .id("help-scrim")
+            // Without this the panes underneath stay hovered and get the same click (a click
+            // here would also open or star the row under it) plus hover and scroll.
+            .occlude()
             .absolute()
             .inset_0()
             .flex()
