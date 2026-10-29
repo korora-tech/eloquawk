@@ -292,18 +292,22 @@ impl MainView {
         } else {
             s.subject.clone()
         };
+        // Unread rows set the sender and subject semibold in the text colour; read rows
+        // drop both to the regular weight and the secondary colour, so the two read apart at
+        // a glance.
+        let (weight, strong) = if unread {
+            (FontWeight::SEMIBOLD, p.text)
+        } else {
+            (FontWeight::NORMAL, p.secondary)
+        };
         let line2 = format!("{subject} \u{2014} {}", s.snippet);
         let subject_end = subject.len();
         let line2 = StyledText::new(SharedString::from(line2)).with_highlights([
             (
                 0..subject_end,
                 HighlightStyle {
-                    color: Some(rgb(p.text).into()),
-                    font_weight: Some(if unread {
-                        FontWeight::SEMIBOLD
-                    } else {
-                        FontWeight::NORMAL
-                    }),
+                    color: Some(rgb(strong).into()),
+                    font_weight: Some(weight),
                     ..Default::default()
                 },
             ),
@@ -376,12 +380,8 @@ impl MainView {
                                     .truncate()
                                     .text_size(px(13.5))
                                     .line_height(px(20.0))
-                                    .font_weight(if unread {
-                                        FontWeight::BOLD
-                                    } else {
-                                        FontWeight::NORMAL
-                                    })
-                                    .text_color(rgb(if unread { p.text } else { p.secondary }))
+                                    .font_weight(weight)
+                                    .text_color(rgb(strong))
                                     .child(participants),
                             )
                             .child(

@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use gpui::{App, FontFeatures, Global, Window, WindowAppearance};
+use gpui::{App, FontFeatures, Global, SharedString, Window, WindowAppearance};
 
 use crate::config::ThemePref;
 
@@ -146,6 +146,46 @@ pub fn tint(color: u32, base: u32, amount: f32) -> u32 {
     mix(16) | mix(8) | mix(0)
 }
 
+/// UI font families, best first. gpui's Linux default is "IBM Plex Sans"; when that family is
+/// not installed, cosmic-text falls back to a single face, so every `font_weight` renders
+/// regular and unread rows look like read ones. The first family here that is installed is
+/// set on each window's root instead.
+const UI_FONTS: &[&str] = &[
+    "IBM Plex Sans",
+    "Inter",
+    "Cantarell",
+    "Noto Sans",
+    "Adwaita Sans",
+    "DejaVu Sans",
+    "Liberation Sans",
+];
+
+/// The UI font family chosen at start; `None` keeps gpui's default.
+pub struct UiFont(pub Option<SharedString>);
+
+impl Global for UiFont {}
+
+/// The first [`UI_FONTS`] family among the installed ones.
+pub fn pick_ui_font<'a>(installed: impl IntoIterator<Item = &'a str>) -> Option<&'static str> {
+    let installed: std::collections::HashSet<&str> = installed.into_iter().collect();
+    UI_FONTS.iter().copied().find(|f| installed.contains(f))
+}
+
+/// Chooses the UI font from the installed families; called once at start.
+pub fn init_ui_font(cx: &mut App) {
+    let names = cx.text_system().all_font_names();
+    let font = pick_ui_font(names.iter().map(String::as_str)).map(SharedString::from);
+    if font.is_none() {
+        eprintln!("eloquawk: no preferred UI font is installed; text weights may not show");
+    }
+    cx.set_global(UiFont(font));
+}
+
+/// The UI font family for a window root, when one was chosen.
+pub fn ui_font(cx: &App) -> Option<SharedString> {
+    cx.try_global::<UiFont>().and_then(|f| f.0.clone())
+}
+
 /// Tabular figures, so dates line up in the thread list.
 pub fn tabular() -> FontFeatures {
     FontFeatures(Arc::new(vec![("tnum".into(), 1)]))
@@ -167,6 +207,17 @@ pub const CONTROL_H: f32 = 30.0;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ui_font_prefers_the_gpui_default_then_the_list_order() {
+        assert_eq!(
+            pick_ui_font(["DejaVu Sans", "Inter", "IBM Plex Sans"]),
+            Some("IBM Plex Sans")
+        );
+        assert_eq!(pick_ui_font(["DejaVu Sans", "Inter"]), Some("Inter"));
+        assert_eq!(pick_ui_font(["Inter Display", "Comic Mono"]), None);
+        assert_eq!(pick_ui_font([]), None);
+    }
 
     /// WCAG contrast ratio between two colours.
     fn contrast(a: u32, b: u32) -> f32 {

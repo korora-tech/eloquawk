@@ -420,6 +420,7 @@ impl Render for MainView {
             }))
             .on_action(cx.listener(|_, _: &CloseWindow, window, _| window.remove_window()))
             .on_action(cx.listener(|_, _: &Quit, _, cx| cx.quit()))
+            .when_some(theme::ui_font(cx), |d, font| d.font_family(font))
             .relative()
             .size_full()
             .flex()

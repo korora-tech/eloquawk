@@ -74,6 +74,7 @@ fn main() {
         .run(move |cx: &mut App| {
             ui::bind_keys(cx);
             cx.set_global(ThemeOverride(theme_override));
+            theme::init_ui_font(cx);
             let store = cx.new(|_| Store::new(sync.clone(), mode, prefs));
 
             // Signals the first ThreadPage, which starts the demo script.

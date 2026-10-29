@@ -857,12 +857,13 @@ Navigation:
   visible range reaches the last 10 rows and `has_more`, the render callback asks for more
   through `cx.processor` (the store dedupes the request).
 - **Thread row** (fixed `ROW_H`, with explicit `line_height` on every text line):
-  - Line 1: unread dot, then the participants label (bold when unread, `truncate`), with the date
-    right-aligned and tabular.
-  - Line 2: the subject (semibold when unread), then " — " and the snippet in muted text, all
-    `truncate`d. On the right, a star (★ in AMBER or ☆ muted, and clicking it toggles), plus an
-    attachment mark when `has_attachments` (a paper clip drawn with divs; the UI font has no
-    clip glyph).
+  - Line 1: unread dot, then the participants label (semibold in the text colour when unread,
+    regular in the secondary colour when read, `truncate`), with the date right-aligned and
+    tabular.
+  - Line 2: the subject (styled like the participants label), then " — " and the snippet in
+    muted text, all `truncate`d. On the right, a star (★ in AMBER or ☆ muted, and clicking it
+    toggles), plus an attachment mark when `has_attachments` (a paper clip drawn with divs; the
+    UI font has no clip glyph).
   - Row states: hover, cursor (SELECTED background with an accent left border 3px), x-selected
     (a checkbox square filled), and skeleton (grey bars).
 - **Reader (`ReaderView` entity, `ui/reader.rs`):**
@@ -942,6 +943,11 @@ Navigation:
 - On start, and from `cx.observe_window_appearance` on the main window, resolve `prefs.theme`
   (System follows `window.appearance()`), set the global, and call `cx.refresh_windows()`.
 - The `--theme` flag overrides the pref for the session and is not saved.
+- **UI font:** gpui's Linux default family is "IBM Plex Sans". When it is not installed,
+  cosmic-text falls back to a single face and every `font_weight` renders regular (seen in
+  the M4/M5 shots: unread rows looked like read ones). At start `theme::init_ui_font` picks
+  the first installed family of IBM Plex Sans, Inter, Cantarell, Noto Sans, Adwaita Sans,
+  DejaVu Sans and Liberation Sans, and each window root sets it with `font_family`.
 - **Tests:** WCAG ratio ≥ 4.5 for text, secondary, accent_text and link on bg, panel and
   selected, and ≥ 3.0 for muted and caption, in both palettes.
 
