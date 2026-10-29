@@ -216,7 +216,6 @@ impl Query {
     }
 
     /// True for an empty query (nothing but whitespace).
-    #[allow(dead_code)] // consumed in M7
     pub fn is_empty(&self) -> bool {
         self.groups.is_empty()
     }

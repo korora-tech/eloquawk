@@ -15,8 +15,8 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, ClickEvent, ClipboardItem, Context, Div, Entity, FocusHandle, Focusable,
-    FontWeight, ScrollHandle, SharedString, Subscription, Window, div, point, px, rgb,
+    AnyElement, ClickEvent, ClipboardItem, Context, Div, Entity, EventEmitter, FocusHandle,
+    Focusable, FontWeight, ScrollHandle, SharedString, Subscription, Window, div, point, px, rgb,
 };
 use jiff::Zoned;
 
@@ -215,6 +215,12 @@ impl Fingerprint {
     }
 }
 
+/// What the reader asks of the main view.
+pub enum ReaderEvent {
+    /// The "Labels…" button: open the label picker for this thread.
+    Labels(ThreadKey),
+}
+
 pub struct ReaderView {
     store: Entity<Store>,
     focus: FocusHandle,
@@ -235,6 +241,8 @@ pub struct ReaderView {
     focused_card: Option<usize>,
     _subscription: Subscription,
 }
+
+impl EventEmitter<ReaderEvent> for ReaderView {}
 
 impl ReaderView {
     pub fn new(store: Entity<Store>, window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -565,8 +573,16 @@ impl ReaderView {
                     this.mutate(MutationKind::Labels(delta), cx)
                 })),
             ))
-            // Labels arrives in M7; Reply, Reply all and Forward in M8.
-            .child(tool("labels", "Labels…", None))
+            .child(tool(
+                "labels",
+                "Labels…",
+                Some(self.click(cx, |this, _, cx| {
+                    if let Some(open) = this.store.read(cx).open.clone() {
+                        cx.emit(ReaderEvent::Labels(open));
+                    }
+                })),
+            ))
+            // Reply, Reply all and Forward arrive in M8.
             .child(tool("reply", "Reply", None))
             .child(tool("reply-all", "Reply all", None))
             .child(tool("forward", "Forward", None))

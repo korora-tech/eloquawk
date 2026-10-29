@@ -198,6 +198,9 @@ fn run_step(step: &Step, store: &Entity<Store>, cx: &mut App) {
         Step::View(id) => {
             let _ = main.update(cx, |view, window, cx| view.show_view(id, window, cx));
         }
+        Step::Search(query) => {
+            let _ = main.update(cx, |view, window, cx| view.search_for(query, window, cx));
+        }
         Step::SelectAll(n) => {
             let result = main.update(cx, |view, window, cx| {
                 view.select_all_in_card(*n, window, cx)

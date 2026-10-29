@@ -1599,6 +1599,32 @@ milestone are welcome. **No trailers.** Push to main after each commit.
     does not archive.
   - Shots: `search` via `search:from:zoë`, `labels` via `j,l`.
 
+- **M7 notes:**
+  - The search field sits in the header, outside the `Mail` container, inside a `Search`
+    wrapper that handles the field's `Submit` (enter) and `CancelSearch` (escape). Submitting
+    calls `Store::search`, which trims the query, remembers the view it replaces and shows
+    `Search(q)` for the current account; a query with no terms (`Query::is_empty`) leaves the
+    search instead. Escape only clears the field and focuses the list; the results stay.
+  - The header shows "Search results for “q” ✕" next to the field. ✕ dispatches the unbound
+    action `CloseSearch` (`Store::end_search`), which returns to the replaced view, or the
+    account's inbox when that view is unknown or belonged to another account. `act:CloseSearch`
+    reaches it from scripts. The field is refilled from the shown search and cleared once the
+    view leaves search.
+  - The label picker is a `LabelPicker` entity drawn over a scrim (click outside closes) below
+    the reader's action bar, outside the `Mail` container, so its filter (`TextInput`) never
+    triggers mail keys. It lists every user label (hidden ones too; hiding only affects the
+    sidebar), sorted by full name and filtered case-insensitively by substring. Each row shows
+    ✓ when every target has the label, – when some do. Enter or a click adds the label to all
+    targets unless all have it, in which case it removes it; the picker stays open for more
+    toggles. `Store::set_label` makes it an undoable `Modify` with the toast
+    "Added “Travel” to 1 conversation" / "Removed “Travel” from …".
+  - `l` targets the selection, else the open thread, else the cursor row; the reader's
+    "Labels…" button targets the open thread only (as its other buttons do). With no target,
+    `l` posts "No conversation to label".
+  - `expect:` gains `focus=picker`, `picker=open|closed`, `filter=<text>`,
+    `label=<name>:yes|no` (the cursor thread) and `badge=<label name>:<N|none>` (the current
+    account's sidebar count).
+
 ### M8: Compose, reply and forward
 - **Files:** `ui/text_area.rs` (on `text_layout.rs`), `ui/compose.rs`, `ui/windows.rs`
   (compose window, initial focus), `mail/{reply,compose}.rs`, the demo `Send` (including

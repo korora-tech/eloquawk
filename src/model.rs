@@ -52,7 +52,6 @@ impl fmt::Display for ThreadKey {
 pub enum ViewKind {
     Label(String),
     AllMail,
-    #[allow(dead_code)] // consumed in M7
     Search(String),
 }
 

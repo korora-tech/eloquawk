@@ -333,7 +333,8 @@ mod tests {
 
     use super::*;
 
-    /// Every Mail and Eloquawk row is bound to its action, and every such binding is listed.
+    /// Every Mail, LabelPicker, Search and Eloquawk row is bound to its action, and every such
+    /// binding is listed.
     #[test]
     fn shortcuts_match_the_key_map() {
         let bound: BTreeSet<(String, String)> = crate::ui::bindings()
@@ -350,9 +351,13 @@ mod tests {
                 (keys, action)
             })
             .collect();
+        // Compose's keys arrive with its window (M8); enter in search is the field's Submit.
         let listed: BTreeSet<(String, String)> = SHORTCUTS
             .iter()
-            .filter(|s| s.context == "Mail" || s.context == "Eloquawk")
+            .filter(|s| {
+                matches!(s.context, "Mail" | "Eloquawk" | "LabelPicker" | "Search")
+                    && s.action != "Submit"
+            })
             .flat_map(|s| s.keys.iter().map(|k| (k.to_string(), s.action.to_string())))
             .collect();
         assert_eq!(bound, listed);

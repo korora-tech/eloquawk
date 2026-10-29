@@ -2,7 +2,8 @@
 //! the actions and key map (SPEC 9).
 //!
 //! Key contexts: `Eloquawk` on the main window root (always active), `Mail` on the panes
-//! container and `ReadOnlyText` on each message body (ctrl-c, ctrl-a). Mail bindings use the
+//! container, `ReadOnlyText` on each message body (ctrl-c, ctrl-a), `Search` on the header's
+//! search field wrapper and `LabelPicker` on the label picker popover. Mail bindings use the
 //! predicate [`MAIL`], so no Mail key fires while a text field anywhere inside is focused; a
 //! focused body does not block them. The help overlay lists the same table ([`help::SHORTCUTS`]),
 //! and a test keeps the two in step.
@@ -11,6 +12,7 @@ pub mod auth;
 pub mod body_text;
 pub mod format;
 pub mod help;
+pub mod label_picker;
 pub mod main_view;
 pub mod reader;
 pub mod sidebar;
@@ -71,6 +73,16 @@ actions!(
         NextAccount,
         PrevAccount,
         ToggleHelp,
+        /// Closes the label picker.
+        ClosePicker,
+        /// Moves the label picker's highlight up.
+        PickerUp,
+        /// Moves the label picker's highlight down.
+        PickerDown,
+        /// Escape in the search field: clears it and focuses the list.
+        CancelSearch,
+        /// The search results' ✕: returns to the view the search replaced (not bound to a key).
+        CloseSearch,
         OpenSettings,
         Refresh,
         CloseWindow,
@@ -81,7 +93,8 @@ actions!(
 /// The predicate every Mail binding uses: never while typing in a field.
 pub const MAIL: &str = "Mail && !TextInput && !TextArea";
 
-/// The Mail and Eloquawk key map of SPEC 9 (the field and body contexts bind their own).
+/// The Mail, LabelPicker, Search and Eloquawk key map of SPEC 9 (the field and body contexts
+/// bind their own; enter in the search field and the picker's filter is the field's `Submit`).
 /// Linux reports `#`, `!`, `?`, `:` without shift, so those are bound as bare characters.
 pub fn bindings() -> Vec<KeyBinding> {
     let mail = Some(MAIL);
@@ -125,6 +138,10 @@ pub fn bindings() -> Vec<KeyBinding> {
         KeyBinding::new("g n", NextAccount, mail),
         KeyBinding::new("g p", PrevAccount, mail),
         KeyBinding::new("?", ToggleHelp, mail),
+        KeyBinding::new("escape", ClosePicker, Some("LabelPicker")),
+        KeyBinding::new("up", PickerUp, Some("LabelPicker")),
+        KeyBinding::new("down", PickerDown, Some("LabelPicker")),
+        KeyBinding::new("escape", CancelSearch, Some("Search")),
         KeyBinding::new("ctrl-r", Refresh, app),
         KeyBinding::new("ctrl-,", OpenSettings, app),
         KeyBinding::new("ctrl-n", Compose, app),

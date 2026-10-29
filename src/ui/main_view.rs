@@ -1,8 +1,8 @@
 //! `MainView`, the main window's root (SPEC 8.2): the header with search, the problem banner,
-//! the sidebar, thread list and reader panes (or an auth card), the toast and the shortcut
-//! overlay. It owns the Mail key context and handles every Mail action of SPEC 9 (keys whose
-//! feature lands later post "Not available yet"), and answers the demo script's `expect:`
-//! checks.
+//! the sidebar, thread list and reader panes (or an auth card), the toast, the shortcut
+//! overlay and the label picker. It owns the Mail key context and handles every Mail action
+//! of SPEC 9 (keys whose feature lands later post "Not available yet"), runs searches from the
+//! header's `Search` context, and answers the demo script's `expect:` checks.
 
 use std::time::{Duration, Instant};
 
@@ -14,16 +14,17 @@ use gpui::{
 };
 
 use super::auth::Screen;
-use super::reader::ReaderView;
-use super::text_input::TextInput;
-use super::theme::{self, CONTROL_H, HEADER_H, ICON_SLOT, palette, tint};
+use super::label_picker::{LabelPicker, PickerEvent};
+use super::reader::{ReaderEvent, ReaderView};
+use super::text_input::{Submit, TextInput};
+use super::theme::{self, CONTROL_H, HEADER_H, ICON_SLOT, LIST_W, SIDEBAR_W, palette, tint};
 use super::widgets::{ButtonStyle, button, ghost_button};
 use super::{
-    Archive, BackToList, CloseWindow, CollapseAll, Compose, ExpandAll, FocusSearch, Forward,
-    GoAllMail, GoDrafts, GoInbox, GoSent, GoStarred, MarkRead, MarkUnread, NextAccount,
-    NextMessage, NextThread, OpenLabelPicker, OpenSettings, OpenThread, PrevAccount, PrevMessage,
-    PrevThread, Quit, Refresh, Reply, ReplyAll, ReportSpam, ScrollReaderDown, ScrollReaderUp,
-    ToggleHelp, ToggleSelect, ToggleStar, Trash, Undo,
+    Archive, BackToList, CancelSearch, CloseSearch, CloseWindow, CollapseAll, Compose, ExpandAll,
+    FocusSearch, Forward, GoAllMail, GoDrafts, GoInbox, GoSent, GoStarred, MarkRead, MarkUnread,
+    NextAccount, NextMessage, NextThread, OpenLabelPicker, OpenSettings, OpenThread, PrevAccount,
+    PrevMessage, PrevThread, Quit, Refresh, Reply, ReplyAll, ReportSpam, ScrollReaderDown,
+    ScrollReaderUp, ToggleHelp, ToggleSelect, ToggleStar, Trash, Undo,
 };
 use crate::demo_script::{Cond, FocusTarget};
 use crate::model::{LabelDelta, ThreadKey, ViewKind, labels};
@@ -49,6 +50,11 @@ pub struct MainView {
     screen: Screen,
     /// The keyboard shortcut overlay is showing.
     pub(super) help_open: bool,
+    /// The label picker, while it shows, with its event subscription.
+    picker: Option<(Entity<LabelPicker>, Subscription)>,
+    /// The search query the field was last filled from, so a change of view refills or
+    /// clears it once instead of overwriting what the user types.
+    shown_search: Option<String>,
     /// The notice the toast timer is running for, and the timer (one, never per frame).
     toast_for: Option<Instant>,
     _toast_timer: Option<Task<()>>,
@@ -58,12 +64,15 @@ pub struct MainView {
 impl MainView {
     pub fn new(store: Entity<Store>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let reader = cx.new(|cx| ReaderView::new(store.clone(), window, cx));
-        // Search is wired in M7; the field is already here so the layout is final.
         let search = cx.new(|cx| TextInput::new("Search mail", false, 0, cx));
         let subscriptions = vec![
             cx.observe(&store, |this, store, cx| {
                 this.schedule_toast_expiry(&store, cx);
+                this.sync_search_field(&store, cx);
                 cx.notify();
+            }),
+            cx.subscribe_in(&reader, window, |this, _, event, window, cx| match event {
+                ReaderEvent::Labels(key) => this.open_picker(vec![key.clone()], window, cx),
             }),
             cx.observe_window_appearance(window, |this, window, cx| {
                 let saved = this.store.read(cx).prefs.theme;
@@ -80,6 +89,8 @@ impl MainView {
             scrolled_to: None,
             screen: Screen::Auth,
             help_open: false,
+            picker: None,
+            shown_search: None,
             toast_for: None,
             _toast_timer: None,
             _subscriptions: subscriptions,
@@ -112,6 +123,131 @@ impl MainView {
                 });
             })
         });
+    }
+
+    // ----- search ---------------------------------------------------------------------------
+
+    /// Fills the search field with the query of a search view when one is shown (also when a
+    /// script or the store started it), and clears it once the view leaves search.
+    fn sync_search_field(&mut self, store: &Entity<Store>, cx: &mut Context<Self>) {
+        let query = store.read(cx).search_query().map(str::to_string);
+        if query == self.shown_search {
+            return;
+        }
+        let text = query.clone().unwrap_or_default();
+        self.search.update(cx, |field, cx| field.set_text(text, cx));
+        self.shown_search = query;
+    }
+
+    /// `/`: focuses the search field.
+    fn focus_search(&mut self, _: &FocusSearch, window: &mut Window, cx: &mut Context<Self>) {
+        let handle = self.search.focus_handle(cx);
+        window.focus(&handle, cx);
+    }
+
+    /// Enter in the search field: shows the results for the current account (an empty field
+    /// leaves a search) and focuses the list.
+    fn submit_search(&mut self, _: &Submit, window: &mut Window, cx: &mut Context<Self>) {
+        let query = self.search.read(cx).text().to_string();
+        self.store.update(cx, |s, cx| {
+            s.search(&query);
+            cx.notify();
+        });
+        self.focus_mail(window, cx);
+    }
+
+    /// Escape in the search field: clears it and focuses the list.
+    fn cancel_search(&mut self, _: &CancelSearch, window: &mut Window, cx: &mut Context<Self>) {
+        self.search.update(cx, |field, cx| field.set_text("", cx));
+        self.focus_mail(window, cx);
+    }
+
+    /// The search results' ✕: back to the view the search replaced.
+    fn close_search(&mut self, _: &CloseSearch, window: &mut Window, cx: &mut Context<Self>) {
+        self.store.update(cx, |s, cx| {
+            if s.end_search() {
+                cx.notify();
+            }
+        });
+        self.focus_mail(window, cx);
+    }
+
+    /// The demo script's `search:<query>`: fills the field and submits it.
+    pub fn search_for(&mut self, query: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.search
+            .update(cx, |field, cx| field.set_text(query.to_string(), cx));
+        self.submit_search(&Submit, window, cx);
+    }
+
+    // ----- label picker -------------------------------------------------------------------
+
+    /// `l`: the picker for the targets (the selection, else the open thread, else the cursor
+    /// row).
+    fn open_label_picker(
+        &mut self,
+        _: &OpenLabelPicker,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let targets = self.store.read(cx).targets();
+        if targets.is_empty() {
+            self.store.update(cx, |s, cx| {
+                s.inform("No conversation to label");
+                cx.notify();
+            });
+            return;
+        }
+        self.open_picker(targets, window, cx);
+    }
+
+    /// Shows the picker for these threads, with the focus on its filter.
+    fn open_picker(
+        &mut self,
+        targets: Vec<ThreadKey>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let store = self.store.clone();
+        let picker = cx.new(|cx| LabelPicker::new(store, targets, cx));
+        let sub = cx.subscribe_in(&picker, window, |this, _, event, window, cx| match event {
+            PickerEvent::Close => this.close_picker(window, cx),
+        });
+        let focus = picker.read(cx).filter_focus(cx);
+        self.picker = Some((picker, sub));
+        window.focus(&focus, cx);
+        cx.notify();
+    }
+
+    /// Closes the picker and gives the focus back to the list.
+    pub(super) fn close_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.picker.take().is_some() {
+            self.focus_mail(window, cx);
+            cx.notify();
+        }
+    }
+
+    /// The picker under the reader's action bar, over a scrim that closes it on click.
+    fn picker_overlay(&self, cx: &Context<Self>) -> Option<AnyElement> {
+        let (picker, _) = self.picker.as_ref()?;
+        Some(
+            div()
+                .id("picker-scrim")
+                // Keeps the panes underneath from getting the click, hover and scroll.
+                .occlude()
+                .absolute()
+                .inset_0()
+                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                    this.close_picker(window, cx);
+                }))
+                .child(
+                    div()
+                        .absolute()
+                        .top(px(HEADER_H + 52.0))
+                        .left(px(SIDEBAR_W + LIST_W + 20.0))
+                        .child(picker.clone()),
+                )
+                .into_any_element(),
+        )
     }
 
     // ----- navigation actions -------------------------------------------------------------
@@ -292,8 +428,8 @@ impl MainView {
         self.go(kind, window, cx);
     }
 
-    /// Keys bound from M6 whose feature lands later (`l`, `/`, `c`, `r`, `a`, `f`, ctrl-n,
-    /// ctrl-,): the owning milestone replaces the handler.
+    /// Keys bound from M6 whose feature lands later (`c`, `r`, `a`, `f`, ctrl-n, ctrl-,): the
+    /// owning milestone replaces the handler.
     fn not_yet(&mut self, cx: &mut Context<Self>) {
         self.store.update(cx, |s, cx| {
             s.inform(NOT_YET);
@@ -326,6 +462,12 @@ impl MainView {
     fn focus_target(&self, window: &Window, cx: &gpui::App) -> Option<FocusTarget> {
         if self.search.focus_handle(cx).is_focused(window) {
             Some(FocusTarget::Search)
+        } else if self
+            .picker
+            .as_ref()
+            .is_some_and(|(p, _)| p.read(cx).filter_focus(cx).is_focused(window))
+        {
+            Some(FocusTarget::Picker)
         } else if self.reader.focus_handle(cx).contains_focused(window, cx) {
             Some(FocusTarget::Reader)
         } else if self.focus.is_focused(window) {
@@ -443,6 +585,56 @@ impl MainView {
                 )
             }
             Cond::Syncs(want) => (store.syncs == *want, store.syncs.to_string()),
+            Cond::Picker(want) => {
+                let open = self.picker.is_some();
+                (open == *want, if open { "open" } else { "closed" }.into())
+            }
+            Cond::Filter(want) => {
+                let actual = self
+                    .picker
+                    .as_ref()
+                    .map(|(p, _)| p.read(cx).filter_text(cx));
+                (
+                    actual.as_deref() == Some(want.as_str()),
+                    actual.unwrap_or_else(|| "no picker".into()),
+                )
+            }
+            Cond::Label { name, on } => {
+                let thread = store.cursor.as_ref().and_then(|k| store.threads.get(k));
+                let id = thread.and_then(|t| {
+                    store
+                        .labels
+                        .get(&t.key.account)?
+                        .iter()
+                        .find(|l| l.name == *name)
+                        .map(|l| l.id.clone())
+                });
+                match (thread, id) {
+                    (Some(t), Some(id)) => {
+                        let has = t.in_label(&id);
+                        (has == *on, if has { "yes" } else { "no" }.into())
+                    }
+                    (None, _) => (false, "no cursor thread".into()),
+                    (_, None) => (false, "no such label".into()),
+                }
+            }
+            Cond::Badge { name, count } => {
+                let id = store.view.as_ref().and_then(|v| {
+                    store
+                        .labels
+                        .get(&v.account)?
+                        .iter()
+                        .find(|l| l.name == *name)
+                        .map(|l| (v.account.clone(), l.id.clone()))
+                });
+                match id {
+                    Some((account, id)) => {
+                        let n = store.unread_badge(&account, &id);
+                        (n == *count, n.map_or("none".into(), |n| n.to_string()))
+                    }
+                    None => (false, "no such label".into()),
+                }
+            }
         };
         if ok { Ok(()) } else { Err(actual) }
     }
@@ -466,11 +658,46 @@ impl MainView {
             .child(div().size(px(ICON_SLOT)).flex_shrink_0())
             .child(
                 div()
+                    .key_context("Search")
+                    .on_action(cx.listener(Self::submit_search))
+                    .on_action(cx.listener(Self::cancel_search))
                     .flex_1()
                     .min_w(px(0.0))
                     .max_w(px(680.0))
                     .child(self.search.clone()),
             )
+            .when_some(store.search_query(), |d, q| {
+                d.child(
+                    div()
+                        .flex()
+                        .flex_shrink_0()
+                        .min_w(px(0.0))
+                        .max_w(px(320.0))
+                        .items_center()
+                        .gap(px(4.0))
+                        .pl(px(10.0))
+                        .pr(px(2.0))
+                        .h(px(CONTROL_H))
+                        .rounded(px(6.0))
+                        .bg(rgb(tint(p.accent, p.header, 0.14)))
+                        .child(
+                            div()
+                                .min_w(px(0.0))
+                                .truncate()
+                                .text_size(px(12.5))
+                                .text_color(rgb(p.text))
+                                .child(format!("Search results for \u{201c}{q}\u{201d}")),
+                        )
+                        .child(ghost_button(
+                            p,
+                            "close-search",
+                            "✕",
+                            Some(Box::new(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                this.close_search(&CloseSearch, window, cx)
+                            }))),
+                        )),
+                )
+            })
             .child(div().flex_1())
             .child(
                 div()
@@ -642,6 +869,11 @@ impl Render for MainView {
         let banner = self.banner(store, cx);
         let toast = self.toast(store, cx);
         let help = (self.help_open && screen == Screen::Mail).then(|| self.help_overlay(cx));
+        let picker = if screen == Screen::Mail {
+            self.picker_overlay(cx)
+        } else {
+            None
+        };
         let main = match screen {
             Screen::Auth => self.auth_card(store, cx),
             Screen::Mail => self.panes(store, cx),
@@ -652,9 +884,11 @@ impl Render for MainView {
                 this.store.read(cx).send_command(Command::Refresh)
             }))
             .on_action(cx.listener(|_, _: &CloseWindow, window, _| window.remove_window()))
-            // Later milestones: labels and search (M7), compose (M8), settings (M9).
-            .on_action(cx.listener(|this, _: &OpenLabelPicker, _, cx| this.not_yet(cx)))
-            .on_action(cx.listener(|this, _: &FocusSearch, _, cx| this.not_yet(cx)))
+            // On the root so the reader's buttons and scripts reach them from any focus.
+            .on_action(cx.listener(unless_help(Self::open_label_picker)))
+            .on_action(cx.listener(unless_help(Self::focus_search)))
+            .on_action(cx.listener(Self::close_search))
+            // Later milestones: compose (M8), settings (M9).
             .on_action(cx.listener(|this, _: &Compose, _, cx| this.not_yet(cx)))
             .on_action(cx.listener(|this, _: &Reply, _, cx| this.not_yet(cx)))
             .on_action(cx.listener(|this, _: &ReplyAll, _, cx| this.not_yet(cx)))
@@ -733,6 +967,7 @@ impl Render for MainView {
                     })
                     .child(main),
             )
+            .children(picker)
             .children(help)
             .children(toast)
     }

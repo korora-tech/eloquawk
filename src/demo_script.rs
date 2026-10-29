@@ -13,6 +13,8 @@ pub enum FocusTarget {
     List,
     Reader,
     Search,
+    /// The label picker's filter.
+    Picker,
     Compose,
 }
 
@@ -22,6 +24,7 @@ impl FocusTarget {
             FocusTarget::List => "list",
             FocusTarget::Reader => "reader",
             FocusTarget::Search => "search",
+            FocusTarget::Picker => "picker",
             FocusTarget::Compose => "compose",
         }
     }
@@ -63,6 +66,21 @@ pub enum Cond {
     Account(String),
     /// How many `Synced` events have arrived (a refresh adds one).
     Syncs(u32),
+    /// The label picker shows (`picker=open|closed`).
+    Picker(bool),
+    /// The label picker's filter holds this text.
+    Filter(String),
+    /// The cursor thread carries the label with this name (`label=<name>:yes|no`).
+    Label {
+        name: String,
+        on: bool,
+    },
+    /// The sidebar count of the current account's label with this name
+    /// (`badge=<name>:<N|none>`).
+    Badge {
+        name: String,
+        count: Option<u32>,
+    },
 }
 
 /// One script step.
@@ -77,6 +95,8 @@ pub enum Step {
     Open(usize),
     /// Focus card N's body in the open thread and select all of it.
     SelectAll(usize),
+    /// Set the search field to this query and submit it.
+    Search(String),
     /// Show this label of the current account (`ALL_MAIL` for All Mail); a fallback for
     /// views no key reaches, such as Spam and Trash.
     View(String),
@@ -174,6 +194,7 @@ fn parse_cond(value: &str) -> Option<Cond> {
             "list" => FocusTarget::List,
             "reader" => FocusTarget::Reader,
             "search" => FocusTarget::Search,
+            "picker" => FocusTarget::Picker,
             "compose" => FocusTarget::Compose,
             _ => return None,
         }),
@@ -200,6 +221,36 @@ fn parse_cond(value: &str) -> Option<Cond> {
         }),
         "account" if !arg.is_empty() => Cond::Account(arg.to_string()),
         "syncs" => Cond::Syncs(arg.parse().ok()?),
+        "picker" => Cond::Picker(match arg {
+            "open" => true,
+            "closed" => false,
+            _ => return None,
+        }),
+        "filter" => Cond::Filter(arg.to_string()),
+        "label" => {
+            let (name, on) = arg.rsplit_once(':')?;
+            if name.is_empty() {
+                return None;
+            }
+            Cond::Label {
+                name: name.to_string(),
+                on: yes_no(on)?,
+            }
+        }
+        "badge" => {
+            let (name, count) = arg.rsplit_once(':')?;
+            if name.is_empty() {
+                return None;
+            }
+            let count = match count {
+                "none" => None,
+                n => Some(n.parse().ok()?),
+            };
+            Cond::Badge {
+                name: name.to_string(),
+                count,
+            }
+        }
         _ => return None,
     };
     Some(cond)
@@ -228,6 +279,7 @@ fn parse_step(step: &str) -> Step {
                 .map(Step::SelectAll)
                 .unwrap_or_else(|_| unknown()),
             "view" if !value.is_empty() => Step::View(value.to_string()),
+            "search" => Step::Search(value.to_string()),
             "act" if demo_action(value).is_some() => Step::Act(value.to_string()),
             "type" if !value.is_empty() => Step::Type(value.to_string()),
             "expect" => match parse_cond(value) {
@@ -287,6 +339,7 @@ pub const DEMO_ACTIONS: &[&str] = &[
     "NextAccount",
     "PrevAccount",
     "ToggleHelp",
+    "CloseSearch",
     "OpenSettings",
     "Refresh",
 ];
@@ -326,6 +379,7 @@ pub fn demo_action(name: &str) -> Option<Box<dyn Action>> {
         "NextAccount" => Box::new(ui::NextAccount),
         "PrevAccount" => Box::new(ui::PrevAccount),
         "ToggleHelp" => Box::new(ui::ToggleHelp),
+        "CloseSearch" => Box::new(ui::CloseSearch),
         "OpenSettings" => Box::new(ui::OpenSettings),
         "Refresh" => Box::new(ui::Refresh),
         _ => return None,
@@ -345,7 +399,7 @@ mod tests {
     fn every_step_kind_parses() {
         let steps = parse_steps(
             "wait:800,theme:light,theme:dark,shot,open:3,act:NextThread,type:hello,\
-             expect:cursor=2,selectall:0,view:TRASH,j,g i",
+             expect:cursor=2,selectall:0,view:TRASH,search:from:zoë,j,g i",
         );
         assert_eq!(
             steps,
@@ -363,6 +417,7 @@ mod tests {
                 },
                 Step::SelectAll(0),
                 Step::View("TRASH".into()),
+                Step::Search("from:zoë".into()),
                 keys(&["j"]),
                 keys(&["g", "i"]),
             ]
@@ -415,6 +470,36 @@ mod tests {
             Some(Cond::Account("you@work.example".into()))
         );
         assert_eq!(cond("syncs=2"), Some(Cond::Syncs(2)));
+        assert_eq!(cond("focus=picker"), Some(Cond::Focus(FocusTarget::Picker)));
+        assert_eq!(cond("picker=open"), Some(Cond::Picker(true)));
+        assert_eq!(cond("picker=closed"), Some(Cond::Picker(false)));
+        assert_eq!(cond("filter=e"), Some(Cond::Filter("e".into())));
+        assert_eq!(cond("filter="), Some(Cond::Filter(String::new())));
+        assert_eq!(
+            cond("label=Projects/Eloquawk:yes"),
+            Some(Cond::Label {
+                name: "Projects/Eloquawk".into(),
+                on: true
+            })
+        );
+        assert_eq!(
+            cond("badge=Travel:3"),
+            Some(Cond::Badge {
+                name: "Travel".into(),
+                count: Some(3)
+            })
+        );
+        assert_eq!(
+            cond("badge=Travel:none"),
+            Some(Cond::Badge {
+                name: "Travel".into(),
+                count: None
+            })
+        );
+        assert_eq!(cond("picker=ajar"), None);
+        assert_eq!(cond("label=Travel"), None);
+        assert_eq!(cond("label=:yes"), None);
+        assert_eq!(cond("badge=Travel:x"), None);
         assert_eq!(cond("scroll=sideways"), None);
         assert_eq!(cond("unread=maybe"), None);
         assert_eq!(cond("help=ajar"), None);

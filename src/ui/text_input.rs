@@ -99,7 +99,6 @@ impl TextInput {
         &self.content
     }
 
-    #[allow(dead_code)] // consumed in M7
     pub fn set_text(&mut self, text: impl Into<SharedString>, cx: &mut Context<Self>) {
         self.content = text.into();
         let end = self.content.len();

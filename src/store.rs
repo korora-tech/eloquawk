@@ -250,6 +250,8 @@ pub struct Store {
     pub lists: HashMap<ViewKey, ListState>,
     /// The view the thread list shows.
     pub view: Option<ViewKey>,
+    /// The view a search replaced, which the search's ✕ returns to.
+    search_return: Option<ViewKey>,
     /// The highlighted row.
     pub cursor: Option<ThreadKey>,
     /// The x-selection.
@@ -372,6 +374,7 @@ impl Store {
             threads: HashMap::new(),
             lists: HashMap::new(),
             view: None,
+            search_return: None,
             cursor: None,
             selected: BTreeSet::new(),
             open: None,
@@ -760,6 +763,106 @@ impl Store {
             account,
             kind: ViewKind::Label(labels::INBOX.into()),
         });
+    }
+
+    // ----- search -----
+
+    /// Shows the results of `query` (sent to Gmail verbatim, trimmed) for the current account,
+    /// remembering the view it replaces for [`Store::end_search`]. A query with no terms ends
+    /// the search instead.
+    pub fn search(&mut self, query: &str) {
+        let query = query.trim();
+        // Nothing but whitespace or empty quotes: nothing to search for.
+        if crate::mail::query::Query::parse(query).is_empty() {
+            self.end_search();
+            return;
+        }
+        let Some(account) = self.current_account() else {
+            return;
+        };
+        if let Some(view) = &self.view
+            && !matches!(view.kind, ViewKind::Search(_))
+        {
+            self.search_return = Some(view.clone());
+        }
+        self.set_view(ViewKey {
+            account,
+            kind: ViewKind::Search(query.to_string()),
+        });
+    }
+
+    /// The query of the search being shown.
+    pub fn search_query(&self) -> Option<&str> {
+        match &self.view.as_ref()?.kind {
+            ViewKind::Search(q) => Some(q),
+            _ => None,
+        }
+    }
+
+    /// Leaves a search for the view it replaced (the account's inbox when that view belonged
+    /// to another account or is unknown). False when no search is shown.
+    pub fn end_search(&mut self) -> bool {
+        let Some(view) = self.view.clone() else {
+            return false;
+        };
+        if !matches!(view.kind, ViewKind::Search(_)) {
+            return false;
+        }
+        let back = self
+            .search_return
+            .take()
+            .filter(|v| v.account == view.account)
+            .unwrap_or(ViewKey {
+                account: view.account,
+                kind: ViewKind::Label(labels::INBOX.into()),
+            });
+        self.set_view(back);
+        true
+    }
+
+    // ----- labels -----
+
+    /// A label's name in an account, or its id when the label is unknown.
+    pub fn label_name(&self, account: &str, id: &str) -> String {
+        self.labels
+            .get(account)
+            .and_then(|ls| ls.iter().find(|l| l.id == id))
+            .map_or_else(|| id.to_string(), |l| l.name.clone())
+    }
+
+    /// Adds (`on`) or removes a label on the given threads: the label picker's toggle. It is
+    /// undoable, and the toast names the label.
+    pub fn set_label(&mut self, keys: Vec<ThreadKey>, label: &str, on: bool) -> Option<OpId> {
+        let account = keys.first()?.account.clone();
+        let delta = if on {
+            LabelDelta {
+                add: vec![label.to_string()],
+                remove: vec![],
+            }
+        } else {
+            LabelDelta {
+                add: vec![],
+                remove: vec![label.to_string()],
+            }
+        };
+        let op = self.mutate_keys(keys, MutationKind::Labels(delta), true, None)?;
+        let n = self.pending.get(&op).map_or(0, |p| p.threads.len());
+        let what = if n == 1 {
+            "1 conversation".to_string()
+        } else {
+            format!("{n} conversations")
+        };
+        let name = self.label_name(&account, label);
+        if let Some(notice) = &mut self.notice
+            && notice.action == Some(NoticeAction::Undo)
+        {
+            notice.text = if on {
+                format!("Added \u{201c}{name}\u{201d} to {what}")
+            } else {
+                format!("Removed \u{201c}{name}\u{201d} from {what}")
+            };
+        }
+        Some(op)
     }
 
     // ----- view-aware actions (keys and the reader's action bar) -----
@@ -2349,6 +2452,101 @@ mod tests {
         assert!(
             matches!(drain(&rx).last(), Some(Command::Want { view, more: false })
             if *view == inbox_of(WORK))
+        );
+    }
+
+    #[test]
+    fn search_shows_results_and_returns_to_the_label() {
+        let (mut s, rx) = inbox_store(3);
+        s.go_to(ViewKind::Label("STARRED".into()));
+        drain(&rx);
+        s.search("  from:zoë ");
+        let search = ViewKey {
+            account: ME.into(),
+            kind: ViewKind::Search("from:zoë".into()),
+        };
+        assert_eq!(s.view, Some(search.clone()), "trimmed, sent verbatim");
+        assert_eq!(s.search_query(), Some("from:zoë"));
+        assert!(
+            matches!(drain(&rx).last(), Some(Command::Want { view, more: false }) if *view == search)
+        );
+        assert_eq!(
+            s.prefs.last_view,
+            Some((ME.into(), "STARRED".into())),
+            "searches are not remembered"
+        );
+        // A second search still returns to the label, not to the first search.
+        s.search("ann");
+        assert!(s.end_search());
+        assert_eq!(s.view, Some(view("STARRED")));
+        assert_eq!(s.search_query(), None);
+        assert!(!s.end_search(), "nothing to leave");
+        // An empty query leaves the search.
+        s.search("x");
+        s.search("   ");
+        assert_eq!(s.view, Some(view("STARRED")));
+        // Without a remembered view it falls back to the inbox.
+        s.search("x");
+        s.search_return = None;
+        assert!(s.end_search());
+        assert_eq!(s.view, Some(view("INBOX")));
+    }
+
+    #[test]
+    fn set_label_toggles_and_updates_counts() {
+        let (mut s, rx) = inbox_store(3);
+        let mut travel = label("Label_2", LabelKind::User, 0, 0);
+        travel.name = "Travel".into();
+        let mut labels = s.labels[ME].clone();
+        labels.push(travel);
+        s.apply(SyncEvent::Labels {
+            account: ME.into(),
+            labels,
+        });
+        // t0 is unread.
+        s.threads
+            .get_mut(&key("t0"))
+            .unwrap()
+            .label_ids
+            .insert("UNREAD".into());
+        drain(&rx);
+        let op = s.set_label(vec![key("t0")], "Label_2", true).unwrap();
+        assert!(s.threads[&key("t0")].in_label("Label_2"));
+        assert_eq!(label_count(&s, "Label_2"), (1, 1), "sidebar count follows");
+        assert_eq!(s.unread_badge(ME, "Label_2"), Some(1));
+        assert_eq!(
+            s.notice.as_ref().map(|n| n.text.as_str()),
+            Some("Added \u{201c}Travel\u{201d} to 1 conversation")
+        );
+        assert!(matches!(
+            drain(&rx).as_slice(),
+            [Command::Modify { op: o, delta, thread_ids, .. }]
+                if *o == op && delta.add == ["Label_2"] && delta.remove.is_empty()
+                    && thread_ids == &["t0"]
+        ));
+        assert_eq!(list(&s, &view("INBOX")), ids(0..3), "stays in the inbox");
+        s.apply(SyncEvent::MutationFinished { op, error: None });
+        // Removing it, then undoing the removal.
+        s.set_label(vec![key("t0")], "Label_2", false).unwrap();
+        assert!(!s.threads[&key("t0")].in_label("Label_2"));
+        assert_eq!(label_count(&s, "Label_2"), (0, 0));
+        assert_eq!(
+            s.notice.as_ref().map(|n| n.text.as_str()),
+            Some("Removed \u{201c}Travel\u{201d} from 1 conversation")
+        );
+        assert!(s.undo());
+        assert!(s.threads[&key("t0")].in_label("Label_2"));
+        // A failure rolls back.
+        let (mut s2, _rx2) = inbox_store(2);
+        let op = s2.set_label(vec![key("t1")], "Label_9", true).unwrap();
+        s2.apply(SyncEvent::MutationFinished {
+            op,
+            error: Some("no".into()),
+        });
+        assert!(!s2.threads[&key("t1")].in_label("Label_9"));
+        assert_eq!(
+            s2.notice.as_ref().map(|n| n.text.as_str()),
+            Some("Couldn't change labels: no")
         );
     }
 
