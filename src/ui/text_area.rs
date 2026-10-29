@@ -144,6 +144,10 @@ pub struct TextBuffer {
     run: Option<(EditKind, usize)>,
 }
 
+/// The most undo steps kept. Each step is a whole-text snapshot, so the cap bounds the
+/// memory a long, much-edited body can hold.
+pub const UNDO_LIMIT: usize = 200;
+
 /// Normalises pasted line breaks: CRLF and lone CR become LF.
 pub fn normalise_newlines(s: &str) -> String {
     s.replace("\r\n", "\n").replace('\r', "\n")
@@ -326,7 +330,7 @@ impl TextBuffer {
                 .run
                 .is_some_and(|(k, at)| k == kind && (at == range.start || at == range.end));
         if !continues {
-            self.undo.push(self.snapshot());
+            self.push_undo();
         }
         self.redo.clear();
         self.text.replace_range(range.clone(), new);
@@ -401,6 +405,14 @@ impl TextBuffer {
         self.marked = None;
     }
 
+    /// Records the current state as an undo step, dropping the oldest past [`UNDO_LIMIT`].
+    fn push_undo(&mut self) {
+        if self.undo.len() >= UNDO_LIMIT {
+            self.undo.remove(0);
+        }
+        self.undo.push(self.snapshot());
+    }
+
     pub fn undo(&mut self) -> bool {
         let Some(prev) = self.undo.pop() else {
             return false;
@@ -414,7 +426,7 @@ impl TextBuffer {
         let Some(next) = self.redo.pop() else {
             return false;
         };
-        self.undo.push(self.snapshot());
+        self.push_undo();
         self.restore(next);
         true
     }
@@ -1257,6 +1269,26 @@ mod tests {
         assert_eq!(b.next_word(2), b.text().find("Zoë").unwrap() + "Zoë".len());
         assert_eq!(b.next_word(b.text().len()), b.text().len());
         assert_eq!(b.prev_word(0), 0);
+    }
+
+    #[test]
+    fn undo_history_is_capped() {
+        let mut b = TextBuffer::new("");
+        for i in 0..UNDO_LIMIT + 50 {
+            let end = b.text().len();
+            b.replace(
+                end..end,
+                if i % 2 == 0 { "\n" } else { "x" },
+                EditKind::Other,
+            );
+        }
+        let mut steps = 0;
+        while b.undo() {
+            steps += 1;
+        }
+        assert_eq!(steps, UNDO_LIMIT);
+        // The oldest steps were dropped, so the text cannot go all the way back.
+        assert_eq!(b.text().len(), 50);
     }
 
     #[test]
