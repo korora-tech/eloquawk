@@ -8,6 +8,12 @@
 # prints every ELOQUAWK_EXPECT line and kills the app. Exits non-zero when an expectation
 # failed, the app never became ready or the capture failed. Opens a real window: keep runs
 # short.
+#
+# `niri msg action screenshot-window` also copies the PNG to the clipboard (and a scripted
+# ctrl-c would too), so the user's clipboard is saved with wl-paste before the app starts and
+# put back with wl-copy on exit, or cleared when it was empty. wl-copy serves one MIME type per
+# copy, so one representation is kept: plain text when the clipboard offers it, otherwise PNG,
+# otherwise the first type offered. Without wl-clipboard the clipboard is left alone.
 set -euo pipefail
 
 name=${1:?usage: scripts/screenshot.sh <name> [demo-actions] [theme]}
@@ -18,15 +24,48 @@ cd "$(dirname "$0")/.."
 cargo build --quiet
 mkdir -p target/shots
 log=$(mktemp)
+clip=$(mktemp)
 shot="$PWD/target/shots/$name.png"
 rm -f "$shot"
+
+# The saved clipboard's MIME type: empty when nothing was saved, "none" when it was empty.
+clip_type=""
+save_clipboard() {
+    command -v wl-paste >/dev/null && command -v wl-copy >/dev/null || return 0
+    local types t
+    types=$(timeout 2 wl-paste --list-types 2>/dev/null) || types=""
+    if [[ -z "$types" ]]; then
+        clip_type=none
+        return 0
+    fi
+    for t in "text/plain;charset=utf-8" "text/plain" "UTF8_STRING" "STRING" "image/png"; do
+        if grep -qxF "$t" <<<"$types"; then
+            clip_type=$t
+            break
+        fi
+    done
+    [[ -n "$clip_type" ]] || clip_type=$(head -n1 <<<"$types")
+    if ! timeout 2 wl-paste --no-newline --type "$clip_type" >"$clip" 2>/dev/null; then
+        echo "screenshot: could not save the clipboard; it will be left as niri sets it" >&2
+        clip_type=""
+    fi
+}
+restore_clipboard() {
+    case "$clip_type" in
+        "") ;;
+        none) wl-copy --clear >/dev/null 2>&1 || true ;;
+        *) wl-copy --type "$clip_type" <"$clip" >/dev/null 2>&1 || true ;;
+    esac
+}
+save_clipboard
 
 target/debug/eloquawk --demo --theme "$theme" --demo-actions "$actions,shot" >"$log" 2>&1 &
 pid=$!
 cleanup() {
     kill "$pid" 2>/dev/null || true
     wait "$pid" 2>/dev/null || true
-    rm -f "$log"
+    restore_clipboard
+    rm -f "$log" "$clip"
 }
 trap cleanup EXIT
 

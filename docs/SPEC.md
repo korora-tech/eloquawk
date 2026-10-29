@@ -1337,6 +1337,10 @@ with a `MemoryStore` holding a client and one refresh token.
    `niri msg action screenshot-window --id "$id" --path "$PWD/target/shots/$1.png" --write-to-disk true`.
    Check `niri msg action screenshot-window --help` and adjust the flags if they differ.
 5. Prints every `ELOQUAWK_EXPECT` line, exits non-zero if any is `fail`, and kills the process.
+6. Leaves the clipboard as it found it: the capture (and any scripted ctrl-c) replaces it, so
+   the script saves it with `wl-paste` first and restores it with `wl-copy` on exit, or clears
+   it when it was empty. wl-copy serves one MIME type, so one representation is kept (plain
+   text if offered, else PNG, else the first type).
 
 The verifying agent then opens the PNG with the Read tool and checks the milestone's visual
 acceptance criteria. Shots in `target/shots/` are never committed. The one committed exception
