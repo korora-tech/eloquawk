@@ -1,0 +1,37 @@
+# Add 'documentation' label to any change in docs or markdown files
+documentation:
+  - changed-files:
+    - any-glob-to-any-file:
+      - '**/*.md'
+      - 'docs/**'
+
+# Add 'tests' label to test changes
+tests:
+  - changed-files:
+    - any-glob-to-any-file:
+      - 'tests/**'
+
+# Add 'ci' label to CI/CD changes
+ci:
+  - changed-files:
+    - any-glob-to-any-file:
+      - '.github/workflows/**'
+      - '.github/actions/**'
+      - '.github/dependabot.yml'
+
+# Add 'app' label to main application changes
+app:
+  - changed-files:
+    - any-glob-to-any-file:
+      - 'src/**'
+      - 'data/**'
+
+# Add 'dependencies' label to dependency changes
+dependencies:
+  - changed-files:
+    - any-glob-to-any-file:
+      - '**/Cargo.toml'
+      - '**/Cargo.lock'
+      - 'flake.nix'
+      - 'flake.lock'
+

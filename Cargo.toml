@@ -1,0 +1,48 @@
+[package]
+name = "eloquawk"
+version = "0.1.0"
+edition = "2024"
+description = "Eloquawk: a native GPUI Gmail client for Linux"
+license = "Apache-2.0"
+
+[dependencies]
+gpui = { git = "https://github.com/zed-industries/zed", rev = "28d0a3547f16b9609b301b48ab363bfca649c864", default-features = false }
+gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "28d0a3547f16b9609b301b48ab363bfca649c864", default-features = false, features = ["wayland", "x11"] }
+async-channel = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+jiff = "0.2.38"
+# Blocking HTTPS with rustls (ring, webpki-roots); no tokio. Runs on the sync worker thread.
+ureq = { version = "=3.5.0", default-features = false, features = ["rustls", "json"] }
+url = "2.5"
+# PKCE code challenge for the loopback OAuth sign-in.
+sha2 = "0.11.1"
+# Gmail bodies and attachments are URL-safe base64; PKCE verifiers too.
+base64 = "0.23"
+# PKCE verifier and OAuth state randomness.
+getrandom = "0.4"
+# The OAuth client (id + secret) and refresh tokens live in the Secret Service; never on disk.
+keyring-core = "1"
+zbus-secret-service-keyring-store = { version = "1", features = ["rt-async-io-crypto-rust"] }
+# New-mail desktop notifications over D-Bus (zbus, no tokio).
+notify-rust = { version = "4.18", default-features = false, features = ["z"] }
+# Opens links and the OAuth consent page in the user's browser.
+open = "5.4"
+# Grapheme-aware cursor movement in the text inputs.
+unicode-segmentation = "1"
+# Plain-text rendering of HTML-only mail; `from_read` returns a Result.
+html2text = "0.17"
+# Decodes non-UTF-8 message bodies by their declared charset.
+encoding_rs = "0.8"
+# Decodes RFC 2047 encoded-words in headers Gmail leaves undecoded.
+rfc2047-decoder = "1"
+# Builds outgoing RFC 5322 messages; only the builder, no SMTP transport.
+lettre = { version = "0.11", default-features = false, features = ["builder"] }
+
+[dev-dependencies]
+# Round-trips the MIME the composer produces in tests only.
+mail-parser = "1"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
