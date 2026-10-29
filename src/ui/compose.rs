@@ -14,6 +14,7 @@
 //! ctrl-q quits, each after the discard check.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use gpui::prelude::*;
 use gpui::{
@@ -105,6 +106,9 @@ struct Snapshot {
     attachments: usize,
 }
 
+/// Numbers compose windows in the order they open, so the demo script can find the newest.
+static OPENED: AtomicU64 = AtomicU64::new(0);
+
 /// How an address field parses: how many valid entries, and whether any entry is invalid.
 fn check_field(text: &str) -> (usize, bool) {
     let list = parse_list(text);
@@ -137,6 +141,10 @@ pub struct ComposeView {
     sending: Sending,
     send_anyway: bool,
     confirm: Option<Leave>,
+    /// The user agreed to discard this message while quitting; quit no longer asks about it.
+    discarded: bool,
+    /// When this window opened, relative to the other compose windows.
+    opened: u64,
     baseline: Snapshot,
     _subscriptions: Vec<Subscription>,
 }
@@ -168,6 +176,12 @@ impl ComposeView {
         }
         subscriptions.push(cx.observe(&body, |_, _, cx| cx.notify()));
         let show_cc = !prefill.cc.is_empty() || !prefill.bcc.is_empty();
+        // The window manager's close button gets the same discard check as escape.
+        let weak = cx.entity().downgrade();
+        window.on_window_should_close(cx, move |window, cx| {
+            weak.update(cx, |this, cx| this.should_close(window, cx))
+                .unwrap_or(true)
+        });
         let mut this = Self {
             store,
             root: cx.focus_handle(),
@@ -191,6 +205,8 @@ impl ComposeView {
             sending: Sending::Editing,
             send_anyway: false,
             confirm: None,
+            discarded: false,
+            opened: OPENED.fetch_add(1, Ordering::Relaxed),
             baseline: Snapshot {
                 account: String::new(),
                 to: String::new(),
@@ -234,6 +250,33 @@ impl ComposeView {
 
     fn edited(&self, cx: &App) -> bool {
         self.snapshot(cx) != self.baseline
+    }
+
+    /// Closing or quitting should ask first: something was edited, the user has not agreed
+    /// to discard it, and it is not already with the worker.
+    fn needs_asking(&self, cx: &App) -> bool {
+        !self.discarded && !matches!(self.sending, Sending::InFlight(_)) && self.edited(cx)
+    }
+
+    /// The window manager asks to close the window: ask about edits first.
+    fn should_close(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if self.needs_asking(cx) {
+            if self.confirm.is_none() {
+                self.confirm = Some(Leave::Close);
+                cx.notify();
+            }
+            return false;
+        }
+        self.abandon_send(cx);
+        true
+    }
+
+    /// Hands a send still in flight over to the store, which reports its outcome as a notice
+    /// once this window is gone.
+    fn abandon_send(&self, cx: &mut Context<Self>) {
+        if let Sending::InFlight(op) = self.sending {
+            self.store.update(cx, |s, _| s.abandon_send(op));
+        }
     }
 
     /// Re-checks the address fields after any edit.
@@ -309,16 +352,22 @@ impl ComposeView {
         let Sending::InFlight(op) = self.sending else {
             return;
         };
-        match s.send_state(op) {
-            Some(SendState::Sent) => window.remove_window(),
-            Some(SendState::Failed(e)) => {
+        let failed = match s.send_state(op) {
+            Some(SendState::Sent) => None,
+            Some(SendState::Failed(e)) => Some(e.clone()),
+            Some(SendState::Sending) | None => return,
+        };
+        // This window has the outcome now; the store need not keep it.
+        self.store.update(cx, |s, _| s.forget_send(op));
+        match failed {
+            None => window.remove_window(),
+            Some(e) => {
                 self.sending = Sending::Failed {
-                    message: e.message.clone(),
+                    message: e.message,
                     maybe_sent: e.maybe_sent,
                 };
                 cx.notify();
             }
-            Some(SendState::Sending) | None => {}
         }
     }
 
@@ -328,7 +377,7 @@ impl ComposeView {
         self.leave(Leave::Close, window, cx);
     }
 
-    /// ctrl-q: quit, with the same check for this window first.
+    /// ctrl-q: quit, with the same check for this window first and then for the others.
     fn quit(&mut self, _: &Quit, window: &mut Window, cx: &mut Context<Self>) {
         self.leave(Leave::Quit, window, cx);
     }
@@ -340,8 +389,7 @@ impl ComposeView {
             return;
         }
         // A message already handed to the worker is not lost by closing its window.
-        let in_flight = matches!(self.sending, Sending::InFlight(_));
-        if self.edited(cx) && !in_flight {
+        if self.needs_asking(cx) {
             self.confirm = Some(how);
             cx.notify();
             return;
@@ -351,8 +399,15 @@ impl ComposeView {
 
     fn finish(&mut self, how: Leave, window: &mut Window, cx: &mut Context<Self>) {
         match how {
-            Leave::Close => window.remove_window(),
-            Leave::Quit => cx.quit(),
+            Leave::Close => {
+                self.abandon_send(cx);
+                window.remove_window();
+            }
+            // Other compose windows may hold edits too: they ask in turn before the app quits.
+            Leave::Quit => {
+                self.discarded = true;
+                cx.defer(request_quit);
+            }
         }
     }
 
@@ -762,6 +817,40 @@ impl Render for ComposeView {
 pub fn compose_view(handle: AnyWindowHandle, cx: &App) -> Option<Entity<ComposeView>> {
     let window = handle.downcast::<ComposeView>()?;
     window.entity(cx).ok()
+}
+
+/// Quits, unless a compose window holds edits: the first such window comes forward and asks
+/// "Discard this message?", and agreeing there carries on with the quit.
+pub fn request_quit(cx: &mut App) {
+    for handle in cx.windows() {
+        let Some(view) = compose_view(handle, cx) else {
+            continue;
+        };
+        if !view.read(cx).needs_asking(cx) {
+            continue;
+        }
+        let asked = handle.update(cx, |_, window, cx| {
+            view.update(cx, |this, cx| {
+                this.confirm = Some(Leave::Quit);
+                cx.notify();
+            });
+            window.activate_window();
+        });
+        if asked.is_ok() {
+            return;
+        }
+    }
+    cx.quit();
+}
+
+/// The compose window opened last, if any: the demo script's target when no window has the
+/// compositor's focus (an idle or locked session gives none to new windows).
+pub fn newest_compose_window(cx: &App) -> Option<AnyWindowHandle> {
+    cx.windows()
+        .into_iter()
+        .filter_map(|w| compose_view(w, cx).map(|v| (v.read(cx).opened, w)))
+        .max_by_key(|(opened, _)| *opened)
+        .map(|(_, w)| w)
 }
 
 /// How many compose windows are open.

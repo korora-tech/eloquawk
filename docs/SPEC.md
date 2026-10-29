@@ -1685,6 +1685,22 @@ milestone are welcome. **No trailers.** Push to main after each commit.
     focused compose window), `composers=N` (open compose windows) and `messages=N` (the open
     thread's message count); `focus=compose` holds when a compose window is focused. `shot`
     prints a compose window's own title, since gpui reports empty titles.
+  - **Review fixes.** A window closed while its send is in flight hands the op to the store
+    (`Store::abandon_send`). If that send fails, the main window shows the notice "Couldn't
+    send the message" ("The message may not have been sent" when `maybe_sent`). A window that
+    has seen its outcome calls `forget_send`, so `sends` does not grow. The window manager's
+    close button runs the same discard check through `on_window_should_close`. ctrl-q from
+    any window goes through `compose::request_quit`: each edited compose window comes forward
+    in turn and asks, and the app quits once none is left. A pending reply or forward is
+    dropped if the open thread changes before its detail loads. `TextInput::set_text`,
+    `mailto::parse` and `reply_subject`/`forward_subject` turn CR and LF into spaces
+    (`mail::one_line`). The body's undo history keeps at most 200 steps (`UNDO_LIMIT`).
+  - **Script target without focus.** When no window has the compositor's focus (an idle or
+    locked niri session gives none to new windows), `--demo-actions` steps go to the newest
+    compose window, and to the main window when there is none. Before, they always went to the
+    main window. In that state, `focus=compose` means that the step target is a compose window.
+    niri also captures nothing and delivers no close requests then, so shots need an active
+    session.
 
 ### M9: Google sign-in, keyring and settings
 - **Files:** `google/{oauth,api}.rs`, `secrets.rs` (with `ELOQUAWK_SECRETS=memory`), the

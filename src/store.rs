@@ -267,6 +267,9 @@ pub struct Store {
     pending: BTreeMap<OpId, Pending>,
     undo: Option<(OpId, UndoAction)>,
     sends: HashMap<OpId, SendState>,
+    /// Sends still in flight whose compose window has closed: their outcome becomes a
+    /// notice, since no window is left to show it.
+    abandoned: HashSet<OpId>,
     /// The thread each reply or forward went into.
     send_threads: HashMap<OpId, ThreadKey>,
     next_op: OpId,
@@ -394,6 +397,7 @@ impl Store {
             pending: BTreeMap::new(),
             undo: None,
             sends: HashMap::new(),
+            abandoned: HashSet::new(),
             send_threads: HashMap::new(),
             next_op: 1,
             new_mail: Vec::new(),
@@ -585,6 +589,20 @@ impl Store {
 
     pub fn send_state(&self, op: OpId) -> Option<&SendState> {
         self.sends.get(&op)
+    }
+
+    /// The compose window that started `op` has seen its outcome: forget it.
+    pub fn forget_send(&mut self, op: OpId) {
+        self.sends.remove(&op);
+    }
+
+    /// The compose window that started `op` closed: a send still in flight reports its
+    /// outcome as a notice instead, and a settled one is forgotten.
+    pub fn abandon_send(&mut self, op: OpId) {
+        if self.sends.get(&op) == Some(&SendState::Sending) {
+            self.abandoned.insert(op);
+        }
+        self.sends.remove(&op);
     }
 
     /// Hands new-mail summaries to the notifier and forgets them.
@@ -1568,9 +1586,12 @@ impl Store {
             SyncEvent::MutationFinished { op, error } => self.on_mutation_finished(op, error),
             SyncEvent::SendFinished { op, error } => {
                 let thread = self.send_threads.remove(&op);
+                let watched = !self.abandoned.remove(&op);
                 match error {
                     None => {
-                        self.sends.insert(op, SendState::Sent);
+                        if watched {
+                            self.sends.insert(op, SendState::Sent);
+                        }
                         self.post_notice("Message sent".into(), None);
                         // The cached detail lacks the new message: fetch it again, keeping
                         // the old one on screen until the new one arrives.
@@ -1580,8 +1601,17 @@ impl Store {
                             self.send_command(Command::OpenThread(key));
                         }
                     }
-                    Some(e) => {
+                    Some(e) if watched => {
                         self.sends.insert(op, SendState::Failed(e));
+                    }
+                    // Its window is gone, so the failure would otherwise go unseen.
+                    Some(e) => {
+                        let text = if e.maybe_sent {
+                            "The message may not have been sent"
+                        } else {
+                            "Couldn't send the message"
+                        };
+                        self.post_notice(text.into(), None);
                     }
                 }
             }
@@ -1820,6 +1850,8 @@ mod tests {
             error: Some(failure.clone()),
         });
         assert_eq!(s.send_state(8), Some(&SendState::Failed(failure)));
+        s.forget_send(8);
+        assert_eq!(s.send_state(8), None);
         s.apply(SyncEvent::NewMail {
             account: ME.into(),
             threads: vec![summary(9, &["INBOX", "UNREAD"])],
@@ -2361,6 +2393,32 @@ mod tests {
         s.prefs.notifications = false;
         s.apply(ev());
         assert!(s.take_new_mail().is_empty());
+    }
+
+    #[test]
+    fn abandoned_send_failure_becomes_a_notice() {
+        let (mut s, _rx) = store();
+        let op = s.send(crate::ui::compose::blank(&ME.to_string()));
+        assert_eq!(s.send_state(op), Some(&SendState::Sending));
+        s.abandon_send(op);
+        assert_eq!(s.send_state(op), None);
+        s.apply(SyncEvent::SendFinished {
+            op,
+            error: Some(SendError {
+                message: "No".into(),
+                maybe_sent: false,
+            }),
+        });
+        assert_eq!(s.send_state(op), None, "nothing is left behind");
+        assert_eq!(
+            s.notice.as_ref().map(|n| n.text.as_str()),
+            Some("Couldn't send the message")
+        );
+        // A settled send that is abandoned is just forgotten.
+        let op = s.send(crate::ui::compose::blank(&ME.to_string()));
+        s.apply(SyncEvent::SendFinished { op, error: None });
+        s.abandon_send(op);
+        assert_eq!(s.send_state(op), None);
     }
 
     #[test]

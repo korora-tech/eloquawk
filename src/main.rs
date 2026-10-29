@@ -104,7 +104,8 @@ fn main() {
                 .detach();
             }
 
-            cx.on_action(|_: &ui::Quit, cx| cx.quit());
+            // Edited compose windows ask before the app quits.
+            cx.on_action(|_: &ui::Quit, cx| cx.defer(ui::compose::request_quit));
             cx.on_window_closed(|cx, _| {
                 if cx.windows().is_empty() {
                     cx.quit();
@@ -169,8 +170,13 @@ fn run_step(step: &Step, store: &Entity<Store>, cx: &mut App) {
         report("ELOQUAWK_EXPECT fail step (no window)".into());
         return;
     };
-    // The focused window; the main window when none is (for example, unfocused on niri).
-    let target: AnyWindowHandle = cx.active_window().unwrap_or_else(|| main.into());
+    // The focused window. When none is (an idle or locked niri session gives new windows no
+    // focus), the newest compose window stands in for the one a compositor would focus, and
+    // otherwise the main window.
+    let target: AnyWindowHandle = cx
+        .active_window()
+        .or_else(|| ui::compose::newest_compose_window(cx))
+        .unwrap_or_else(|| main.into());
     match step {
         Step::Wait(_) => {}
         Step::Shot => {

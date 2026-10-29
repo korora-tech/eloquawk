@@ -501,6 +501,12 @@ impl MainView {
         let Some((key, kind)) = self.pending_compose.clone() else {
             return;
         };
+        // The user moved on (another thread, another view) before the detail arrived: a
+        // window for the earlier thread popping up later would be a surprise.
+        if self.store.read(cx).open.as_ref() != Some(&key) {
+            self.pending_compose = None;
+            return;
+        }
         let prefill = {
             let s = self.store.read(cx);
             match s.details.get(&key) {
