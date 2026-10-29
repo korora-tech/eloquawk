@@ -442,15 +442,59 @@ struct RowState {
     selected: bool,
 }
 
-/// A paper-clip stand-in drawn with divs: a small rounded outline.
+/// A paper clip drawn with divs (the UI font has no clip glyph and emoji are not used): the
+/// wire's narrow top bend, its wide bottom bend with the free end on the right, and the inner
+/// U whose free end points up.
 fn attachment_mark(p: &Palette) -> Div {
+    let wire = rgb(p.muted);
+    let stroke = px(1.5);
     div()
         .flex_shrink_0()
-        .w(px(7.0))
-        .h(px(12.0))
-        .rounded(px(4.0))
-        .border(px(1.5))
-        .border_color(rgb(p.muted))
+        .relative()
+        .w(px(10.0))
+        .h(px(15.0))
+        // Top bend: outer left side up and over to the inner right side.
+        .child(
+            div()
+                .absolute()
+                .left_0()
+                .top_0()
+                .w(px(7.5))
+                .h(px(10.0))
+                .border_t(stroke)
+                .border_l(stroke)
+                .border_r(stroke)
+                .rounded_t(px(3.75))
+                .border_color(wire),
+        )
+        // Bottom bend: the outer left side down and round, ending part way up the right.
+        .child(
+            div()
+                .absolute()
+                .left_0()
+                .top(px(5.0))
+                .w(px(10.0))
+                .h(px(10.0))
+                .border_b(stroke)
+                .border_l(stroke)
+                .border_r(stroke)
+                .rounded_b(px(5.0))
+                .border_color(wire),
+        )
+        // Inner U, sharing the top bend's right side.
+        .child(
+            div()
+                .absolute()
+                .left(px(3.0))
+                .top(px(3.5))
+                .w(px(4.5))
+                .h(px(8.0))
+                .border_b(stroke)
+                .border_l(stroke)
+                .border_r(stroke)
+                .rounded_b(px(2.25))
+                .border_color(wire),
+        )
 }
 
 /// A row whose summary has not arrived: grey bars.

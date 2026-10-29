@@ -861,7 +861,8 @@ Navigation:
     right-aligned and tabular.
   - Line 2: the subject (semibold when unread), then " — " and the snippet in muted text, all
     `truncate`d. On the right, a star (★ in AMBER or ☆ muted, and clicking it toggles), plus an
-    attachment mark when `has_attachments`.
+    attachment mark when `has_attachments` (a paper clip drawn with divs; the UI font has no
+    clip glyph).
   - Row states: hover, cursor (SELECTED background with an accent left border 3px), x-selected
     (a checkbox square filled), and skeleton (grey bars).
 - **Reader (`ReaderView` entity, `ui/reader.rs`):**
