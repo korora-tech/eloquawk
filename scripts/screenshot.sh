@@ -23,8 +23,10 @@ theme=${3:-dark}
 cd "$(dirname "$0")/.."
 cargo build --quiet
 mkdir -p target/shots
-log=$(mktemp)
-clip=$(mktemp)
+# The clipboard copy may hold mail text: keep it on the user's private tmpfs when there is one.
+tmp="${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}"
+log=$(mktemp -p "$tmp")
+clip=$(mktemp -p "$tmp")
 shot="$PWD/target/shots/$name.png"
 rm -f "$shot"
 
