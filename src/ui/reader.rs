@@ -4,22 +4,29 @@
 //! or its summary changes.
 //!
 //! The scroll area's children are the subject block (child 0) and then exactly one child per
-//! message card, so card i is child i + 1. Bodies are plain wrapped text until M5 makes them
-//! selectable.
+//! message card, so card i is child i + 1.
+//!
+//! Each expanded message's body is a [`BodyText`] entity (and an unfolded quote a second one),
+//! kept in a map by message id and dropped when the thread closes. Link clicks from a body
+//! come here: http and https open in the browser, mailto goes through the whitelisted parser
+//! of `mail/mailto.rs`, and nothing else is ever opened.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, ClickEvent, Context, Div, Entity, FocusHandle, Focusable, FontWeight, ScrollHandle,
-    SharedString, Subscription, Window, div, point, px, rgb,
+    AnyElement, ClickEvent, ClipboardItem, Context, Div, Entity, FocusHandle, Focusable,
+    FontWeight, ScrollHandle, SharedString, Subscription, Window, div, point, px, rgb,
 };
 use jiff::Zoned;
 
+use super::body_text::{BodyEvent, BodyText};
 use super::format;
 use super::theme::{Palette, palette};
 use super::widgets::{ButtonStyle, OnClick, button, caption, ghost_button, label_chip};
 use crate::mail::address::display_name;
+use crate::mail::links::LinkTarget;
+use crate::mail::mailto;
 use crate::model::{
     Address, BodySource, LabelDelta, LabelKind, Message, ThreadDetail, ThreadKey, ThreadSummary,
     ViewKind, labels,
@@ -98,6 +105,55 @@ pub fn split_quote(body: &str) -> (&str, Option<&str>) {
     (shown, Some(body[cut..].trim_end()))
 }
 
+/// What an expanded card shows of a message body.
+#[derive(Debug, PartialEq)]
+pub struct BodyParts {
+    /// The body above any folded quote (the snippet when there is no body).
+    pub main: String,
+    /// The trailing quote that folds behind "• • •".
+    pub quote: Option<String>,
+    /// "Converted from HTML", "Message truncated".
+    pub captions: Vec<&'static str>,
+}
+
+impl BodyParts {
+    pub fn of(m: &Message) -> Self {
+        let (body, cut) = cut_body(&m.body, MAX_BODY);
+        let (shown, quote) = split_quote(body);
+        let mut captions = Vec::new();
+        if m.body_source == BodySource::Html {
+            captions.push("Converted from HTML");
+        }
+        if cut || m.body_truncated {
+            captions.push("Message truncated");
+        }
+        let main = if m.body_source == BodySource::Empty && shown.trim().is_empty() {
+            m.snippet.clone()
+        } else {
+            // Trailing blank lines would only pad the card and the copied text.
+            shown.trim_end().to_string()
+        };
+        Self {
+            main,
+            quote: quote.map(str::to_string),
+            captions,
+        }
+    }
+
+    /// The text the card's Copy button copies: what is visible.
+    pub fn visible(&self, unfolded: bool) -> String {
+        match (&self.quote, unfolded) {
+            (Some(q), true) => format!("{}\n\n{q}", self.main),
+            _ => self.main.clone(),
+        }
+    }
+}
+
+/// The map key of a message's quote body.
+fn quote_key(id: &str) -> String {
+    format!("{id}#quote")
+}
+
 /// A user label's id, name and colours, for the subject's chips.
 type ChipLabel = (String, String, Option<(u32, u32)>);
 
@@ -172,6 +228,9 @@ pub struct ReaderView {
     /// that arrives later (refresh, new mail, a sent reply) gets its default too while the
     /// user's toggles on the others are kept.
     seen: HashSet<String>,
+    /// Body entities by message id (quotes under [`quote_key`]), with their event
+    /// subscriptions; dropped when the open thread changes.
+    bodies: HashMap<String, (Entity<BodyText>, Subscription)>,
     _subscription: Subscription,
 }
 
@@ -185,6 +244,7 @@ impl ReaderView {
                     this.expanded.clear();
                     this.unfolded.clear();
                     this.seen.clear();
+                    this.bodies.clear();
                 }
                 this.last = next;
                 cx.notify();
@@ -199,6 +259,7 @@ impl ReaderView {
             expanded: HashSet::new(),
             unfolded: HashSet::new(),
             seen: HashSet::new(),
+            bodies: HashMap::new(),
             _subscription: subscription,
         }
     }
@@ -218,9 +279,105 @@ impl ReaderView {
         });
     }
 
+    /// The body entity under `key`, created on first use and kept in step with `text`.
+    fn body(
+        &mut self,
+        key: String,
+        text: String,
+        secondary: bool,
+        cx: &mut Context<Self>,
+    ) -> Entity<BodyText> {
+        if let Some((body, _)) = self.bodies.get(&key) {
+            let body = body.clone();
+            body.update(cx, |b, cx| b.set_text(text, cx));
+            return body;
+        }
+        let body = cx.new(|cx| BodyText::new(text, secondary, cx));
+        let subscription = cx.subscribe(&body, |this, body, event: &BodyEvent, cx| match event {
+            BodyEvent::Selecting => this.clear_selections_except(&body, cx),
+            BodyEvent::OpenLink(target) => this.open_link(target, cx),
+        });
+        self.bodies.insert(key, (body.clone(), subscription));
+        body
+    }
+
+    /// A selection spans one body: starting one clears the others.
+    fn clear_selections_except(&self, keep: &Entity<BodyText>, cx: &mut Context<Self>) {
+        for (body, _) in self.bodies.values() {
+            if body != keep {
+                body.update(cx, |b, cx| b.clear_selection(cx));
+            }
+        }
+    }
+
+    /// Opens a clicked link: http and https in the browser, mailto in the composer. The
+    /// schemes are checked again here, so nothing else can be opened whatever the detector
+    /// produced.
+    fn open_link(&self, target: &LinkTarget, cx: &mut Context<Self>) {
+        let url = target.url();
+        match target {
+            LinkTarget::Web(_) => {
+                let lower = url.get(..8).unwrap_or(url).to_ascii_lowercase();
+                if lower.starts_with("https://") || lower.starts_with("http://") {
+                    spawn_open(url.to_string(), cx);
+                }
+            }
+            LinkTarget::Mail(_) => {
+                let Some(account) = self.last.open.as_ref().map(|k| k.account.clone()) else {
+                    return;
+                };
+                let from = Address::new(None, &account);
+                if mailto::parse(url, &account, from).is_some() {
+                    // The composer arrives in M8, which opens the prefill here.
+                    self.store.update(cx, |s, cx| {
+                        s.inform("Writing mail is not available yet");
+                        cx.notify();
+                    });
+                } else {
+                    eprintln!("eloquawk: ignored a link that is not a mailto URL");
+                }
+            }
+        }
+    }
+
+    /// The demo script's `selectall:N`: expands card N, focuses its body and selects all.
+    pub fn select_all_in_card(
+        &mut self,
+        n: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        let key = self.last.open.clone().ok_or("no open thread")?;
+        let messages = match self.store.read(cx).details.get(&key) {
+            Some(DetailState::Loaded(detail)) => detail.messages.clone(),
+            _ => return Err("the thread is not loaded".into()),
+        };
+        let m = messages.get(n).ok_or_else(|| format!("no card {n}"))?;
+        self.initialise_messages(&messages);
+        self.expanded.insert(m.id.clone());
+        let body = self.body(m.id.clone(), BodyParts::of(m).main, false, cx);
+        body.update(cx, |b, cx| b.select_all_and_focus(window, cx));
+        cx.notify();
+        Ok(())
+    }
+
+    /// The selected text of whichever body has a selection (at most one has).
+    pub fn selection_text(&self, cx: &gpui::App) -> String {
+        self.bodies
+            .values()
+            .map(|(b, _)| b.read(cx).selected_text())
+            .find(|t| !t.is_empty())
+            .unwrap_or_default()
+            .to_string()
+    }
+
+    fn initialise_messages(&mut self, messages: &[Message]) {
+        expand_new(&mut self.seen, &mut self.expanded, messages);
+    }
+
     /// By default the unread messages and the last one are expanded.
     fn initialise(&mut self, detail: &ThreadDetail) {
-        expand_new(&mut self.seen, &mut self.expanded, &detail.messages);
+        self.initialise_messages(&detail.messages);
     }
 
     fn action_bar(&self, p: &Palette, summary: Option<&ThreadSummary>, cx: &Context<Self>) -> Div {
@@ -265,14 +422,7 @@ impl ReaderView {
                 Some(self.click(cx, |this, _, cx| this.mutate(MutationKind::Trash, cx))),
             )
         };
-        let gmail_url = summary.map(|s| {
-            let email: String =
-                url::form_urlencoded::byte_serialize(s.key.account.as_bytes()).collect();
-            format!(
-                "https://mail.google.com/mail/u/?authuser={email}#all/{}",
-                s.key.id
-            )
-        });
+        let gmail_url = summary.map(gmail_url);
         div()
             .flex_shrink_0()
             .flex()
@@ -350,12 +500,13 @@ impl ReaderView {
     }
 
     fn card(
-        &self,
+        &mut self,
         p: &Palette,
         ix: usize,
         m: &Message,
         now: &Zoned,
-        cx: &Context<Self>,
+        gmail_url: Option<&str>,
+        cx: &mut Context<Self>,
     ) -> AnyElement {
         let expanded = self.expanded.contains(&m.id);
         let unread = m.label_ids.contains(labels::UNREAD);
@@ -379,6 +530,9 @@ impl ReaderView {
             .flex()
             .flex_col();
         if !expanded {
+            // A collapsed card keeps no body entities, so no hidden selection lingers.
+            self.bodies.remove(&m.id);
+            self.bodies.remove(&quote_key(&m.id));
             return shell
                 .child(
                     div()
@@ -424,22 +578,20 @@ impl ReaderView {
                 .into_any_element();
         }
         let recipients = recipients_line(m);
-        let (body, cut) = cut_body(&m.body, MAX_BODY);
-        let (shown, quote) = split_quote(body);
+        let parts = BodyParts::of(m);
         let unfolded = self.unfolded.contains(&m.id);
         let qid = m.id.clone();
-        let mut captions: Vec<&str> = Vec::new();
-        if m.body_source == BodySource::Html {
-            captions.push("Converted from HTML");
-        }
-        if cut || m.body_truncated {
-            captions.push("Message truncated");
-        }
-        let body_text = if m.body_source == BodySource::Empty && shown.trim().is_empty() {
-            m.snippet.clone()
-        } else {
-            shown.to_string()
-        };
+        let copy_text = parts.visible(unfolded);
+        let body = self.body(m.id.clone(), parts.main.clone(), false, cx);
+        let quote = parts.quote.clone().map(|q| {
+            let body = unfolded.then(|| self.body(quote_key(&m.id), q, true, cx));
+            if !unfolded {
+                // A folded quote keeps no entity (nor selection).
+                self.bodies.remove(&quote_key(&m.id));
+            }
+            body
+        });
+        let captions = parts.captions.clone();
         shell
             .child(
                 div()
@@ -500,6 +652,22 @@ impl ReaderView {
                             .line_height(px(18.0))
                             .text_color(rgb(p.caption))
                             .child(format::full_date(m.date, now, clock)),
+                    )
+                    .child(
+                        ghost_button(
+                            p,
+                            ("copy", ix),
+                            "Copy",
+                            Some(Box::new(move |_, _, cx: &mut gpui::App| {
+                                // The header toggles the card; copying must not.
+                                cx.stop_propagation();
+                                cx.write_to_clipboard(ClipboardItem::new_string(copy_text.clone()));
+                            })),
+                        )
+                        .flex_shrink_0()
+                        .h(px(22.0))
+                        .px(px(8.0))
+                        .text_size(px(12.0)),
                     ),
             )
             .child(
@@ -508,8 +676,7 @@ impl ReaderView {
                     .pb(px(12.0))
                     .text_size(px(13.5))
                     .line_height(px(21.0))
-                    .text_color(rgb(p.text))
-                    .child(body_text),
+                    .child(body),
             )
             .when_some(quote, |d, quote| {
                 d.child(
@@ -538,22 +705,39 @@ impl ReaderView {
                             .bg(rgb(p.panel_raised))
                             .text_size(px(10.0)),
                         )
-                        .when(unfolded, |d| {
+                        .when_some(quote, |d, body| {
                             d.child(
                                 div()
+                                    .w_full()
                                     .text_size(px(13.0))
                                     .line_height(px(20.0))
-                                    .text_color(rgb(p.secondary))
-                                    .child(quote.to_string()),
+                                    .child(body),
                             )
                         }),
                 )
             })
             .when(!captions.is_empty(), |d| {
-                d.child(div().px(px(14.0)).pb(px(10.0)).child(caption(
-                    p,
-                    format!("{} · Open in Gmail", captions.join(" · ")),
-                )))
+                d.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(4.0))
+                        .px(px(14.0))
+                        .pb(px(10.0))
+                        .child(caption(p, format!("{} ·", captions.join(" · "))))
+                        .child(
+                            div()
+                                .id(("caption-gmail", ix))
+                                .text_size(px(11.0))
+                                .line_height(px(16.0))
+                                .text_color(rgb(p.link))
+                                .underline()
+                                .when_some(gmail_url.map(str::to_string), |d, url| {
+                                    d.cursor_pointer().on_click(open_url(url))
+                                })
+                                .child("Open in Gmail"),
+                        ),
+                )
             })
             .when(!m.attachments.is_empty(), |d| {
                 d.child(
@@ -623,6 +807,15 @@ impl ReaderView {
     }
 }
 
+/// The thread in Gmail on the web, for "Open in Gmail".
+fn gmail_url(s: &ThreadSummary) -> String {
+    let email: String = url::form_urlencoded::byte_serialize(s.key.account.as_bytes()).collect();
+    format!(
+        "https://mail.google.com/mail/u/?authuser={email}#all/{}",
+        s.key.id
+    )
+}
+
 /// "to Ann, Bob · cc Cleo".
 fn recipients_line(m: &Message) -> String {
     let names = |list: &[Address]| {
@@ -648,17 +841,19 @@ fn recipients_line(m: &Message) -> String {
     }
 }
 
-/// Opens an https URL in the browser, off the UI thread. The URL is not logged.
-fn open_url(url: String) -> OnClick {
-    Box::new(move |_, _, cx| {
-        let url = url.clone();
-        cx.background_spawn(async move {
-            if let Err(e) = open::that(&url) {
-                eprintln!("eloquawk: could not open the browser: {}", e.kind());
-            }
-        })
-        .detach();
+/// Opens an http or https URL in the browser, off the UI thread. The URL is not logged.
+fn spawn_open(url: String, cx: &mut gpui::App) {
+    cx.background_spawn(async move {
+        if let Err(e) = open::that(&url) {
+            eprintln!("eloquawk: could not open the browser: {}", e.kind());
+        }
     })
+    .detach();
+}
+
+/// A click handler opening `url` in the browser.
+fn open_url(url: String) -> OnClick {
+    Box::new(move |_, _, cx| spawn_open(url.clone(), cx))
 }
 
 impl Focusable for ReaderView {
@@ -709,8 +904,9 @@ impl Render for ReaderView {
                     .as_ref()
                     .map_or_else(|| detail.label_ids.clone(), |s| s.label_ids.clone());
                 scroll = scroll.child(self.subject_block(p, &detail.subject, &label_ids));
+                let gmail_url = summary.as_ref().map(gmail_url);
                 for (i, m) in detail.messages.iter().enumerate() {
-                    scroll = scroll.child(self.card(p, i, m, &now, cx));
+                    scroll = scroll.child(self.card(p, i, m, &now, gmail_url.as_deref(), cx));
                 }
             }
             Ok(None) => {
@@ -792,6 +988,56 @@ mod tests {
         assert_eq!(split_quote(""), ("", None));
     }
 
+    fn message(id: &str, unread: bool) -> Message {
+        Message {
+            id: id.into(),
+            thread_id: "t".into(),
+            label_ids: if unread {
+                [labels::UNREAD.to_string()].into()
+            } else {
+                BTreeSet::new()
+            },
+            from: Address::new(None, "a@example.com"),
+            to: vec![],
+            cc: vec![],
+            bcc: vec![],
+            reply_to: vec![],
+            date: jiff::Timestamp::UNIX_EPOCH,
+            subject: String::new(),
+            message_id: None,
+            in_reply_to: None,
+            references: vec![],
+            snippet: String::new(),
+            body: String::new(),
+            body_source: BodySource::Plain,
+            body_truncated: false,
+            attachments: vec![],
+        }
+    }
+
+    #[test]
+    fn body_parts_split_trim_and_caption() {
+        let mut m = message("m", false);
+        m.body = "Thanks!\n\n> earlier\n".into();
+        let parts = BodyParts::of(&m);
+        assert_eq!(parts.main, "Thanks!");
+        assert_eq!(parts.quote.as_deref(), Some("> earlier"));
+        assert!(parts.captions.is_empty());
+        assert_eq!(parts.visible(false), "Thanks!");
+        assert_eq!(parts.visible(true), "Thanks!\n\n> earlier");
+
+        m.body = "x".repeat(MAX_BODY + 10);
+        m.body_source = BodySource::Html;
+        let parts = BodyParts::of(&m);
+        assert_eq!(parts.main.len(), MAX_BODY);
+        assert_eq!(parts.captions, ["Converted from HTML", "Message truncated"]);
+
+        m.body = String::new();
+        m.body_source = BodySource::Empty;
+        m.snippet = "Only a snippet".into();
+        assert_eq!(BodyParts::of(&m).main, "Only a snippet");
+    }
+
     #[test]
     fn recipients_are_summarised() {
         let mut m = Message {
@@ -825,30 +1071,7 @@ mod tests {
 
     #[test]
     fn new_messages_get_their_default_expansion_and_toggles_are_kept() {
-        let msg = |id: &str, unread: bool| Message {
-            id: id.into(),
-            thread_id: "t".into(),
-            label_ids: if unread {
-                [labels::UNREAD.to_string()].into()
-            } else {
-                BTreeSet::new()
-            },
-            from: Address::new(None, "a@example.com"),
-            to: vec![],
-            cc: vec![],
-            bcc: vec![],
-            reply_to: vec![],
-            date: jiff::Timestamp::UNIX_EPOCH,
-            subject: String::new(),
-            message_id: None,
-            in_reply_to: None,
-            references: vec![],
-            snippet: String::new(),
-            body: String::new(),
-            body_source: BodySource::Plain,
-            body_truncated: false,
-            attachments: vec![],
-        };
+        let msg = message;
         let (mut seen, mut expanded) = (HashSet::new(), HashSet::new());
         let mut messages = vec![msg("a", false), msg("b", true), msg("c", false)];
         expand_new(&mut seen, &mut expanded, &messages);

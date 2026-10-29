@@ -39,7 +39,7 @@ pub enum Cond {
     Focus(FocusTarget),
     /// The search field holds this text.
     Search(String),
-    /// The selected body text (selection arrives in M5).
+    /// The selected body text.
     Selection(String),
 }
 
@@ -53,6 +53,8 @@ pub enum Step {
     Shot,
     /// Put the cursor on row N and open it.
     Open(usize),
+    /// Focus card N's body in the open thread and select all of it.
+    SelectAll(usize),
     /// Dispatch the named action (see [`demo_action`]).
     Act(String),
     /// Send each character as a keystroke.
@@ -167,6 +169,10 @@ fn parse_step(step: &str) -> Step {
                 _ => unknown(),
             },
             "open" => value.parse().map(Step::Open).unwrap_or_else(|_| unknown()),
+            "selectall" => value
+                .parse()
+                .map(Step::SelectAll)
+                .unwrap_or_else(|_| unknown()),
             "act" if demo_action(value).is_some() => Step::Act(value.to_string()),
             "type" if !value.is_empty() => Step::Type(value.to_string()),
             "expect" => match parse_cond(value) {
@@ -226,7 +232,7 @@ mod tests {
     fn every_step_kind_parses() {
         let steps = parse_steps(
             "wait:800,theme:light,theme:dark,shot,open:3,act:NextThread,type:hello,\
-             expect:cursor=2,j,g i",
+             expect:cursor=2,selectall:0,j,g i",
         );
         assert_eq!(
             steps,
@@ -242,6 +248,7 @@ mod tests {
                     raw: "cursor=2".into(),
                     cond: Cond::Cursor(2)
                 },
+                Step::SelectAll(0),
                 keys(&["j"]),
                 keys(&["g", "i"]),
             ]
@@ -312,12 +319,13 @@ mod tests {
     #[test]
     fn unknown_steps_are_reported() {
         assert_eq!(
-            parse_steps("bogus:1,wait:x,theme:sepia,act:Nope,frobnicate,,"),
+            parse_steps("bogus:1,wait:x,theme:sepia,act:Nope,selectall:x,frobnicate,,"),
             vec![
                 Step::Unknown("bogus:1".into()),
                 Step::Unknown("wait:x".into()),
                 Step::Unknown("theme:sepia".into()),
                 Step::Unknown("act:Nope".into()),
+                Step::Unknown("selectall:x".into()),
                 Step::Unknown("frobnicate".into()),
             ]
         );

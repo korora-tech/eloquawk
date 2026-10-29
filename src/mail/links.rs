@@ -16,7 +16,6 @@ pub enum LinkTarget {
 }
 
 impl LinkTarget {
-    #[allow(dead_code)] // consumed in M5
     pub fn url(&self) -> &str {
         match self {
             LinkTarget::Web(u) | LinkTarget::Mail(u) => u,
@@ -27,7 +26,6 @@ impl LinkTarget {
 const SCHEMES: [(&str, bool); 3] = [("https://", false), ("http://", false), ("mailto:", true)];
 
 /// Finds links in `text`, returning byte ranges (into `text`) in order with their targets.
-#[allow(dead_code)] // consumed in M5
 pub fn find_links(text: &str) -> Vec<(Range<usize>, LinkTarget)> {
     let bytes = text.as_bytes();
     let mut out: Vec<(Range<usize>, LinkTarget)> = Vec::new();

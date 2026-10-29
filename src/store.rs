@@ -416,6 +416,11 @@ impl Store {
         });
     }
 
+    /// Posts a plain toast from the UI, such as a feature that is not available yet.
+    pub fn inform(&mut self, text: impl Into<String>) {
+        self.post_notice(text.into(), None);
+    }
+
     /// Clears the toast (it expired or was dismissed); its undo goes with it.
     pub fn clear_notice(&mut self) {
         self.notice = None;

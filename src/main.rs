@@ -194,6 +194,18 @@ fn run_step(step: &Step, store: &Entity<Store>, cx: &mut App) {
         Step::Open(n) => {
             let _ = main.update(cx, |view, _, cx| view.open_row(*n, cx));
         }
+        Step::SelectAll(n) => {
+            let result = main.update(cx, |view, window, cx| {
+                view.select_all_in_card(*n, window, cx)
+            });
+            match result {
+                Ok(Ok(())) => {}
+                Ok(Err(why)) => report(format!("ELOQUAWK_EXPECT fail step selectall:{n} ({why})")),
+                Err(_) => report(format!(
+                    "ELOQUAWK_EXPECT fail step selectall:{n} (no window)"
+                )),
+            }
+        }
         Step::Act(name) => match demo_script::demo_action(name) {
             Some(action) => {
                 let _ = target.update(cx, |_, window, cx| window.dispatch_action(action, cx));

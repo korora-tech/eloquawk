@@ -149,6 +149,17 @@ impl MainView {
         });
     }
 
+    /// The demo script's `selectall:N`: selects all of card N's body in the open thread.
+    pub fn select_all_in_card(
+        &mut self,
+        n: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        self.reader
+            .update(cx, |reader, cx| reader.select_all_in_card(n, window, cx))
+    }
+
     // ----- demo script checks -------------------------------------------------------------
 
     fn focus_target(&self, window: &Window, cx: &gpui::App) -> Option<FocusTarget> {
@@ -209,8 +220,10 @@ impl MainView {
                 let actual = self.search.read(cx).text().to_string();
                 (actual == *want, actual)
             }
-            // Message text becomes selectable in M5; until then nothing is ever selected.
-            Cond::Selection(want) => (want.is_empty(), String::new()),
+            Cond::Selection(want) => {
+                let actual = self.reader.read(cx).selection_text(cx);
+                (actual == *want, actual)
+            }
         };
         if ok { Ok(()) } else { Err(actual) }
     }

@@ -1502,6 +1502,24 @@ milestone are welcome. **No trailers.** Push to main after each commit.
     exercised in automated runs); `file:` and `javascript:` text is not linked.
   - Shots: `reader`, `selection`, `newsletter`.
 
+- **M5 notes:**
+  - Until the composer lands (M8), a mailto link click runs the whitelisted parser and posts
+    the notice "Writing mail is not available yet"; M8 opens the prefill instead.
+    `mailto::parse(url, account, from) -> Option<Outgoing>` takes the sending account, since
+    `Outgoing` needs one.
+  - `expect:selection=<text>` compares exactly. The reader trims trailing whitespace off the
+    shown body, so a whole-body selection has no trailing newline.
+  - `selectall:N` expands card N if it is collapsed before selecting.
+  - The card's Copy button copies what is visible: the body, plus the quote when unfolded. The
+    "Open in Gmail" part of the HTML and truncation captions is now a link.
+  - A selection spans one body: pressing in a body clears the others. Collapsing a card drops
+    its body entities, and with them any selection.
+  - `SelectableText` registers a window-wide mouse move listener, so a drag that leaves the
+    body keeps extending the selection.
+  - `niri msg action screenshot-window` also puts the PNG on the clipboard, so the ctrl-c
+    check with `wl-paste -n` must run without a `screenshot.sh` capture (launch the binary
+    in the dev shell with the same `--demo-actions` and read the clipboard before killing it).
+
 ### M6: Keyboard shortcuts and action wiring
 - **Files:** `ui/mod.rs` (full key map with the Mail predicate), `ui/main_view.rs` (action
   handlers, focus, toast with Undo, reader scroll keys, n/p card focus via
