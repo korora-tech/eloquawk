@@ -105,7 +105,9 @@ fn url_at(text: &str, i: usize) -> Option<(usize, LinkTarget)> {
     }
     if starts_with_ci(rest, "www.") {
         let end = i + url_len(rest);
-        let host = text[i + 4..end].split(['/', '?', '#', ':']).next()?;
+        // `url_len` strips trailing punctuation, so for a bare `www.` the end can fall
+        // before the host would start.
+        let host = text.get(i + 4..end)?.split(['/', '?', '#', ':']).next()?;
         if host.contains('.') || host.len() >= 2 {
             let url = &text[i..end];
             if url.len() > 4 && !url.ends_with('.') {
@@ -197,6 +199,13 @@ mod tests {
                 ("www.c.example/z", web("https://www.c.example/z")),
             ]
         );
+    }
+
+    #[test]
+    fn bare_www_without_a_host_is_not_a_link() {
+        for t in ["www.", "see www. now", "(www.)", "www.,", "WWW.!"] {
+            assert_eq!(found(t), vec![], "{t}");
+        }
     }
 
     #[test]
