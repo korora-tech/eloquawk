@@ -129,7 +129,6 @@ impl ThreadSummary {
     }
 }
 
-#[allow(dead_code)] // consumed in M4
 #[derive(Clone, Debug, PartialEq)]
 pub struct Attachment {
     pub part_id: String,
@@ -139,7 +138,6 @@ pub struct Attachment {
     pub size: u64,
 }
 
-#[allow(dead_code)] // consumed in M4
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BodySource {
     Plain,

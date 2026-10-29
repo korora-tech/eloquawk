@@ -851,7 +851,9 @@ Navigation:
 - **Thread list:** a flex column holding the `uniform_list` (flex_1) and, as a sibling below it,
   the footer ("Loading…" or a "Load more" button). The list tracks a
   `UniformListScrollHandle`; every cursor move calls `scroll_to_item(ix, ScrollStrategy::..)`
-  with the strategy that keeps the row visible with the least movement (VERIFY names). When the
+  with the strategy that keeps the row visible with the least movement (**M4:** that is
+  `ScrollStrategy::Nearest`; the main view scrolls whenever the cursor key changed since its
+  last render, so auto-advance and clicks follow too). When the
   visible range reaches the last 10 rows and `has_more`, the render callback asks for more
   through `cx.processor` (the store dedupes the request).
 - **Thread row** (fixed `ROW_H`, with explicit `line_height` on every text line):
@@ -1237,7 +1239,7 @@ percent-decoding and the RFC 6068 rules, with a strict whitelist:
     |---|---|---|
     | `wait:N` | sleep N ms | M4 |
     | `theme:light` / `theme:dark` | switch the palette | M4 |
-    | `shot` | print `ELOQUAWK_READY <title of the focused window>` and flush stdout | M4 |
+    | `shot` | print `ELOQUAWK_READY <title of the focused window>` and flush stdout (**M4:** gpui's Wayland and X11 windows return an empty `window_title()`, so the app substitutes the title it gave the window; M8 must do the same for compose windows) | M4 |
     | `open:N` | set the cursor to row N and open it (fallback that needs no key bindings) | M4 |
     | `act:<Name>` | dispatch an action through the tested `demo_action(name) -> Option<Box<dyn Action>>` table with `window.dispatch_action` (for non-key steps) | M4 |
     | `type:<text>` | dispatch each character as a keystroke | M4 |
@@ -1280,7 +1282,7 @@ percent-decoding and the RFC 6068 rules, with a strict whitelist:
 | `ui/format` | `list_date`: today shows the time, this week the weekday, this year "3 Oct", older "3 Oct 2025"; tested with an injected now and time zone. |
 | `cli` | Flag parsing; `--demo-actions` without `--demo` is an error; `--instance` without `--demo` is accepted and ignored. |
 | `demo_script` | Every step kind parses; `comma` and `\,` escapes; chords split into keystrokes; unknown steps reported. |
-| `demo` | `demo_action` table coverage. |
+| `demo_script` (`demo_action`) | `demo_action` table coverage. **M4:** the table lives in `demo_script.rs` next to the step parser, so the worker module `demo.rs` stays free of UI actions. |
 
 ### 12.2 Headless end-to-end (`cargo test`, no window)
 
@@ -1462,6 +1464,18 @@ milestone are welcome. **No trailers.** Push to main after each commit.
     `inbox-dark`, `inbox-light` and `reader` (`j,j,o`) shots, all producible with M4's code.
   - `screenshot.sh x "j,j,o,expect:cursor=2,expect:open=2,u,expect:open=none"` reports only
     `ok` lines.
+
+- **M4 notes:**
+  - The reader already cuts bodies over 200 KB and shows the "Converted from HTML" and
+    "Message truncated" captions (plain text, not yet a link); M5 keeps the cut when bodies
+    become `BodyText`, and adds the Copy button.
+  - Archive, Trash/Restore, Not spam, Mark unread and Star in the action bar, the row star
+    and the row checkbox work by click from M4 (they only call the M3 Store). Labels…, Reply,
+    Reply all, Forward, Compose and Settings render disabled until their milestones.
+  - `Screen` has `Mail` and `Auth` only; `Settings` is added with the settings screen in M9.
+  - `BackToList` (u, escape) closes the reader, or clears the selection when it is already
+    closed. M6 may split escape's overlay handling out.
+  - `expect:selection=` always reports an empty selection until M5.
 
 ### M5: Selectable message text and links
 - **Files:** `ui/text_layout.rs`, `ui/body_text.rs`, `ui/reader.rs` (bodies as `BodyText`,
@@ -1681,5 +1695,6 @@ views.
     through to the focused input handler when no binding matches (needed for `type:` and the
     search test).
 12. The ureq 3.5 per-request timeout call.
-13. The `ScrollStrategy` variant names for `uniform_list` scrolling.
+13. ~~The `ScrollStrategy` variant names~~ **Resolved at M4:** `Top`, `Center`, `Bottom`,
+    `Nearest`; the list uses `Nearest`.
 14. The response shape of `messages.send` with `uploadType=multipart`.

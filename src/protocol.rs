@@ -41,10 +41,8 @@ pub enum Command {
     #[allow(dead_code)] // consumed in M9
     RemoveAccount(AccountId),
     /// Re-lists what is visible; also retries a locked keyring.
-    #[allow(dead_code)] // consumed in M4
     Refresh,
     /// The user dismissed the banner, including sticky problems.
-    #[allow(dead_code)] // consumed in M4
     DismissProblems,
     /// The view the UI is showing; `more` asks for the next page.
     Want {

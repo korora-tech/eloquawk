@@ -1,90 +1,34 @@
 //! Eloquawk entry point: parses arguments, starts the worker, wraps the [`Store`] in a GPUI
-//! entity, pumps worker events into it, and opens the main window. Quits when the last window
-//! closes, telling the worker to shut down.
-//!
-//! At M3 only the demo worker exists (`--demo`); the window is still the placeholder until
-//! the three-pane UI lands in M4.
+//! entity, pumps worker events into it, applies the theme, opens the main window and, in demo
+//! mode, runs a `--demo-actions` script. Quits when the last window closes, telling the
+//! worker to shut down.
 
 mod branding;
 mod cli;
 mod config;
 mod demo;
 mod demo_data;
+mod demo_script;
 mod google;
 mod mail;
 mod model;
 mod protocol;
 mod store;
+mod ui;
 
-use gpui::{
-    App, AppContext, Bounds, Context, FocusHandle, Focusable, InteractiveElement, IntoElement,
-    KeyBinding, ParentElement, QuitMode, Render, Styled, TitlebarOptions, Window, WindowBounds,
-    WindowOptions, actions, div, px, rgb, size,
-};
+use std::io::Write as _;
+use std::time::Duration;
+
+use gpui::{AnyWindowHandle, App, AppContext, Entity, Keystroke, QuitMode};
 use gpui_platform::application;
 
-use protocol::{Command, SyncHandle};
+use demo_script::Step;
+use protocol::{Command, SyncEvent, SyncHandle};
 use store::{Mode, Store};
+use ui::theme::{self, ThemeOverride};
 
-actions!(eloquawk, [Quit]);
-
-/// The window title, also used by the screenshot script to find the window.
-const TITLE: &str = "Eloquawk";
-
-/// Placeholder root view until the mail view lands.
-struct MainView {
-    focus: FocusHandle,
-}
-
-impl Focusable for MainView {
-    fn focus_handle(&self, _: &App) -> FocusHandle {
-        self.focus.clone()
-    }
-}
-
-impl Render for MainView {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .track_focus(&self.focus)
-            .size_full()
-            .flex()
-            .items_center()
-            .justify_center()
-            .bg(rgb(0x1c1d21))
-            .text_color(rgb(0xe8e8ec))
-            .text_xl()
-            .child(TITLE)
-    }
-}
-
-fn open_main_window(cx: &mut App) {
-    let bounds = Bounds::centered(None, size(px(1280.), px(820.)), cx);
-    let window = cx.open_window(
-        WindowOptions {
-            window_bounds: Some(WindowBounds::Windowed(bounds)),
-            titlebar: Some(TitlebarOptions {
-                title: Some(TITLE.into()),
-                ..Default::default()
-            }),
-            app_id: Some(branding::APP_ID.into()),
-            ..Default::default()
-        },
-        |window, cx| {
-            let view = cx.new(|cx| MainView {
-                focus: cx.focus_handle(),
-            });
-            window.focus(&view.focus_handle(cx), cx);
-            view
-        },
-    );
-    match window {
-        Ok(_) => cx.activate(true),
-        Err(e) => {
-            eprintln!("eloquawk: could not open a window: {e}");
-            cx.quit();
-        }
-    }
-}
+/// The pause before each script step.
+const STEP_DELAY: Duration = Duration::from_millis(250);
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -121,25 +65,36 @@ fn main() {
         eprintln!("eloquawk: Gmail sync is not available yet; run with --demo");
         (SyncHandle::from_sender(std::sync::mpsc::channel().0), None)
     };
+    let script = args.demo_actions.as_deref().map(demo_script::parse_steps);
+    let theme_override = args.theme;
 
     // Explicit: the app decides when to quit, which is when its last window has closed.
     application()
         .with_quit_mode(QuitMode::Explicit)
         .run(move |cx: &mut App| {
+            ui::bind_keys(cx);
+            cx.set_global(ThemeOverride(theme_override));
             let store = cx.new(|_| Store::new(sync.clone(), mode, prefs));
 
-            // Worker → store. The count is logged whenever the queue drains, so a demo run
-            // shows that events flow without logging any mail.
+            // Signals the first ThreadPage, which starts the demo script.
+            let (first_page_tx, first_page_rx) = async_channel::bounded::<()>(1);
+
+            // Worker → store. The count is logged whenever the queue drains, so a run shows
+            // that events flow without logging any mail.
             if let Some(events) = events {
                 let store = store.clone();
                 cx.spawn(async move |cx| {
                     let mut count: u64 = 0;
                     while let Ok(ev) = events.recv().await {
                         count += 1;
+                        let page = matches!(ev, SyncEvent::ThreadPage { .. });
                         store.update(cx, |s, cx| {
                             s.apply(ev);
                             cx.notify();
                         });
+                        if page {
+                            let _ = first_page_tx.try_send(());
+                        }
                         if events.is_empty() {
                             eprintln!("eloquawk: applied {count} worker events");
                         }
@@ -148,8 +103,7 @@ fn main() {
                 .detach();
             }
 
-            cx.on_action(|_: &Quit, cx| cx.quit());
-            cx.bind_keys([KeyBinding::new("ctrl-q", Quit, None)]);
+            cx.on_action(|_: &ui::Quit, cx| cx.quit());
             cx.on_window_closed(|cx, _| {
                 if cx.windows().is_empty() {
                     cx.quit();
@@ -161,6 +115,117 @@ fn main() {
                 async {}
             })
             .detach();
-            open_main_window(cx);
+            ui::windows::show_main_window(&store, cx);
+
+            if let Some(steps) = script {
+                run_script(steps, store, first_page_rx, cx);
+            }
         });
+}
+
+/// Runs `--demo-actions` steps after the first thread page, one every [`STEP_DELAY`].
+fn run_script(
+    steps: Vec<Step>,
+    store: Entity<Store>,
+    first_page: async_channel::Receiver<()>,
+    cx: &mut App,
+) {
+    cx.spawn(async move |cx| {
+        if first_page.recv().await.is_err() {
+            return;
+        }
+        for step in steps {
+            cx.background_executor().timer(STEP_DELAY).await;
+            if let Step::Wait(ms) = step {
+                cx.background_executor()
+                    .timer(Duration::from_millis(ms))
+                    .await;
+                continue;
+            }
+            cx.update(|cx| run_step(&step, &store, cx));
+        }
+    })
+    .detach();
+}
+
+fn report(line: String) {
+    let mut out = std::io::stdout().lock();
+    let _ = writeln!(out, "{line}");
+    let _ = out.flush();
+}
+
+/// Sends one keystroke to `window` as if typed.
+fn send_key(window: AnyWindowHandle, ks: Keystroke, cx: &mut App) {
+    if let Err(e) = window.update(cx, |_, window, cx| {
+        window.dispatch_keystroke(ks, cx);
+    }) {
+        eprintln!("eloquawk: could not send a scripted key: {e}");
+    }
+}
+
+fn run_step(step: &Step, store: &Entity<Store>, cx: &mut App) {
+    let Some(main) = ui::windows::main_window(cx) else {
+        report("ELOQUAWK_EXPECT fail step (no window)".into());
+        return;
+    };
+    // The focused window; the main window when none is (for example, unfocused on niri).
+    let target: AnyWindowHandle = cx.active_window().unwrap_or_else(|| main.into());
+    match step {
+        Step::Wait(_) => {}
+        Step::Shot => {
+            // gpui's Wayland and X11 windows report an empty title, so the main window's
+            // known title stands in.
+            let title = target
+                .update(cx, |_, window, _| window.window_title())
+                .unwrap_or_default();
+            let main_any: AnyWindowHandle = main.into();
+            let title = if title.is_empty() && target == main_any {
+                ui::windows::MAIN_TITLE.to_string()
+            } else {
+                title
+            };
+            report(format!("ELOQUAWK_READY {title}"));
+        }
+        Step::Theme(pref) => {
+            cx.set_global(ThemeOverride(Some(*pref)));
+            let saved = store.read(cx).prefs.theme;
+            let _ = main.update(cx, |_, window, cx| theme::apply(saved, window, cx));
+        }
+        Step::Open(n) => {
+            let _ = main.update(cx, |view, _, cx| view.open_row(*n, cx));
+        }
+        Step::Act(name) => match demo_script::demo_action(name) {
+            Some(action) => {
+                let _ = target.update(cx, |_, window, cx| window.dispatch_action(action, cx));
+            }
+            None => report(format!("ELOQUAWK_EXPECT fail step act:{name}")),
+        },
+        Step::Type(text) => {
+            for ch in text.chars() {
+                let ks = Keystroke {
+                    modifiers: Default::default(),
+                    key: ch.to_lowercase().to_string(),
+                    key_char: Some(ch.to_string()),
+                };
+                send_key(target, ks, cx);
+            }
+        }
+        Step::Keys(keys) => {
+            for key in keys {
+                match Keystroke::parse(key) {
+                    Ok(ks) => send_key(target, ks, cx),
+                    Err(_) => report(format!("ELOQUAWK_EXPECT fail step {key}")),
+                }
+            }
+        }
+        Step::Expect { raw, cond } => {
+            let result = main.update(cx, |view, window, cx| view.check(cond, window, cx));
+            match result {
+                Ok(Ok(())) => report(format!("ELOQUAWK_EXPECT ok {raw}")),
+                Ok(Err(actual)) => report(format!("ELOQUAWK_EXPECT fail {raw} (actual {actual})")),
+                Err(_) => report(format!("ELOQUAWK_EXPECT fail {raw} (actual no window)")),
+            }
+        }
+        Step::Unknown(s) => report(format!("ELOQUAWK_EXPECT fail step {s}")),
+    }
 }

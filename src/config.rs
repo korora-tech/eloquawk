@@ -18,9 +18,7 @@ pub enum ThemePref {
     /// Follow the desktop's light or dark appearance.
     #[default]
     System,
-    #[allow(dead_code)] // consumed in M4
     Light,
-    #[allow(dead_code)] // consumed in M4
     Dark,
 }
 

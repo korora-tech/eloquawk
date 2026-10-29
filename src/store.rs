@@ -72,12 +72,8 @@ pub struct Notice {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MutationKind {
     Labels(LabelDelta),
-    #[allow(dead_code)] // consumed in M4
     Trash,
-    #[allow(dead_code)] // consumed in M4
-    Untrash {
-        restore: LabelDelta,
-    },
+    Untrash { restore: LabelDelta },
 }
 
 impl MutationKind {
@@ -165,6 +161,16 @@ pub enum Row<'a> {
     Skeleton(ThreadKey),
 }
 
+impl Row<'_> {
+    /// The thread this row shows.
+    pub fn key(&self) -> &ThreadKey {
+        match self {
+            Row::Thread(s) => &s.key,
+            Row::Skeleton(k) => k,
+        }
+    }
+}
+
 /// One sidebar entry for an account.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SidebarEntry {
@@ -226,7 +232,6 @@ const SYSTEM_LABELS: &[(&str, &str, Count)] = &[
 ];
 
 pub struct Store {
-    #[allow(dead_code)] // consumed in M4
     pub mode: Mode,
     sync: SyncHandle,
     pub prefs: Prefs,
@@ -412,7 +417,6 @@ impl Store {
     }
 
     /// Clears the toast (it expired or was dismissed); its undo goes with it.
-    #[allow(dead_code)] // consumed in M4
     pub fn clear_notice(&mut self) {
         self.notice = None;
         self.undo = None;
@@ -429,13 +433,11 @@ impl Store {
     }
 
     /// The current view's list state.
-    #[allow(dead_code)] // consumed in M4
     pub fn current_list(&self) -> Option<&ListState> {
         self.view.as_ref().and_then(|v| self.lists.get(v))
     }
 
     /// The current list's rows; ids without a summary are skeletons.
-    #[allow(dead_code)] // consumed in M4
     pub fn visible_rows(&self) -> Vec<Row<'_>> {
         let Some(view) = &self.view else {
             return Vec::new();
@@ -457,7 +459,6 @@ impl Store {
 
     /// The sidebar entries for an account: the system labels in Gmail's order (with All Mail
     /// after Drafts), then visible user labels sorted by name and nested on `/`.
-    #[allow(dead_code)] // consumed in M4
     pub fn labels_for(&self, account: &str) -> Vec<SidebarEntry> {
         let all = self.labels.get(account).map(Vec::as_slice).unwrap_or(&[]);
         let mut out = Vec::new();
@@ -524,7 +525,6 @@ impl Store {
     }
 
     /// The cursor's row index in the current list.
-    #[allow(dead_code)] // consumed in M4
     pub fn cursor_index(&self) -> Option<usize> {
         let cursor = self.cursor.as_ref()?;
         let view = self.view.as_ref()?;
@@ -539,13 +539,11 @@ impl Store {
     }
 
     /// The sender label for a thread row, with the thread's account as "me".
-    #[allow(dead_code)] // consumed in M4
     pub fn participants_label(&self, s: &ThreadSummary) -> ParticipantsLabel {
         address::participants_label(&s.participants, &s.key.account, s.message_count)
     }
 
     /// What a mutation acts on: the selection, else the open thread, else the cursor row.
-    #[allow(dead_code)] // consumed in M4
     pub fn targets(&self) -> Vec<ThreadKey> {
         if !self.selected.is_empty() {
             self.selected.iter().cloned().collect()
@@ -557,7 +555,6 @@ impl Store {
     }
 
     /// Whether a mutation is waiting for the worker.
-    #[allow(dead_code)] // consumed in M4
     pub fn is_pending(&self, key: &ThreadKey) -> bool {
         self.pending
             .values()
@@ -606,7 +603,6 @@ impl Store {
 
     /// Moves the cursor by `delta` rows, clamped to the list. Landing in the last ten rows
     /// asks for the next page when there is one.
-    #[allow(dead_code)] // consumed in M6
     pub fn move_cursor(&mut self, delta: isize) {
         let Some(view) = self.view.clone() else {
             return;
@@ -626,7 +622,6 @@ impl Store {
     }
 
     /// Puts the cursor on row `ix` (clamped).
-    #[allow(dead_code)] // consumed in M4
     pub fn set_cursor_index(&mut self, ix: usize) {
         let Some(view) = &self.view else { return };
         let ids = self.current_ids();
@@ -636,7 +631,6 @@ impl Store {
     }
 
     /// Asks for the current view's next page, once.
-    #[allow(dead_code)] // consumed in M4
     pub fn request_more(&mut self) {
         let Some(view) = self.view.clone() else {
             return;
@@ -651,7 +645,6 @@ impl Store {
     }
 
     /// Opens the cursor row in the reading pane.
-    #[allow(dead_code)] // consumed in M4
     pub fn open_cursor(&mut self) {
         if let Some(key) = self.cursor.clone() {
             self.open_thread(key);
@@ -690,7 +683,6 @@ impl Store {
     }
 
     /// Closes the reading pane.
-    #[allow(dead_code)] // consumed in M4
     pub fn close_thread(&mut self) {
         self.open = None;
     }
@@ -725,7 +717,6 @@ impl Store {
         }
     }
 
-    #[allow(dead_code)] // consumed in M6
     pub fn clear_selection(&mut self) {
         self.selected.clear();
     }
@@ -734,10 +725,15 @@ impl Store {
 
     /// Applies `kind` to the targets (selection, open thread or cursor row) optimistically
     /// and sends it to the worker. Returns the op, or `None` when there was nothing to act on.
-    #[allow(dead_code)] // consumed in M4
     pub fn mutate(&mut self, kind: MutationKind) -> Option<OpId> {
         let targets = self.targets();
         self.mutate_keys(targets, kind, true, None)
+    }
+
+    /// Applies `kind` to the given threads only (the star on a list row), whatever the
+    /// selection holds.
+    pub fn mutate_threads(&mut self, keys: Vec<ThreadKey>, kind: MutationKind) -> Option<OpId> {
+        self.mutate_keys(keys, kind, true, None)
     }
 
     /// Every list position a thread holds.
@@ -937,7 +933,6 @@ impl Store {
     }
 
     /// Reverses the last undoable mutation as a new op. False when there is nothing to undo.
-    #[allow(dead_code)] // consumed in M4
     pub fn undo(&mut self) -> bool {
         let Some((_, action)) = self.undo.take() else {
             return false;
