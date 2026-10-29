@@ -1067,7 +1067,7 @@ keep their shift and work.
 | `o` / `enter` | OpenThread | Mail | Opens the cursor thread. In the reader, toggles the focused message. |
 | `u` / `escape` | BackToList | Mail | Closes the reader; focus returns to the list. Escape also clears the selection, then closes overlays. |
 | `space` / `pagedown` | ScrollReaderDown | Mail | Scrolls the reader by one page. |
-| `shift-space` / `pageup` | ScrollReaderUp | Mail | Scrolls the reader up by one page (VERIFY `shift-space` keeps shift). |
+| `shift-space` / `pageup` | ScrollReaderUp | Mail | Scrolls the reader up by one page (`shift-space` keeps shift; see 15 item 3). |
 | `x` | ToggleSelect | Mail | Toggles the cursor thread in the selection. |
 | `e` | Archive | Mail | Removes INBOX. In Spam, does Not spam. |
 | `#` | Trash | Mail | In Trash, does Restore. |
@@ -1250,8 +1250,9 @@ percent-decoding and the RFC 6068 rules, with a strict whitelist:
     | `open:N` | set the cursor to row N and open it (fallback that needs no key bindings) | M4 |
     | `act:<Name>` | dispatch an action through the tested `demo_action(name) -> Option<Box<dyn Action>>` table with `window.dispatch_action` (for non-key steps) | M4 |
     | `type:<text>` | dispatch each character as a keystroke | M4 |
-    | `expect:<cond>` | check `cursor=N`, `open=none|N`, `view=<label id>|search`, `focus=list|reader|search|compose`, `search=<text>` or `selection=<text>`, and print `ELOQUAWK_EXPECT ok <cond>` or `ELOQUAWK_EXPECT fail <cond> (actual …)` | M4 |
+    | `expect:<cond>` | check `cursor=N`, `open=none|N`, `view=<label id>|search`, `focus=list|reader|search|compose`, `search=<text>` or `selection=<text>` (M6 adds `card=none|N`, `expanded=N`, `scroll=top|down`, `selected=N`, `rows=N`, `unread=yes|no` and `starred=yes|no` for the cursor thread, `notice=<text>|none`, `help=open|closed`, `account=<email>` and `syncs=N`), and print `ELOQUAWK_EXPECT ok <cond>` or `ELOQUAWK_EXPECT fail <cond> (actual …)` | M4 |
     | `selectall:N` | focus card N's `BodyText` and select all | M5 |
+    | `view:<label id>` | show that label of the current account (`ALL_MAIL` for All Mail); a fallback for views no key reaches, such as Spam and Trash | M6 |
     | `search:<query>` | set the search field and dispatch its Submit | M7 |
     | anything else | one or more keystrokes separated by spaces, each parsed with `Keystroke::parse` and sent with `window.dispatch_keystroke(..)`, so bindings, context predicates and chords are exercised; `g i` sends `g` then `i`. `comma` stands for `,`. | M4 |
   - In `type:`, `search:` and `expect:` values, `\,` escapes a comma.
@@ -1555,7 +1556,28 @@ milestone are welcome. **No trailers.** Push to main after each commit.
   - Archive auto-advances; Undo (toast and `z`) restores; a "[fail]" thread rolls back with a
     notice; in the Trash view `#` restores; in the Spam view `e` does Not spam.
   - `x` selection applies bulk actions.
-  - Shots: `reader` via `j,j,o`, `help` via `?`, `archived` via `j,o,e,shot`.
+  - Shots: `reader` via `j,j,o`, `help` via `?`, `archived` via `j,j,o,e,shot`.
+
+- **M6 notes:**
+  - The `archived` shot uses `j,j,o,e`: row 1 of the demo inbox is the "[fail]" thread, so
+    `j,o,e` shows the rollback notice instead of an archive.
+  - Escape (and `u`, the same action) closes the help overlay first when it shows, then the
+    reader, then clears the selection. The overlay also closes on `?` and on a click outside
+    the card; it leaves the focus on the list.
+  - `n` / `p` with no card focused start at the first / last card. The focused card has an
+    accent border. `o` / enter toggles the focused card only while the open thread is the
+    cursor thread; otherwise it opens the cursor thread.
+  - `s` stars the targets unless every one is already starred, then it unstars. The reader's
+    Archive / Not spam, Trash / Restore and Star buttons use the same view-aware store helpers
+    (`archive_kind`, `trash_kind`, `spam_kind`, `star_kind`) as the keys.
+  - `g n` / `g p` wrap round the account list.
+  - `Store.syncs` counts `Synced` events so `expect:syncs=` can show that ctrl-r refreshed.
+  - The "Not available yet" handlers live on the window root, so `c` (Mail) and ctrl-n
+    (Eloquawk) reach the same one.
+  - A rollback puts the thread back at its index but leaves the cursor and open thread where
+    the optimistic change moved them (the store's M3 behaviour; not changed here).
+  - The help table is `ui/help.rs::SHORTCUTS`; a test checks that its Mail and Eloquawk rows
+    match `ui::bindings()` exactly and that every Mail binding carries the Mail predicate.
 
 ### M7: Search and labels
 - **Files:** header search wiring, the `Search` context, `ui/label_picker.rs` (`LabelPicker`
@@ -1715,7 +1737,8 @@ views.
    **M2:** `thread_summary` uses the heuristic, plus any attachment part when the parts tree is
    present. Still to confirm what `format=metadata` returns live.
 3. ~~Key name for `#` and `!`~~ **Resolved:** bind `#`, `!`, `?`, `:` as characters (section 9).
-   Still verify whether `shift-space` keeps its shift modifier.
+   **M6:** `shift-space` keeps its shift: gpui_linux clears shift only for single-character
+   keys, and space is reported as the named key `space`.
 4. ~~`cx.prompt_for_paths` with `default-features = false`~~ **Resolved:** compiled in through
    ashpd with the wayland/x11 features; it can fail at runtime without a portal (handled).
 5. The exact niri `screenshot-window` flags. **Checked at M1:** `--id`, `--path` (absolute)

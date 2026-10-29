@@ -41,6 +41,28 @@ pub enum Cond {
     Search(String),
     /// The selected body text.
     Selection(String),
+    /// The reader's focused message card (`n` / `p`), or none.
+    Card(Option<usize>),
+    /// How many of the open thread's messages are expanded.
+    Expanded(usize),
+    /// The reader is scrolled away from the top (`scroll=down`) or not (`scroll=top`).
+    Scrolled(bool),
+    /// How many threads are x-selected.
+    Selected(usize),
+    /// How many rows the list shows.
+    Rows(usize),
+    /// The cursor thread is unread (`unread=yes|no`).
+    Unread(bool),
+    /// The cursor thread is starred (`starred=yes|no`).
+    Starred(bool),
+    /// The toast's text, or `none`.
+    Notice(Option<String>),
+    /// The shortcut overlay shows (`help=open|closed`).
+    Help(bool),
+    /// The current view's account.
+    Account(String),
+    /// How many `Synced` events have arrived (a refresh adds one).
+    Syncs(u32),
 }
 
 /// One script step.
@@ -55,6 +77,9 @@ pub enum Step {
     Open(usize),
     /// Focus card N's body in the open thread and select all of it.
     SelectAll(usize),
+    /// Show this label of the current account (`ALL_MAIL` for All Mail); a fallback for
+    /// views no key reaches, such as Spam and Trash.
+    View(String),
     /// Dispatch the named action (see [`demo_action`]).
     Act(String),
     /// Send each character as a keystroke.
@@ -130,6 +155,14 @@ fn key_token(token: &str) -> Option<String> {
     (key.chars().count() == 1 || NAMED_KEYS.contains(&key) || f_key).then_some(token)
 }
 
+fn yes_no(arg: &str) -> Option<bool> {
+    match arg {
+        "yes" => Some(true),
+        "no" => Some(false),
+        _ => None,
+    }
+}
+
 fn parse_cond(value: &str) -> Option<Cond> {
     let (name, arg) = value.split_once('=')?;
     let cond = match name {
@@ -146,6 +179,27 @@ fn parse_cond(value: &str) -> Option<Cond> {
         }),
         "search" => Cond::Search(arg.to_string()),
         "selection" => Cond::Selection(arg.to_string()),
+        "card" if arg == "none" => Cond::Card(None),
+        "card" => Cond::Card(Some(arg.parse().ok()?)),
+        "expanded" => Cond::Expanded(arg.parse().ok()?),
+        "scroll" => Cond::Scrolled(match arg {
+            "down" => true,
+            "top" => false,
+            _ => return None,
+        }),
+        "selected" => Cond::Selected(arg.parse().ok()?),
+        "rows" => Cond::Rows(arg.parse().ok()?),
+        "unread" => Cond::Unread(yes_no(arg)?),
+        "starred" => Cond::Starred(yes_no(arg)?),
+        "notice" if arg == "none" => Cond::Notice(None),
+        "notice" if !arg.is_empty() => Cond::Notice(Some(arg.to_string())),
+        "help" => Cond::Help(match arg {
+            "open" => true,
+            "closed" => false,
+            _ => return None,
+        }),
+        "account" if !arg.is_empty() => Cond::Account(arg.to_string()),
+        "syncs" => Cond::Syncs(arg.parse().ok()?),
         _ => return None,
     };
     Some(cond)
@@ -173,6 +227,7 @@ fn parse_step(step: &str) -> Step {
                 .parse()
                 .map(Step::SelectAll)
                 .unwrap_or_else(|_| unknown()),
+            "view" if !value.is_empty() => Step::View(value.to_string()),
             "act" if demo_action(value).is_some() => Step::Act(value.to_string()),
             "type" if !value.is_empty() => Step::Type(value.to_string()),
             "expect" => match parse_cond(value) {
@@ -202,18 +257,76 @@ pub fn parse_steps(script: &str) -> Vec<Step> {
 pub const DEMO_ACTIONS: &[&str] = &[
     "NextThread",
     "PrevThread",
+    "NextMessage",
+    "PrevMessage",
     "OpenThread",
     "BackToList",
+    "ScrollReaderDown",
+    "ScrollReaderUp",
+    "ToggleSelect",
+    "Archive",
+    "Trash",
+    "ToggleStar",
+    "MarkRead",
+    "MarkUnread",
+    "ReportSpam",
+    "OpenLabelPicker",
+    "Reply",
+    "ReplyAll",
+    "Forward",
+    "Compose",
+    "Undo",
+    "ExpandAll",
+    "CollapseAll",
+    "FocusSearch",
+    "GoInbox",
+    "GoStarred",
+    "GoSent",
+    "GoDrafts",
+    "GoAllMail",
+    "NextAccount",
+    "PrevAccount",
+    "ToggleHelp",
+    "OpenSettings",
     "Refresh",
 ];
 
-/// The action for an `act:` step.
+/// The action for an `act:` step: every Mail and app action except closing and quitting.
 pub fn demo_action(name: &str) -> Option<Box<dyn Action>> {
     let action: Box<dyn Action> = match name {
         "NextThread" => Box::new(ui::NextThread),
         "PrevThread" => Box::new(ui::PrevThread),
+        "NextMessage" => Box::new(ui::NextMessage),
+        "PrevMessage" => Box::new(ui::PrevMessage),
         "OpenThread" => Box::new(ui::OpenThread),
         "BackToList" => Box::new(ui::BackToList),
+        "ScrollReaderDown" => Box::new(ui::ScrollReaderDown),
+        "ScrollReaderUp" => Box::new(ui::ScrollReaderUp),
+        "ToggleSelect" => Box::new(ui::ToggleSelect),
+        "Archive" => Box::new(ui::Archive),
+        "Trash" => Box::new(ui::Trash),
+        "ToggleStar" => Box::new(ui::ToggleStar),
+        "MarkRead" => Box::new(ui::MarkRead),
+        "MarkUnread" => Box::new(ui::MarkUnread),
+        "ReportSpam" => Box::new(ui::ReportSpam),
+        "OpenLabelPicker" => Box::new(ui::OpenLabelPicker),
+        "Reply" => Box::new(ui::Reply),
+        "ReplyAll" => Box::new(ui::ReplyAll),
+        "Forward" => Box::new(ui::Forward),
+        "Compose" => Box::new(ui::Compose),
+        "Undo" => Box::new(ui::Undo),
+        "ExpandAll" => Box::new(ui::ExpandAll),
+        "CollapseAll" => Box::new(ui::CollapseAll),
+        "FocusSearch" => Box::new(ui::FocusSearch),
+        "GoInbox" => Box::new(ui::GoInbox),
+        "GoStarred" => Box::new(ui::GoStarred),
+        "GoSent" => Box::new(ui::GoSent),
+        "GoDrafts" => Box::new(ui::GoDrafts),
+        "GoAllMail" => Box::new(ui::GoAllMail),
+        "NextAccount" => Box::new(ui::NextAccount),
+        "PrevAccount" => Box::new(ui::PrevAccount),
+        "ToggleHelp" => Box::new(ui::ToggleHelp),
+        "OpenSettings" => Box::new(ui::OpenSettings),
         "Refresh" => Box::new(ui::Refresh),
         _ => return None,
     };
@@ -232,7 +345,7 @@ mod tests {
     fn every_step_kind_parses() {
         let steps = parse_steps(
             "wait:800,theme:light,theme:dark,shot,open:3,act:NextThread,type:hello,\
-             expect:cursor=2,selectall:0,j,g i",
+             expect:cursor=2,selectall:0,view:TRASH,j,g i",
         );
         assert_eq!(
             steps,
@@ -249,6 +362,7 @@ mod tests {
                     cond: Cond::Cursor(2)
                 },
                 Step::SelectAll(0),
+                Step::View("TRASH".into()),
                 keys(&["j"]),
                 keys(&["g", "i"]),
             ]
@@ -280,6 +394,30 @@ mod tests {
             cond("selection=482 913"),
             Some(Cond::Selection("482 913".into()))
         );
+        assert_eq!(cond("card=none"), Some(Cond::Card(None)));
+        assert_eq!(cond("card=2"), Some(Cond::Card(Some(2))));
+        assert_eq!(cond("expanded=3"), Some(Cond::Expanded(3)));
+        assert_eq!(cond("scroll=down"), Some(Cond::Scrolled(true)));
+        assert_eq!(cond("scroll=top"), Some(Cond::Scrolled(false)));
+        assert_eq!(cond("selected=2"), Some(Cond::Selected(2)));
+        assert_eq!(cond("rows=49"), Some(Cond::Rows(49)));
+        assert_eq!(cond("unread=yes"), Some(Cond::Unread(true)));
+        assert_eq!(cond("starred=no"), Some(Cond::Starred(false)));
+        assert_eq!(cond("notice=none"), Some(Cond::Notice(None)));
+        assert_eq!(
+            cond("notice=Couldn't archive: no"),
+            Some(Cond::Notice(Some("Couldn't archive: no".into())))
+        );
+        assert_eq!(cond("help=open"), Some(Cond::Help(true)));
+        assert_eq!(cond("help=closed"), Some(Cond::Help(false)));
+        assert_eq!(
+            cond("account=you@work.example"),
+            Some(Cond::Account("you@work.example".into()))
+        );
+        assert_eq!(cond("syncs=2"), Some(Cond::Syncs(2)));
+        assert_eq!(cond("scroll=sideways"), None);
+        assert_eq!(cond("unread=maybe"), None);
+        assert_eq!(cond("help=ajar"), None);
         assert_eq!(cond("focus=nowhere"), None);
         assert_eq!(cond("cursor=x"), None);
         assert_eq!(cond("colour=red"), None);
@@ -319,13 +457,14 @@ mod tests {
     #[test]
     fn unknown_steps_are_reported() {
         assert_eq!(
-            parse_steps("bogus:1,wait:x,theme:sepia,act:Nope,selectall:x,frobnicate,,"),
+            parse_steps("bogus:1,wait:x,theme:sepia,act:Nope,selectall:x,view:,frobnicate,,"),
             vec![
                 Step::Unknown("bogus:1".into()),
                 Step::Unknown("wait:x".into()),
                 Step::Unknown("theme:sepia".into()),
                 Step::Unknown("act:Nope".into()),
                 Step::Unknown("selectall:x".into()),
+                Step::Unknown("view:".into()),
                 Step::Unknown("frobnicate".into()),
             ]
         );

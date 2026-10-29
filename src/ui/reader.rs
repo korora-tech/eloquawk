@@ -231,6 +231,8 @@ pub struct ReaderView {
     /// Body entities by message id (quotes under [`quote_key`]), with their event
     /// subscriptions; dropped when the open thread changes.
     bodies: HashMap<String, (Entity<BodyText>, Subscription)>,
+    /// The message card `n` / `p` moved to, by index; `o` / enter toggles it.
+    focused_card: Option<usize>,
     _subscription: Subscription,
 }
 
@@ -244,6 +246,7 @@ impl ReaderView {
                     this.expanded.clear();
                     this.unfolded.clear();
                     this.seen.clear();
+                    this.focused_card = None;
                     let keys: Vec<String> = this.bodies.keys().cloned().collect();
                     for key in keys {
                         this.drop_body(&key, window, cx);
@@ -263,6 +266,7 @@ impl ReaderView {
             unfolded: HashSet::new(),
             seen: HashSet::new(),
             bodies: HashMap::new(),
+            focused_card: None,
             _subscription: subscription,
         }
     }
@@ -354,6 +358,101 @@ impl ReaderView {
         }
     }
 
+    // ----- keyboard (SPEC 9) ---------------------------------------------------------------
+
+    /// The open thread's message ids, when its detail has loaded.
+    fn message_ids(&self, cx: &gpui::App) -> Vec<String> {
+        let Some(key) = &self.last.open else {
+            return Vec::new();
+        };
+        match self.store.read(cx).details.get(key) {
+            Some(DetailState::Loaded(d)) => d.messages.iter().map(|m| m.id.clone()).collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// `n` / `p`: focuses the next or previous card, expands it and scrolls it into view
+    /// (card i is the scroll area's child i + 1). With no card focused yet, `n` starts at the
+    /// first card and `p` at the last.
+    pub fn step_card(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let ids = self.message_ids(cx);
+        if ids.is_empty() {
+            return;
+        }
+        let last = ids.len() as isize - 1;
+        let ix = match self.focused_card {
+            Some(i) => (i as isize + delta).clamp(0, last),
+            None if delta > 0 => 0,
+            None => last,
+        } as usize;
+        self.focused_card = Some(ix);
+        self.expanded.insert(ids[ix].clone());
+        self.scroll.scroll_to_item(ix + 1);
+        cx.notify();
+    }
+
+    /// `o` / enter in the reader: toggles the focused card. False when no card is focused, so
+    /// the key opens the cursor thread instead.
+    pub fn toggle_focused_card(&mut self, cx: &mut Context<Self>) -> bool {
+        let ids = self.message_ids(cx);
+        let Some(id) = self.focused_card.and_then(|i| ids.get(i)) else {
+            return false;
+        };
+        if !self.expanded.remove(id) {
+            self.expanded.insert(id.clone());
+        }
+        cx.notify();
+        true
+    }
+
+    /// `;` expands every message; `:` collapses them all.
+    pub fn set_all_expanded(&mut self, expand: bool, cx: &mut Context<Self>) {
+        let ids = self.message_ids(cx);
+        if expand {
+            self.expanded.extend(ids);
+        } else {
+            self.expanded.clear();
+        }
+        cx.notify();
+    }
+
+    /// Space / page down and shift-space / page up: scrolls by the visible height, less a
+    /// line of overlap so the reading position carries over.
+    pub fn scroll_page(&mut self, down: bool, cx: &mut Context<Self>) {
+        if self.last.open.is_none() {
+            return;
+        }
+        let page = (self.scroll.bounds().size.height - px(40.0)).max(px(40.0));
+        let offset = self.scroll.offset();
+        let max = self.scroll.max_offset().y;
+        let y = if down {
+            offset.y - page
+        } else {
+            offset.y + page
+        };
+        self.scroll
+            .set_offset(point(offset.x, y.clamp(-max, px(0.0))));
+        cx.notify();
+    }
+
+    /// The focused card, for `expect:card=`.
+    pub fn focused_card(&self) -> Option<usize> {
+        self.focused_card
+    }
+
+    /// How many of the open thread's messages are expanded, for `expect:expanded=`.
+    pub fn expanded_count(&self, cx: &gpui::App) -> usize {
+        self.message_ids(cx)
+            .iter()
+            .filter(|id| self.expanded.contains(*id))
+            .count()
+    }
+
+    /// Whether the reader is scrolled away from the top, for `expect:scroll=`.
+    pub fn scrolled(&self) -> bool {
+        self.scroll.offset().y < px(0.0)
+    }
+
     /// The demo script's `selectall:N`: expands card N, focuses its body and selects all.
     pub fn select_all_in_card(
         &mut self,
@@ -400,42 +499,30 @@ impl ReaderView {
         let tool = |id: &'static str, label: &'static str, on: Option<OnClick>| {
             button(p, id, label, ButtonStyle::Toolbar, on)
         };
-        let first = if in_view(labels::SPAM) {
-            tool(
-                "not-spam",
-                "Not spam",
-                Some(self.click(cx, |this, _, cx| {
-                    this.mutate(MutationKind::Labels(LabelDelta::not_spam()), cx)
-                })),
-            )
-        } else {
-            tool(
-                "archive",
-                "Archive",
-                Some(self.click(cx, |this, _, cx| {
-                    this.mutate(MutationKind::Labels(LabelDelta::archive()), cx)
-                })),
-            )
-        };
-        let second = if in_view(labels::TRASH) {
-            tool(
-                "restore",
-                "Restore",
-                Some(self.click(cx, |this, _, cx| {
-                    let restore = LabelDelta {
-                        add: vec![labels::INBOX.into()],
-                        remove: vec![],
-                    };
-                    this.mutate(MutationKind::Untrash { restore }, cx)
-                })),
-            )
-        } else {
-            tool(
-                "trash",
-                "Trash",
-                Some(self.click(cx, |this, _, cx| this.mutate(MutationKind::Trash, cx))),
-            )
-        };
+        let first = tool(
+            "archive",
+            if in_view(labels::SPAM) {
+                "Not spam"
+            } else {
+                "Archive"
+            },
+            Some(self.click(cx, |this, _, cx| {
+                let kind = this.store.read(cx).archive_kind();
+                this.mutate(kind, cx)
+            })),
+        );
+        let second = tool(
+            "trash",
+            if in_view(labels::TRASH) {
+                "Restore"
+            } else {
+                "Trash"
+            },
+            Some(self.click(cx, |this, _, cx| {
+                let kind = this.store.read(cx).trash_kind();
+                this.mutate(kind, cx)
+            })),
+        );
         let gmail_url = summary.map(gmail_url);
         div()
             .flex_shrink_0()
@@ -459,13 +546,9 @@ impl ReaderView {
             .child(tool(
                 "star",
                 if starred { "Unstar" } else { "Star" },
-                Some(self.click(cx, move |this, _, cx| {
-                    let delta = if starred {
-                        LabelDelta::unstar()
-                    } else {
-                        LabelDelta::star()
-                    };
-                    this.mutate(MutationKind::Labels(delta), cx)
+                Some(self.click(cx, |this, _, cx| {
+                    let kind = this.store.read(cx).star_kind();
+                    this.mutate(kind, cx)
                 })),
             ))
             // Labels arrives in M7; Reply, Reply all and Forward in M8.
@@ -536,12 +619,14 @@ impl ReaderView {
         let CardEnv { now, gmail_url } = at;
         let gmail_url = gmail_url.as_deref();
         let date = format::list_date(m.date, now, clock);
+        let focused = self.focused_card == Some(ix);
         let shell = div()
             .mx(px(20.0))
             .mb(px(10.0))
             .rounded(px(8.0))
             .border_1()
-            .border_color(rgb(p.border))
+            // The card `n` / `p` moved to.
+            .border_color(rgb(if focused { p.accent } else { p.border }))
             .bg(rgb(p.panel))
             .flex()
             .flex_col();

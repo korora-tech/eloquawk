@@ -241,6 +241,8 @@ pub struct Store {
     pub signing_in: Option<String>,
     pub busy: bool,
     pub last_sync: Option<Timestamp>,
+    /// How many `Synced` events arrived; the demo script's `expect:syncs=` reads it.
+    pub syncs: u32,
     pub problem: Option<String>,
     pub notice: Option<Notice>,
     pub labels: HashMap<AccountId, Vec<Label>>,
@@ -363,6 +365,7 @@ impl Store {
             signing_in: None,
             busy: false,
             last_sync: None,
+            syncs: 0,
             problem: None,
             notice: None,
             labels: HashMap::new(),
@@ -715,7 +718,6 @@ impl Store {
         }
     }
 
-    #[allow(dead_code)] // consumed in M6
     pub fn toggle_select_cursor(&mut self) {
         if let Some(key) = self.cursor.clone() {
             self.toggle_select(key);
@@ -724,6 +726,95 @@ impl Store {
 
     pub fn clear_selection(&mut self) {
         self.selected.clear();
+    }
+
+    /// The account the current view belongs to, else the first account.
+    pub fn current_account(&self) -> Option<AccountId> {
+        self.view
+            .as_ref()
+            .map(|v| v.account.clone())
+            .or_else(|| self.accounts.first().cloned())
+    }
+
+    /// Shows a label (or All Mail) of the current account: the `g` keys.
+    pub fn go_to(&mut self, kind: ViewKind) {
+        if let Some(account) = self.current_account() {
+            self.set_view(ViewKey { account, kind });
+        }
+    }
+
+    /// Switches to the inbox of the account `delta` places along, wrapping round: `g n` and
+    /// `g p`. With one account it shows that account's inbox.
+    pub fn switch_account(&mut self, delta: isize) {
+        let n = self.accounts.len() as isize;
+        if n == 0 {
+            return;
+        }
+        let at = self
+            .view
+            .as_ref()
+            .and_then(|v| self.accounts.iter().position(|a| *a == v.account))
+            .map_or(0, |i| i as isize + delta);
+        let account = self.accounts[at.rem_euclid(n) as usize].clone();
+        self.set_view(ViewKey {
+            account,
+            kind: ViewKind::Label(labels::INBOX.into()),
+        });
+    }
+
+    // ----- view-aware actions (keys and the reader's action bar) -----
+
+    /// Whether the current view is this label.
+    pub fn viewing_label(&self, id: &str) -> bool {
+        self.view
+            .as_ref()
+            .is_some_and(|v| v.kind == ViewKind::Label(id.to_string()))
+    }
+
+    /// `e` and Archive: removes INBOX, or does Not spam in the Spam view.
+    pub fn archive_kind(&self) -> MutationKind {
+        if self.viewing_label(labels::SPAM) {
+            MutationKind::Labels(LabelDelta::not_spam())
+        } else {
+            MutationKind::Labels(LabelDelta::archive())
+        }
+    }
+
+    /// `#` and Trash: moves to Trash, or restores to the inbox in the Trash view.
+    pub fn trash_kind(&self) -> MutationKind {
+        if self.viewing_label(labels::TRASH) {
+            MutationKind::Untrash {
+                restore: LabelDelta {
+                    add: vec![labels::INBOX.into()],
+                    remove: vec![],
+                },
+            }
+        } else {
+            MutationKind::Trash
+        }
+    }
+
+    /// `!`: reports spam, or does Not spam in the Spam view.
+    pub fn spam_kind(&self) -> MutationKind {
+        if self.viewing_label(labels::SPAM) {
+            MutationKind::Labels(LabelDelta::not_spam())
+        } else {
+            MutationKind::Labels(LabelDelta::spam())
+        }
+    }
+
+    /// `s` and Star: stars the targets unless every one is already starred, which unstars.
+    pub fn star_kind(&self) -> MutationKind {
+        let targets = self.targets();
+        let all_starred = !targets.is_empty()
+            && targets
+                .iter()
+                .all(|k| self.threads.get(k).is_some_and(ThreadSummary::starred));
+        if all_starred {
+            MutationKind::Labels(LabelDelta::unstar())
+        } else {
+            MutationKind::Labels(LabelDelta::star())
+        }
     }
 
     // ----- mutations -----
@@ -1293,7 +1384,10 @@ impl Store {
             SyncEvent::Accounts(a) => self.on_accounts(a),
             SyncEvent::SigningIn(s) => self.signing_in = s,
             SyncEvent::Busy(b) => self.busy = b,
-            SyncEvent::Synced(t) => self.last_sync = Some(t),
+            SyncEvent::Synced(t) => {
+                self.last_sync = Some(t);
+                self.syncs += 1;
+            }
             SyncEvent::Problem(p) => self.problem = p,
             SyncEvent::Notice(text) => self.post_notice(text, None),
             SyncEvent::Labels { account, labels } => {
@@ -2191,6 +2285,79 @@ mod tests {
         assert_eq!(s.notice.as_ref().unwrap().text, "Archived 2 conversations");
         // Without a selection the open thread is the target.
         assert_eq!(s.targets(), [key("t0")]);
+    }
+
+    #[test]
+    fn view_aware_kinds_follow_the_view() {
+        let (mut s, rx) = inbox_store(3);
+        assert_eq!(
+            s.archive_kind(),
+            MutationKind::Labels(LabelDelta::archive())
+        );
+        assert_eq!(s.trash_kind(), MutationKind::Trash);
+        assert_eq!(s.spam_kind(), MutationKind::Labels(LabelDelta::spam()));
+        s.set_view(view("SPAM"));
+        assert_eq!(
+            s.archive_kind(),
+            MutationKind::Labels(LabelDelta::not_spam())
+        );
+        assert_eq!(s.spam_kind(), MutationKind::Labels(LabelDelta::not_spam()));
+        s.set_view(view("TRASH"));
+        assert_eq!(
+            s.trash_kind(),
+            MutationKind::Untrash {
+                restore: LabelDelta {
+                    add: vec!["INBOX".into()],
+                    remove: vec![],
+                }
+            }
+        );
+        drain(&rx);
+    }
+
+    #[test]
+    fn star_kind_unstars_only_when_every_target_is_starred() {
+        let (mut s, _rx) = inbox_store(3);
+        s.set_cursor_index(0);
+        assert_eq!(s.star_kind(), MutationKind::Labels(LabelDelta::star()));
+        s.mutate(MutationKind::Labels(LabelDelta::star()));
+        assert_eq!(s.star_kind(), MutationKind::Labels(LabelDelta::unstar()));
+        s.toggle_select(key("t0"));
+        s.toggle_select(key("t1"));
+        assert_eq!(s.star_kind(), MutationKind::Labels(LabelDelta::star()));
+    }
+
+    #[test]
+    fn go_to_and_switch_account() {
+        let (mut s, rx) = inbox_store(2);
+        s.apply(SyncEvent::Accounts(vec![ME.into(), WORK.into()]));
+        drain(&rx);
+        s.go_to(ViewKind::Label("STARRED".into()));
+        assert_eq!(s.view, Some(view("STARRED")));
+        s.go_to(ViewKind::AllMail);
+        assert_eq!(s.view, Some(all_mail()));
+        let inbox_of = |a: &str| ViewKey {
+            account: a.into(),
+            kind: ViewKind::Label("INBOX".into()),
+        };
+        s.switch_account(1);
+        assert_eq!(s.view, Some(inbox_of(WORK)));
+        s.switch_account(1);
+        assert_eq!(s.view, Some(inbox_of(ME)), "wraps round");
+        s.switch_account(-1);
+        assert_eq!(s.view, Some(inbox_of(WORK)));
+        assert!(
+            matches!(drain(&rx).last(), Some(Command::Want { view, more: false })
+            if *view == inbox_of(WORK))
+        );
+    }
+
+    #[test]
+    fn synced_events_are_counted() {
+        let (mut s, _rx) = store();
+        s.apply(SyncEvent::Synced(Timestamp::UNIX_EPOCH));
+        s.apply(SyncEvent::Synced(Timestamp::UNIX_EPOCH));
+        assert_eq!(s.syncs, 2);
     }
 
     #[test]
