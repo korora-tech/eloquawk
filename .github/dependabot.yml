@@ -1,8 +1,16 @@
 version: 2
 updates:
-  # Enable version updates for Rust dependencies
+  # Rust dependencies: direct dependencies only, never the gpui tree.
+  # SPEC 2.2 forbids a bare `cargo update` because it moves gpui's
+  # transitive dependencies; review every lock change against SPEC 2.2.
   - package-ecosystem: "cargo"
     directory: "/"
+    allow:
+      - dependency-type: "direct"
+    ignore:
+      # Pinned to a zed git rev by hand (SPEC section 1).
+      - dependency-name: "gpui"
+      - dependency-name: "gpui_platform"
     schedule:
       interval: "weekly"
       day: "monday"
@@ -14,7 +22,7 @@ updates:
     commit-message:
       prefix: "chore"
       include: "scope"
-    
+
   # Enable version updates for GitHub Actions
   - package-ecosystem: "github-actions"
     directory: "/"

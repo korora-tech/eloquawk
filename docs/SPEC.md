@@ -20,7 +20,9 @@ built on gpui-kit, whose API differs from the pinned zed gpui.
   `default-features = false`, and gpui_platform has `features = ["wayland", "x11"]`. The entry
   point is `gpui_platform::application()`.
 - **Never in the dependency tree:** tokio. `cargo tree -i tokio` must print nothing at every
-  milestone. HTTP is `ureq = "=3.5.0"` (rustls + json) on the sync worker thread.
+  milestone. The check applies to the host (Linux) target: `--target all` shows tokio via
+  wasm-bindgen-futures from gpui_web and wgpu, which is wasm-only and also in antarctical's
+  lock. HTTP is `ureq = "=3.5.0"` (rustls + json) on the sync worker thread.
 - **App id:** `korora.tech.Eloquawk` is used everywhere: Wayland `app_id`, the desktop file
   name, `StartupWMClass`, the hicolor icon name, the notification icon and the keyring service.
 - **Secrets:** refresh tokens and the user-supplied OAuth client live only in the Secret
@@ -152,7 +154,8 @@ Copy antarctical's `[dependencies]` and change them as follows:
 Every non-obvious dependency gets a one-line `#` comment explaining it. Seed `Cargo.lock` with
 a copy of antarctical's lock so the gpui tree resolves to the same commit. After that, let
 cargo prune it. **Never run a bare `cargo update`**, because it would move the gpui transitive
-dependencies.
+dependencies. Dependabot is limited to direct cargo dependencies and ignores gpui and
+gpui_platform; review every Dependabot lock change against this rule before merging.
 
 `[profile.release]` is `lto = "thin"` and `codegen-units = 1`.
 
