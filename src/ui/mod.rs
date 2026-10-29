@@ -3,8 +3,8 @@
 //!
 //! Key contexts: `Eloquawk` on the main window root (always active), `Mail` on the panes
 //! container, `ReadOnlyText` on each message body (ctrl-c, ctrl-a), `Search` on the header's
-//! search field wrapper, `LabelPicker` on the label picker popover and `Compose` on each compose
-//! window's root. Mail bindings use the
+//! search field wrapper, `LabelPicker` on the label picker popover, `Settings` on the
+//! Settings screen and `Compose` on each compose window's root. Mail bindings use the
 //! predicate [`MAIL`], so no Mail key fires while a text field anywhere inside is focused; a
 //! focused body does not block them. The help overlay lists the same table ([`help::SHORTCUTS`]),
 //! and a test keeps the two in step.
@@ -17,6 +17,7 @@ pub mod help;
 pub mod label_picker;
 pub mod main_view;
 pub mod reader;
+pub mod settings;
 pub mod sidebar;
 pub mod text_area;
 pub mod text_input;
@@ -93,6 +94,8 @@ actions!(
         /// The compose window's "Discard" answer (not bound to a key).
         DiscardCompose,
         OpenSettings,
+        /// Closes the Settings screen.
+        CloseSettings,
         Refresh,
         CloseWindow,
         Quit,
@@ -156,6 +159,7 @@ pub fn bindings() -> Vec<KeyBinding> {
         KeyBinding::new("ctrl-w", CloseCompose, Some("Compose")),
         // Quit from a compose window asks about its edits first.
         KeyBinding::new("ctrl-q", Quit, Some("Compose")),
+        KeyBinding::new("escape", CloseSettings, Some("Settings")),
         KeyBinding::new("ctrl-r", Refresh, app),
         KeyBinding::new("ctrl-,", OpenSettings, app),
         KeyBinding::new("ctrl-n", Compose, app),

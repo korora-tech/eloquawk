@@ -15,3 +15,5 @@ until the M10/M11 live check (SPEC 12.4). All addresses and ids are made up.
 - `history.json`, `history_empty.json`: `users.history.list`
 - `attachment.json`: `users.messages.attachments.get`
 - `send.json`: `users.messages.send` response (shape unverified, SPEC 15 item 14)
+- `error_rate_limited.json`: a 429 error envelope carrying `Retry after <RFC 3339>` in its
+  message, modelled on the per-user rate-limit errors Google documents (unverified)

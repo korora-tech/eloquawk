@@ -119,6 +119,8 @@ pub enum Cond {
     Composers(usize),
     /// How many messages the open thread has. M8.
     Messages(usize),
+    /// The main window's screen (`screen=mail|settings|auth`). M9.
+    Screen(String),
 }
 
 /// One script step.
@@ -312,6 +314,7 @@ fn parse_cond(value: &str) -> Option<Cond> {
         }),
         "composers" => Cond::Composers(arg.parse().ok()?),
         "messages" => Cond::Messages(arg.parse().ok()?),
+        "screen" if matches!(arg, "mail" | "settings" | "auth") => Cond::Screen(arg.to_string()),
         _ => return None,
     };
     Some(cond)
@@ -403,6 +406,7 @@ pub const DEMO_ACTIONS: &[&str] = &[
     "ToggleHelp",
     "CloseSearch",
     "OpenSettings",
+    "CloseSettings",
     "Refresh",
     "Send",
     "CloseCompose",
@@ -447,6 +451,7 @@ pub fn demo_action(name: &str) -> Option<Box<dyn Action>> {
         "ToggleHelp" => Box::new(ui::ToggleHelp),
         "CloseSearch" => Box::new(ui::CloseSearch),
         "OpenSettings" => Box::new(ui::OpenSettings),
+        "CloseSettings" => Box::new(ui::CloseSettings),
         "Refresh" => Box::new(ui::Refresh),
         "Send" => Box::new(ui::Send),
         "CloseCompose" => Box::new(ui::CloseCompose),
@@ -591,6 +596,11 @@ mod tests {
         assert_eq!(cond("discard=no"), Some(Cond::Discard(false)));
         assert_eq!(cond("composers=0"), Some(Cond::Composers(0)));
         assert_eq!(cond("messages=4"), Some(Cond::Messages(4)));
+        assert_eq!(
+            cond("screen=settings"),
+            Some(Cond::Screen("settings".into()))
+        );
+        assert_eq!(cond("screen=elsewhere"), None);
         assert_eq!(cond("compose=from"), None);
         assert_eq!(cond("discard=maybe"), None);
         assert_eq!(cond("picker=ajar"), None);

@@ -197,3 +197,112 @@ pub fn checkbox(
         .cursor_pointer()
         .on_click(on_click)
 }
+
+/// One option of a segment control; the active one is raised.
+pub fn segment(
+    p: &Palette,
+    id: impl Into<ElementId>,
+    label: impl Into<SharedString>,
+    active: bool,
+    on_click: OnClick,
+) -> Stateful<Div> {
+    let el = div()
+        .id(id)
+        .flex()
+        .flex_shrink_0()
+        .items_center()
+        .justify_center()
+        .px(px(12.0))
+        .h(px(24.0))
+        .rounded(px(5.0))
+        .border_1()
+        .text_size(px(12.0));
+    let el = if active {
+        el.bg(rgb(p.selected))
+            .border_color(rgb(p.selected_border))
+            .font_weight(FontWeight::SEMIBOLD)
+            .text_color(rgb(p.text))
+    } else {
+        el.border_color(transparent_black())
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(rgb(p.secondary))
+    };
+    let (hover, text) = (p.hover, p.text);
+    el.hover(move |s| {
+        if active {
+            s.cursor_pointer()
+        } else {
+            s.bg(rgb(hover)).text_color(rgb(text)).cursor_pointer()
+        }
+    })
+    .on_click(on_click)
+    .child(label.into())
+}
+
+/// A row of [`segment`]s in a shared frame.
+pub fn segments(p: &Palette, items: impl IntoIterator<Item = Stateful<Div>>) -> Div {
+    div()
+        .flex()
+        .flex_shrink_0()
+        .items_center()
+        .gap(px(2.0))
+        .p(px(2.0))
+        .rounded(px(7.0))
+        .border_1()
+        .border_color(rgb(p.border))
+        .bg(rgb(p.panel_raised))
+        .children(items)
+}
+
+/// A checkbox with its label; the whole row toggles.
+pub fn checkbox_row(
+    p: &Palette,
+    id: impl Into<ElementId>,
+    label: impl Into<SharedString>,
+    checked: bool,
+    on_click: OnClick,
+) -> Stateful<Div> {
+    let id = id.into();
+    let hover = p.hover;
+    div()
+        .id(id.clone())
+        .w_full()
+        .flex()
+        .items_center()
+        .gap_2()
+        .rounded_md()
+        .px_2()
+        .py(px(5.0))
+        .hover(move |s| s.bg(rgb(hover)).cursor_pointer())
+        .on_click(on_click)
+        .child(
+            div()
+                .size(px(14.0))
+                .flex_shrink_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(3.0))
+                .border_1()
+                .border_color(rgb(if checked { p.accent } else { p.input_border }))
+                .when(checked, |d| d.bg(rgb(p.accent)))
+                .when(checked, |d| {
+                    d.child(
+                        div()
+                            .text_size(px(10.0))
+                            .line_height(px(12.0))
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(rgb(p.on_accent))
+                            .child("✓"),
+                    )
+                }),
+        )
+        .child(
+            div()
+                .flex_1()
+                .text_size(px(12.5))
+                .line_height(px(18.0))
+                .text_color(rgb(p.text))
+                .child(label.into()),
+        )
+}

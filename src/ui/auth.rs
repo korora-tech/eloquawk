@@ -19,9 +19,9 @@ const KEYRING_STARTING_INFO: &str = concat!(
     "Your desktop may ask you to unlock it.",
 );
 const NEEDS_CLIENT_INFO: &str = concat!(
-    "Eloquawk talks to Gmail with an OAuth client you create in the Google Cloud console. ",
-    "Enable the Gmail API, create a desktop client, then paste its id and secret in Settings. ",
-    "docs/google-gmail.md walks through it.",
+    "This build of Eloquawk has no OAuth client of its own, so it needs one you create in the ",
+    "Google Cloud console. Enable the Gmail API, create a Desktop client, then paste its ID ",
+    "and secret in Settings. docs/google-gmail.md walks through it.",
 );
 const SIGN_IN_INFO: &str = concat!(
     "Your browser will open Google's consent page, which asks to let Eloquawk read, ",
@@ -30,14 +30,17 @@ const SIGN_IN_INFO: &str = concat!(
 const SIGN_IN_BROWSER_INFO: &str =
     "Approve access on Google's page. If no browser opened, copy the link and open it yourself.";
 
-/// Whether the main window shows the panes or an auth card.
+/// Whether the main window shows the panes, Settings or an auth card.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Screen {
     Mail,
+    /// Shown while the user has it open, over whatever the store calls for.
+    Settings,
     Auth,
 }
 
 impl Screen {
+    /// The screen the store calls for: never Settings, which only the user opens.
     pub fn of(store: &Store) -> Self {
         match store.auth {
             AuthState::Starting | AuthState::Locked | AuthState::NeedsClient => Screen::Auth,
@@ -71,9 +74,17 @@ impl MainView {
                 card(p, "Opening your keyring…").child(body_text(p, KEYRING_STARTING_INFO))
             }
             AuthState::Demo => card(p, "Loading the demo mailbox…"),
-            AuthState::NeedsClient => {
-                card(p, "Set up a Google client").child(body_text(p, NEEDS_CLIENT_INFO))
-            }
+            AuthState::NeedsClient => card(p, "Set up a Google client")
+                .child(body_text(p, NEEDS_CLIENT_INFO))
+                .child(div().flex().child(button(
+                    p,
+                    "open-settings",
+                    "Open Settings",
+                    ButtonStyle::Primary,
+                    Some(Box::new(cx.listener(|this, _: &ClickEvent, window, cx| {
+                        this.open_settings(window, cx)
+                    }))),
+                ))),
             AuthState::Ready => match store.signing_in.clone() {
                 None => card(p, "Sign in to Google")
                     .child(body_text(p, SIGN_IN_INFO))
@@ -121,5 +132,31 @@ impl MainView {
                 ButtonStyle::Secondary,
                 Some(self.send_click(cx, || Command::CancelSignIn)),
             ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::SyncHandle;
+
+    #[test]
+    fn auth_states_pick_the_screen() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut s = Store::for_tests(SyncHandle::from_sender(tx));
+        for auth in [
+            AuthState::Starting,
+            AuthState::Locked,
+            AuthState::NeedsClient,
+            AuthState::Ready,
+        ] {
+            s.auth = auth;
+            assert_eq!(Screen::of(&s), Screen::Auth, "{auth:?}");
+        }
+        s.accounts = vec!["me@example.com".into()];
+        s.auth = AuthState::NeedsClient;
+        assert_eq!(Screen::of(&s), Screen::Auth);
+        s.auth = AuthState::Ready;
+        assert_eq!(Screen::of(&s), Screen::Mail);
     }
 }

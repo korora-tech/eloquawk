@@ -11,6 +11,7 @@ use std::sync::mpsc;
 
 use jiff::Timestamp;
 
+use crate::google::oauth::{AuthError, TokenResponse};
 use crate::model::{
     AccountId, Attachment, Label, LabelDelta, Outgoing, ThreadDetail, ThreadKey, ThreadSummary,
     ViewKey,
@@ -24,21 +25,16 @@ pub type OpId = u64;
 /// message body.
 pub enum Command {
     /// `client_secret: None` keeps the stored secret (only valid for the same client id).
-    #[allow(dead_code)] // consumed in M9
     SaveClient {
         client_id: String,
         client_secret: Option<String>,
     },
     /// Removes the saved client and every account.
-    #[allow(dead_code)] // consumed in M9
     ClearClient,
     /// Starts a browser sign-in; the account chosen there is added (or re-authorised).
-    #[allow(dead_code)] // consumed in M9
     AddAccount,
-    #[allow(dead_code)] // consumed in M9
     CancelSignIn,
     /// Signs one account out: revokes its token and forgets it.
-    #[allow(dead_code)] // consumed in M9
     RemoveAccount(AccountId),
     /// Re-lists what is visible; also retries a locked keyring.
     Refresh,
@@ -79,13 +75,10 @@ pub enum Command {
         attachment: Attachment,
     },
     Shutdown,
-    /// Posted by the sign-in thread to its own worker; the demo ignores it.
-    ///
-    /// M3 note: the payload is the sign-in sequence number only. The token result
-    /// (`Result<TokenResponse, AuthError>`) is added with `google/oauth.rs` in M9.
+    /// Posted by the sign-in thread to its own worker: the sign-in's sequence number and the
+    /// token exchange's result. The demo ignores it.
     #[doc(hidden)]
-    #[allow(dead_code)] // consumed in M9
-    SignInFinished(u64),
+    SignInFinished(u64, Result<TokenResponse, AuthError>),
 }
 
 /// What the worker knows about credentials.
@@ -94,13 +87,10 @@ pub enum AuthState {
     /// The worker has not read the keyring yet.
     Starting,
     /// The keyring could not be read (locked, prompt dismissed, no Secret Service).
-    #[allow(dead_code)] // consumed in M9
     Locked,
     /// No saved client and none compiled in.
-    #[allow(dead_code)] // consumed in M9
     NeedsClient,
     /// The client is known; see [`SyncEvent::Accounts`] for who is signed in.
-    #[allow(dead_code)] // consumed in M9
     Ready,
     Demo,
 }
@@ -133,7 +123,6 @@ pub enum SyncEvent {
     /// Signed-in accounts, in display order.
     Accounts(Vec<AccountId>),
     /// A browser sign-in is waiting (`Some(url)`) or not.
-    #[allow(dead_code)] // consumed in M9
     SigningIn(Option<String>),
     #[allow(dead_code)] // consumed in M10
     Busy(bool),

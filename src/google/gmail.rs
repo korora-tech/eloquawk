@@ -1,6 +1,7 @@
 //! Gmail API DTOs (serde) and the pure query builders for its list endpoints (SPEC 6.2).
 //!
-//! The endpoint functions that use these arrive with the sync worker (M10, M11). Ids,
+//! [`profile`] is the first endpoint function (M9); the rest arrive with the sync worker
+//! (M10, M11). Every endpoint takes the [`Endpoints`] so tests can redirect it. Ids,
 //! `historyId` and `internalDate` are JSON strings; `mail::parse` turns them into numbers and
 //! `model` types. Every array is `#[serde(default)]` because Gmail omits empty ones.
 //!
@@ -12,18 +13,21 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+use super::api::{self, ApiError, Endpoints, Limits};
 use crate::model::ViewKind;
 
 /// `GET /profile`.
-#[allow(dead_code)] // consumed in M10
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Profile {
     pub email_address: String,
+    #[allow(dead_code)] // consumed in M10
     #[serde(default)]
     pub history_id: String,
+    #[allow(dead_code)] // consumed in M10
     #[serde(default)]
     pub messages_total: Option<u64>,
+    #[allow(dead_code)] // consumed in M10
     #[serde(default)]
     pub threads_total: Option<u64>,
 }
@@ -329,6 +333,17 @@ impl fmt::Debug for AttachmentBody {
 
 /// Query parameters for `GET /threads`. `Label(id)` sets `labelIds` (plus
 /// `includeSpamTrash=true` for TRASH and SPAM), `AllMail` sets neither, `Search(q)` sets `q`.
+/// `GET /profile`: the account's address and current history id (1 unit).
+pub fn profile(agent: &ureq::Agent, ep: &Endpoints, token: &str) -> Result<Profile, ApiError> {
+    api::get(
+        agent,
+        token,
+        &format!("{}/profile", ep.base),
+        &[],
+        Limits::default(),
+    )
+}
+
 #[allow(dead_code)] // consumed in M10
 pub fn threads_query(
     view: &ViewKind,

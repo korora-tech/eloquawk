@@ -13,7 +13,9 @@ mod google;
 mod mail;
 mod model;
 mod protocol;
+mod secrets;
 mod store;
+mod sync;
 mod ui;
 
 use std::io::Write as _;
@@ -23,7 +25,7 @@ use gpui::{AnyWindowHandle, App, AppContext, Entity, Keystroke, QuitMode};
 use gpui_platform::application;
 
 use demo_script::{Cond, FocusTarget, Step};
-use protocol::{Command, SyncEvent, SyncHandle};
+use protocol::{Command, SyncEvent};
 use store::{Mode, Store};
 use ui::theme::{self, ThemeOverride};
 
@@ -54,16 +56,20 @@ fn main() {
     prefs.ephemeral = mode == Mode::Demo;
     let (sync, events) = if mode == Mode::Demo {
         match demo::start(&prefs) {
-            Ok(worker) => (worker.0, Some(worker.1)),
+            Ok(worker) => worker,
             Err(e) => {
                 eprintln!("eloquawk: could not start the demo worker: {e}");
                 std::process::exit(1);
             }
         }
     } else {
-        // The Google worker arrives in M9/M10. Until then commands go nowhere.
-        eprintln!("eloquawk: Gmail sync is not available yet; run with --demo");
-        (SyncHandle::from_sender(std::sync::mpsc::channel().0), None)
+        match sync::start_google(secrets::Secrets::from_env()) {
+            Ok(worker) => worker,
+            Err(e) => {
+                eprintln!("eloquawk: could not start the sync worker: {e}");
+                std::process::exit(1);
+            }
+        }
     };
     let script = args.demo_actions.as_deref().map(demo_script::parse_steps);
     let theme_override = args.theme;
@@ -82,7 +88,7 @@ fn main() {
 
             // Worker → store. The count is logged whenever the queue drains, so a run shows
             // that events flow without logging any mail.
-            if let Some(events) = events {
+            {
                 let store = store.clone();
                 cx.spawn(async move |cx| {
                     let mut count: u64 = 0;

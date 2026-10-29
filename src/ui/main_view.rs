@@ -1,9 +1,9 @@
 //! `MainView`, the main window's root (SPEC 8.2): the header with search, the problem banner,
-//! the sidebar, thread list and reader panes (or an auth card), the toast, the shortcut
-//! overlay and the label picker. It owns the Mail key context and handles every Mail action
-//! of SPEC 9 (keys whose feature lands later post "Not available yet"), runs searches from the
-//! header's `Search` context, opens compose windows (new, reply, reply-all, forward), and
-//! answers the demo script's `expect:` checks.
+//! the sidebar, thread list and reader panes (or an auth card, or Settings), the toast, the
+//! shortcut overlay and the label picker. It owns the Mail key context and handles every Mail
+//! action of SPEC 9, runs searches from the header's `Search` context, opens Settings and
+//! compose windows (new, reply, reply-all, forward), and answers the demo script's `expect:`
+//! checks.
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -20,6 +20,7 @@ use super::auth::Screen;
 use super::compose;
 use super::label_picker::{LabelPicker, PickerEvent};
 use super::reader::{ReaderEvent, ReaderView};
+use super::settings::{SettingsEvent, SettingsView};
 use super::text_input::{Submit, TextInput};
 use super::theme::{self, CONTROL_H, HEADER_H, ICON_SLOT, LIST_W, SIDEBAR_W, palette, tint};
 use super::widgets::{ButtonStyle, button, ghost_button};
@@ -34,9 +35,6 @@ use crate::demo_script::{Cond, FocusTarget};
 use crate::model::{ComposeKind, LabelDelta, ThreadKey, ViewKind, labels};
 use crate::protocol::Command;
 use crate::store::{DetailState, MutationKind, NoticeAction, Row, Store};
-
-/// The notice for keys whose feature lands in a later milestone.
-pub const NOT_YET: &str = "Not available yet";
 
 /// How long a toast stays up.
 const TOAST_FOR: Duration = Duration::from_secs(5);
@@ -61,6 +59,8 @@ pub struct MainView {
     pub(super) help_open: bool,
     /// The label picker, while it shows, with its event subscription.
     picker: Option<(Entity<LabelPicker>, Subscription)>,
+    /// The Settings screen, while it shows, with its event subscription.
+    settings: Option<(Entity<SettingsView>, Subscription)>,
     /// The reader pane's bounds as last laid out (window coordinates, so below the header and
     /// any banner), which the picker hangs from.
     reader_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
@@ -105,6 +105,7 @@ impl MainView {
             screen: Screen::Auth,
             help_open: false,
             picker: None,
+            settings: None,
             reader_bounds: Rc::new(Cell::new(None)),
             shown_search: None,
             pending_compose: None,
@@ -117,6 +118,42 @@ impl MainView {
     /// Focuses the Mail context (the list), as after opening the window or switching views.
     pub fn focus_mail(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.focus, cx);
+    }
+
+    /// The screen to show: Settings while it is open, otherwise what the store calls for.
+    pub(super) fn current_screen(&self, cx: &gpui::App) -> Screen {
+        if self.settings.is_some() {
+            Screen::Settings
+        } else {
+            Screen::of(self.store.read(cx))
+        }
+    }
+
+    /// Shows the Settings screen (or focuses it when it already shows).
+    pub fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.help_open = false;
+        self.picker = None;
+        let view = match &self.settings {
+            Some((view, _)) => view.clone(),
+            None => {
+                let view = cx.new(|cx| SettingsView::new(self.store.clone(), cx));
+                let sub =
+                    cx.subscribe_in(&view, window, |this, _, event, window, cx| match event {
+                        SettingsEvent::Close => this.close_settings(window, cx),
+                    });
+                self.settings = Some((view.clone(), sub));
+                view
+            }
+        };
+        window.focus(&view.focus_handle(cx), cx);
+        cx.notify();
+    }
+
+    fn close_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.settings.take().is_some() {
+            self.focus_mail(window, cx);
+            cx.notify();
+        }
     }
 
     /// Starts the single expiry timer when a new notice is posted.
@@ -535,15 +572,6 @@ impl MainView {
         }
     }
 
-    /// Keys bound from M6 whose feature lands later (ctrl-,): the owning milestone replaces
-    /// the handler.
-    fn not_yet(&mut self, cx: &mut Context<Self>) {
-        self.store.update(cx, |s, cx| {
-            s.inform(NOT_YET);
-            cx.notify();
-        });
-    }
-
     /// The demo script's `open:N`: cursor on row N, then open it.
     pub fn open_row(&mut self, ix: usize, cx: &mut Context<Self>) {
         self.store.update(cx, |s, cx| {
@@ -759,6 +787,14 @@ impl MainView {
                 let n = compose::open_count(cx);
                 (n == *want, n.to_string())
             }
+            Cond::Screen(want) => {
+                let actual = match self.current_screen(cx) {
+                    Screen::Mail => "mail",
+                    Screen::Settings => "settings",
+                    Screen::Auth => "auth",
+                };
+                (want == actual, actual.to_string())
+            }
             // Checked against the focused compose window; here none is focused.
             Cond::Compose(_) | Cond::ComposeError(_) | Cond::Attached(_) | Cond::Discard(_) => {
                 (false, "the main window is focused".into())
@@ -847,8 +883,17 @@ impl MainView {
                 )
                 .h(px(CONTROL_H)),
             )
-            // Settings arrives in M9.
-            .child(ghost_button(p, "settings", "Settings", None).h(px(CONTROL_H)))
+            .child(
+                ghost_button(
+                    p,
+                    "settings",
+                    "Settings",
+                    Some(Box::new(cx.listener(|this, _: &ClickEvent, window, cx| {
+                        this.open_settings(window, cx)
+                    }))),
+                )
+                .h(px(CONTROL_H)),
+            )
     }
 
     fn banner(&self, store: &Store, cx: &Context<Self>) -> Option<Div> {
@@ -989,7 +1034,7 @@ impl Focusable for MainView {
 impl Render for MainView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
-        let screen = Screen::of(self.store.read(cx));
+        let screen = self.current_screen(cx);
         if screen != self.screen {
             self.screen = screen;
             if screen == Screen::Mail {
@@ -1019,9 +1064,10 @@ impl Render for MainView {
         } else {
             None
         };
-        let main = match screen {
-            Screen::Auth => self.auth_card(store, cx),
-            Screen::Mail => self.panes(store, cx),
+        let main = match (screen, &self.settings) {
+            (Screen::Settings, Some((view, _))) => view.clone().into_any_element(),
+            (Screen::Mail, _) => self.panes(store, cx),
+            _ => self.auth_card(store, cx),
         };
         div()
             .key_context("Eloquawk")
@@ -1043,8 +1089,9 @@ impl Render for MainView {
             .on_action(cx.listener(unless_help(|this, _: &Forward, _, cx| {
                 this.compose_reply(ComposeKind::Forward, cx)
             })))
-            // Settings arrives in M9.
-            .on_action(cx.listener(|this, _: &OpenSettings, _, cx| this.not_yet(cx)))
+            .on_action(
+                cx.listener(|this, _: &OpenSettings, window, cx| this.open_settings(window, cx)),
+            )
             .on_action(cx.listener(|_, _: &Quit, _, cx| cx.quit()))
             .when_some(theme::ui_font(cx), |d, font| d.font_family(font))
             .relative()

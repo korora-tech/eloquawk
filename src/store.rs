@@ -30,7 +30,6 @@ const ALL_MAIL_ID: &str = "ALL_MAIL";
 /// Where the data comes from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
-    #[allow(dead_code)] // consumed in M10
     Google,
     Demo,
 }
@@ -416,6 +415,16 @@ impl Store {
 
     pub fn send_command(&self, cmd: Command) {
         self.sync.send(cmd);
+    }
+
+    /// Changes preferences from Settings: applies `f`, pulls numbers back into range and
+    /// saves, except when the prefs are ephemeral (demo mode, tests).
+    pub fn change_prefs(&mut self, f: impl FnOnce(&mut Prefs)) {
+        f(&mut self.prefs);
+        self.prefs = std::mem::take(&mut self.prefs).clamped();
+        if !self.prefs.ephemeral {
+            self.prefs.save();
+        }
     }
 
     fn alloc_op(&mut self) -> OpId {
@@ -2393,6 +2402,19 @@ mod tests {
         s.prefs.notifications = false;
         s.apply(ev());
         assert!(s.take_new_mail().is_empty());
+    }
+
+    #[test]
+    fn settings_changes_prefs_in_range_and_stays_ephemeral() {
+        let (mut s, _rx) = store();
+        s.change_prefs(|p| {
+            p.clock_24h = false;
+            p.refresh_secs = 5;
+        });
+        assert!(!s.prefs.clock_24h);
+        assert_eq!(s.prefs.refresh_secs, crate::config::REFRESH_SECS_MIN);
+        // Ephemeral prefs (demo, tests) stay ephemeral, so `save` can never write them.
+        assert!(s.prefs.ephemeral);
     }
 
     #[test]

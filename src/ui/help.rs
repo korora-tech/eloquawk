@@ -116,6 +116,7 @@ pub const SHORTCUTS: &[Shortcut] = &[
         "Close the message",
     ),
     row(&["ctrl-q"], "Quit", "Compose", "Quit"),
+    row(&["escape"], "CloseSettings", "Settings", "Close Settings"),
     row(&["ctrl-r"], "Refresh", "Eloquawk", "Refresh"),
     row(&["ctrl-,"], "OpenSettings", "Eloquawk", "Settings"),
     row(&["ctrl-n"], "Compose", "Eloquawk", "Compose"),
@@ -131,6 +132,7 @@ fn context_title(context: &str) -> &'static str {
         "LabelPicker" => "Label picker",
         "Search" => "Search",
         "Compose" => "Compose window",
+        "Settings" => "Settings",
         _ => "Anywhere",
     }
 }
@@ -357,7 +359,7 @@ mod tests {
             .filter(|s| {
                 matches!(
                     s.context,
-                    "Mail" | "Eloquawk" | "LabelPicker" | "Search" | "Compose"
+                    "Mail" | "Eloquawk" | "LabelPicker" | "Search" | "Compose" | "Settings"
                 ) && s.action != "Submit"
             })
             .flat_map(|s| s.keys.iter().map(|k| (k.to_string(), s.action.to_string())))

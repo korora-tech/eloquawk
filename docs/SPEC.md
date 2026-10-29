@@ -25,14 +25,19 @@ built on gpui-kit, whose API differs from the pinned zed gpui.
   lock. HTTP is `ureq = "=3.5.0"` (rustls + json) on the sync worker thread.
 - **App id:** `korora.tech.Eloquawk` is used everywhere: Wayland `app_id`, the desktop file
   name, `StartupWMClass`, the hicolor icon name, the notification icon and the keyring service.
-- **Secrets:** refresh tokens and the user-supplied OAuth client live only in the Secret
+- **Secrets:** refresh tokens and a user-supplied OAuth client live only in the Secret
   Service. Access tokens live only in worker memory. Mail content is never written to disk or
   to logs, except an attachment the user explicitly saves. Prefs hold no mail data apart from
   the last selected label id.
-- **No built-in OAuth client in the source.** The client comes from compile-time
-  `option_env!("ELOQUAWK_GOOGLE_CLIENT_ID")` / `option_env!("ELOQUAWK_GOOGLE_CLIENT_SECRET")`
-  when both are set, otherwise from one pasted in Settings and saved to the keyring. With
-  neither, the app shows the "Set up a Google client" card. Never reuse antarctical's client id.
+- **Built-in OAuth client (M9 change).** Eloquawk compiles in its own Desktop OAuth client
+  (`oauth::builtin_client()`), exactly as antarctical does: a desktop client's secret ships in
+  every binary and is public by nature (Google says so; PKCE protects the sign-in), so it is
+  committed on purpose. Compile-time `option_env!("ELOQUAWK_GOOGLE_CLIENT_ID")` /
+  `option_env!("ELOQUAWK_GOOGLE_CLIENT_SECRET")` override each part, and a client pasted in
+  Settings and saved to the keyring overrides both. The "Set up a Google client" card appears
+  only when the built-in client ends up empty (an override set to `""`, or an empty compiled
+  default) and none is saved. Never reuse antarctical's client id. (Before M9 this rule said
+  there was no built-in client; the user supplied one for M9.)
 - **Scope:** `https://www.googleapis.com/auth/gmail.modify` only. It covers read, labels,
   archive, trash, drafts and send, but not permanent delete.
 - **Style:** a `//!` doc on every module, inline `#[cfg(test)] mod tests`, no `unwrap()` on UI
@@ -395,8 +400,8 @@ The demo emits both `Labels` (at start and on Refresh) and `LabelCounts` (after 
 - `ThreadPage` carries `ids`, the page in list order, next to `threads`, the summaries the
   worker already has. Without it a page could not name the ids that 7.3 shows as skeleton
   rows. The store dedupes `ids` and drops any id a pending mutation took out of that view.
-- `SignInFinished` carries only the sequence number until `google/oauth.rs` exists; M9 adds
-  the `Result<TokenResponse, AuthError>` payload.
+- `SignInFinished` carried only the sequence number until `google/oauth.rs` existed; M9
+  added the `Result<TokenResponse, AuthError>` payload.
 - `Send` holds `Outgoing` by value as written; clippy's `large_enum_variant` did not fire.
 
 Rules:
@@ -488,8 +493,9 @@ The Gmail JSON fixtures used in tests live in `src/google/fixtures/*.json`, load
 Copy antarctical's file and change the following:
 - **Scope:** `SCOPES = &["https://www.googleapis.com/auth/gmail.modify"]`.
 - **Drop:** all RSVP and reply-scope code.
-- **Client:** `builtin_client() -> Option<ClientCredentials>`, which returns `None` unless both
-  `ELOQUAWK_GOOGLE_CLIENT_*` variables were set at compile time.
+- **Client:** `builtin_client() -> Option<ClientCredentials>`: the compiled-in Eloquawk
+  Desktop client, with `ELOQUAWK_GOOGLE_CLIENT_ID` / `_SECRET` (compile time) overriding each
+  part. It returns `None` only when the id or the secret ends up empty (section 1).
 - **Unchanged:**
   - `access_type=offline`, `prompt="select_account consent"` and `login_hint` on re-auth
   - The redacted `Debug` impls
@@ -713,7 +719,7 @@ account is unknown), `report` and the sticky problems. Changes from antarctical:
   "Google signed <email> out. Add it again." followed by "(Test-mode tokens expire after 7
   days.)" only when the error description does not mention `invalid_rapt` / reauth; for
   `invalid_rapt` the hint is "(Your organisation requires you to sign in again.)".
-- With no saved client and no compile-time client, emit `Auth(NeedsClient)`.
+- With no saved client and no built-in client, emit `Auth(NeedsClient)`.
 
 **Backoff, per account.**
 
@@ -958,8 +964,8 @@ Navigation:
 ### 8.4 Settings (`ui/settings.rs`)
 
 There are three cards:
-- **OAuth client:** client id field and masked secret field, with Save and "Use built-in" (only
-  when compiled in). Includes a link to docs/google-gmail.md and to
+- **OAuth client:** client id field and masked secret field (with Show/Hide), with Save and
+  "Use built-in client" (only when a client is saved and the build has a built-in one). Includes a link to docs/google-gmail.md and to
   `https://console.cloud.google.com/apis/library/gmail.googleapis.com`.
 - **Accounts:** a list with Remove, plus Add account.
 - **Preferences:**
@@ -1101,6 +1107,7 @@ keep their shift and work.
 | `ctrl-enter` | Send | Compose | |
 | `escape` / `ctrl-w` | CloseCompose | Compose | With the discard check. |
 | `ctrl-q` | Quit | Compose | |
+| `escape` | CloseSettings | Settings | Closes Settings (M9). |
 | `ctrl-r` | Refresh | Eloquawk | |
 | `ctrl-,` | OpenSettings | Eloquawk | |
 | `ctrl-n` | Compose | Eloquawk | |
@@ -1254,7 +1261,7 @@ percent-decoding and the RFC 6068 rules, with a strict whitelist:
     | `open:N` | set the cursor to row N and open it (fallback that needs no key bindings) | M4 |
     | `act:<Name>` | dispatch an action through the tested `demo_action(name) -> Option<Box<dyn Action>>` table with `window.dispatch_action` (for non-key steps) | M4 |
     | `type:<text>` | dispatch each character as a keystroke | M4 |
-    | `expect:<cond>` | check `cursor=N`, `open=none|N`, `view=<label id>|search`, `focus=list|reader|search|compose`, `search=<text>` or `selection=<text>` (M6 adds `card=none|N`, `expanded=N`, `scroll=top|down`, `selected=N`, `rows=N`, `unread=yes|no` and `starred=yes|no` for the cursor thread, `notice=<text>|none`, `help=open|closed`, `account=<email>` and `syncs=N`), and print `ELOQUAWK_EXPECT ok <cond>` or `ELOQUAWK_EXPECT fail <cond> (actual …)` | M4 |
+    | `expect:<cond>` | check `cursor=N`, `open=none|N`, `view=<label id>|search`, `focus=list|reader|search|compose`, `search=<text>` or `selection=<text>` (M6 adds `card=none|N`, `expanded=N`, `scroll=top|down`, `selected=N`, `rows=N`, `unread=yes|no` and `starred=yes|no` for the cursor thread, `notice=<text>|none`, `help=open|closed`, `account=<email>` and `syncs=N`; M8 adds the compose conditions; M9 adds `screen=mail|settings|auth`), and print `ELOQUAWK_EXPECT ok <cond>` or `ELOQUAWK_EXPECT fail <cond> (actual …)` | M4 |
     | `selectall:N` | focus card N's `BodyText` and select all | M5 |
     | `view:<label id>` | show that label of the current account (`ALL_MAIL` for All Mail); a fallback for views no key reaches, such as Spam and Trash | M6 |
     | `search:<query>` | set the search field and dispatch its Submit | M7 |
@@ -1284,7 +1291,7 @@ percent-decoding and the RFC 6068 rules, with a strict whitelist:
 | `mail/files` | Sanitising each case of 7.5 step 4 (separators, NUL, controls, bidi overrides such as `invoice\u{202E}fdp.exe`, leading dots, `""`/`.`/`..`, 300-byte names keep the extension); unique naming; `user-dirs.dirs` with `$HOME/Downloads`, an absolute path, a relative path (rejected) and a missing file. |
 | `google/api` | Error classification: 429, 403 user and daily limits (mixed case), 401, 404, 5xx including 504; `Retry-After` as seconds and as an HTTP-date; `Retry after <RFC 3339>` in the envelope (fixture); retry over 15 min becomes `QuotaExhausted`; body-limit overflow is `TooLarge`; body parsing of the error envelope. |
 | `google/gmail` | Each DTO deserialises its fixture, including fields that are absent (empty history, no `threads`). Query building for repeated `historyTypes` and `includeSpamTrash` on TRASH/SPAM. |
-| `google/oauth` | Copied tests, plus `builtin_client()` returning `None` without the environment variables, and the granular-consent scope check. |
+| `google/oauth` | Copied tests, plus the built-in client with and without the compile-time overrides (an empty part means none), the granular-consent scope check, and token-endpoint error mapping (`invalid_grant`, `invalid_client`, 5xx). |
 | `secrets` / `config` | Copied tests (MemoryStore, unknown fields tolerated, ephemeral never saves); `Prefs` round-trip through `save_to` / `load_from` in a temp dir. |
 | `sync` | `Backoff` schedule, cap, HTTP-date hints and deferral (jobs parked, not dropped, and re-queued after `retry_at`); `collect_changes` with `fresh_inbox` filtering (categories excluded) and `messagesDeleted` folded into `changed`; `commit_round` + refetch failure keeps the ids pending for the next round; large-burst path still refetches fresh inbox ids; job-queue coalescing and lane order; the poll queues `InitialSync` (not `History`) after a failed `profile()`; send-error mapping to `maybe_sent` (network, 5xx true; 4xx false); auth network errors take the backoff path. |
 | `store` | Built via `Store::for_tests(SyncHandle::from_sender(tx))` with ephemeral prefs. Named tests (all in M3): `apply_every_event`, `cursor_moves_and_requests_more`, `archive_removes_from_inbox_and_auto_advances`, `rollback_restores_index`, `pending_delta_reapplied_over_fresh_data`, `undo_applies_inverse`, `undo_trash_untrashes_and_restores_labels`, `spam_removes_from_label_views_and_all_mail`, `refresh_page_keeps_tail_and_cursor`, `append_dedupes`, `new_mail_only_when_pref_on`, `account_removal_prunes`, `selection_targets_bulk_mutation`. |
@@ -1709,12 +1716,43 @@ milestone are welcome. **No trailers.** Push to main after each commit.
   worker
 - **Acceptance:**
   - With a debug build, `ELOQUAWK_SECRETS=memory` and no `--demo`, the "Set up a Google
-    client" card appears (shot `needs-client`); the user's keyring is never touched.
+    client" card appears when the build has no built-in client (shot `needs-client`; build
+    with `ELOQUAWK_GOOGLE_CLIENT_ID=""` once the built-in client is filled in), and the "Sign
+    in to Google" card when it has one; the user's keyring is never touched.
   - Pasting a client saves it through `MemoryStore` in the tests.
   - The oauth (including the scope check), secrets and api tests pass.
   - Settings opens with ctrl-, (shot `settings`); preference persistence is covered by the
     `Prefs` round-trip test and by toggle handlers calling `save` only when not ephemeral.
-  - No calendar strings remain (`rg -i calendar src` is empty).
+  - No calendar strings remain (`rg -i calendar src` is empty). **M9 note:** the one hit is
+    the `.ics` → `text/calendar` attachment MIME type in `mail/compose.rs`, which is mail, not
+    antarctical residue, and stays.
+- **M9 notes:**
+  - The built-in client (section 1) holds the user's Desktop client id. Its secret could not
+    be written by the implementing agent (its tool permissions refused to read the client
+    JSON's secret), so `BUILTIN_CLIENT_SECRET` in `google/oauth.rs` is empty for now and a
+    default build behaves as having no built-in client (the needs-client card) until the
+    secret is pasted into that constant.
+  - `Endpoints` gains `revoke`, so a sign-out in a test never reaches Google.
+  - `AuthError::Network` holds an `api::NetKind`, like `ApiError::Network`, and a 5xx from
+    the token endpoint is `AuthError::Server(status)`; the worker treats both as the
+    `"network"` problem (backoff arrives with M10).
+  - Granular consent without the Gmail scope: the account cannot be named (`profile` needs
+    the scope), so the new grant is revoked only when no account is signed in at all;
+    otherwise it is left alone, since revoking could sign out an existing account. Nothing
+    is saved either way.
+  - Until M10 and M11 the Google worker answers `Want` with an empty first page,
+    `OpenThread` with `ThreadFailed`, mutations with a `MutationFinished` error, `Send` with
+    a `maybe_sent: false` error and `SaveAttachment` with a notice, all saying the feature
+    "isn't available in this build yet". It checks each account with `profile` after the
+    keyring loads and on Refresh. The refresh interval pref is saved but only reaches the
+    worker with M10's poll.
+  - `ELOQUAWK_SECRETS_SEED` is a JSON file `{"client": {"client_id", "client_secret"},
+    "tokens": {"<email>": "<refresh token>"}}`, both keys optional.
+  - The loopback fake server lives in `google/fake.rs` (`#[cfg(test)]`), shared by the api,
+    oauth and sync tests; M10 extends it for `fake_gmail_read_path`.
+  - Settings is `Screen::Settings`, opened with ctrl-, or the header button and closed with
+    escape (`CloseSettings`, context `Settings`) or ✕. Picking a theme there clears a
+    `--theme` override for the session.
 
 ### M10: Gmail read path
 - **Files:** `sync.rs` (job queue and lanes, poll rule, backoff with deferral, initial sync,

@@ -125,19 +125,16 @@ impl TextInput {
         }
     }
 
-    #[allow(dead_code)] // consumed in M9
     pub fn set_placeholder(&mut self, text: impl Into<SharedString>, cx: &mut Context<Self>) {
         self.placeholder = text.into();
         cx.notify();
     }
 
-    #[allow(dead_code)] // consumed in M9
     pub fn set_masked(&mut self, masked: bool, cx: &mut Context<Self>) {
         self.masked = masked;
         cx.notify();
     }
 
-    #[allow(dead_code)] // consumed in M9
     pub fn is_masked(&self) -> bool {
         self.masked
     }
