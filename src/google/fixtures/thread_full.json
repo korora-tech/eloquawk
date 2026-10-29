@@ -1,0 +1,215 @@
+{
+  "id": "18c0a1b2c3d4e5f6",
+  "historyId": "123450",
+  "messages": [
+    {
+      "id": "m1",
+      "threadId": "18c0a1b2c3d4e5f6",
+      "labelIds": [
+        "INBOX",
+        "IMPORTANT"
+      ],
+      "snippet": "Shall we meet at the caf&eacute;?",
+      "historyId": "123400",
+      "internalDate": "1700000000000",
+      "sizeEstimate": 2048,
+      "payload": {
+        "partId": "",
+        "mimeType": "multipart/alternative",
+        "filename": "",
+        "headers": [
+          {
+            "name": "From",
+            "value": "\"Zoë Ångström\" <zoe@example.org>"
+          },
+          {
+            "name": "To",
+            "value": "you@example.com"
+          },
+          {
+            "name": "Subject",
+            "value": "Café ☕ plans"
+          },
+          {
+            "name": "Date",
+            "value": "Tue, 14 Nov 2023 22:13:20 +0000"
+          },
+          {
+            "name": "Message-ID",
+            "value": "<abc123@example.org>"
+          },
+          {
+            "name": "Content-Type",
+            "value": "multipart/alternative; boundary=\"b1\""
+          }
+        ],
+        "body": {
+          "size": 0
+        },
+        "parts": [
+          {
+            "partId": "0",
+            "mimeType": "text/plain",
+            "filename": "",
+            "headers": [
+              {
+                "name": "Content-Type",
+                "value": "text/plain; charset=\"UTF-8\""
+              }
+            ],
+            "body": {
+              "size": 30,
+              "data": "U2hhbGwgd2UgbWVldCBhdCB0aGUgY2Fmw6k_DQo"
+            }
+          },
+          {
+            "partId": "1",
+            "mimeType": "text/html",
+            "filename": "",
+            "headers": [
+              {
+                "name": "Content-Type",
+                "value": "text/html; charset=\"UTF-8\""
+              }
+            ],
+            "body": {
+              "size": 210,
+              "data": "PGh0bWw-PGhlYWQ-PHN0eWxlPnB7fTwvc3R5bGU-PC9oZWFkPjxib2R5PjxwPlNoYWxsIHdlIG1lZXQgYXQgdGhlIDxiPmNhZiZlYWN1dGU7PC9iPj88L3A-PHA-PGEgaHJlZj0iaHR0cHM6Ly9tYXBzLmV4YW1wbGUvY2FmZSI-TWFwPC9hPjwvcD48aW1nIHNyYz0iaHR0cHM6Ly90LmV4YW1wbGUvcC5naWYiIHdpZHRoPSIxIiBoZWlnaHQ9IjEiPjwvYm9keT48L2h0bWw-"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "m2",
+      "threadId": "18c0a1b2c3d4e5f6",
+      "labelIds": [
+        "INBOX",
+        "UNREAD",
+        "STARRED",
+        "IMPORTANT"
+      ],
+      "snippet": "Don&#39;t forget the plans &amp; tickets",
+      "historyId": "123450",
+      "internalDate": "1700003600000",
+      "sizeEstimate": 40960,
+      "payload": {
+        "partId": "",
+        "mimeType": "multipart/mixed",
+        "filename": "",
+        "headers": [
+          {
+            "name": "from",
+            "value": "Bob Jones <bob@example.net>"
+          },
+          {
+            "name": "to",
+            "value": "you@example.com, \"Zoë Ångström\" <zoe@example.org>"
+          },
+          {
+            "name": "cc",
+            "value": "Carol <carol@example.com>"
+          },
+          {
+            "name": "subject",
+            "value": "Re: Café ☕ plans"
+          },
+          {
+            "name": "date",
+            "value": "Tue, 14 Nov 2023 23:13:20 +0000"
+          },
+          {
+            "name": "message-id",
+            "value": "<def456@example.net>"
+          },
+          {
+            "name": "in-reply-to",
+            "value": "<abc123@example.org>"
+          },
+          {
+            "name": "references",
+            "value": "<abc123@example.org>"
+          },
+          {
+            "name": "reply-to",
+            "value": "Bob Work <bob@work.example>"
+          }
+        ],
+        "body": {
+          "size": 0
+        },
+        "parts": [
+          {
+            "partId": "0",
+            "mimeType": "multipart/alternative",
+            "filename": "",
+            "headers": [
+              {
+                "name": "Content-Type",
+                "value": "multipart/alternative; boundary=\"b3\""
+              }
+            ],
+            "body": {
+              "size": 0
+            },
+            "parts": [
+              {
+                "partId": "0.0",
+                "mimeType": "text/plain",
+                "filename": "",
+                "headers": [
+                  {
+                    "name": "Content-Type",
+                    "value": "text/plain; charset=UTF-8"
+                  }
+                ],
+                "body": {
+                  "size": 40,
+                  "data": "RG9uJ3QgZm9yZ2V0IHRoZSBwbGFucyAmIHRpY2tldHMuCgo-IFNoYWxsIHdlIG1lZXQgYXQgdGhlIGNhZsOpPwo="
+                }
+              },
+              {
+                "partId": "0.1",
+                "mimeType": "text/html",
+                "filename": "",
+                "headers": [
+                  {
+                    "name": "Content-Type",
+                    "value": "text/html; charset=UTF-8"
+                  }
+                ],
+                "body": {
+                  "size": 40,
+                  "data": "PHA-RG9uJ3QgZm9yZ2V0IHRoZSBwbGFucyAmYW1wOyB0aWNrZXRzLjwvcD4"
+                }
+              }
+            ]
+          },
+          {
+            "partId": "1",
+            "mimeType": "application/pdf",
+            "filename": "tickets.pdf",
+            "headers": [
+              {
+                "name": "Content-Type",
+                "value": "application/pdf; name=\"tickets.pdf\""
+              },
+              {
+                "name": "Content-Disposition",
+                "value": "attachment; filename=\"tickets.pdf\""
+              },
+              {
+                "name": "Content-Transfer-Encoding",
+                "value": "base64"
+              }
+            ],
+            "body": {
+              "attachmentId": "ANGjdJ8abcdef",
+              "size": 34567
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

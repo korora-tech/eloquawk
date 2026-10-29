@@ -1,0 +1,81 @@
+{
+  "labels": [
+    {
+      "id": "INBOX",
+      "name": "INBOX",
+      "type": "system",
+      "messageListVisibility": "hide",
+      "labelListVisibility": "labelShow"
+    },
+    {
+      "id": "SENT",
+      "name": "SENT",
+      "type": "system"
+    },
+    {
+      "id": "DRAFT",
+      "name": "DRAFT",
+      "type": "system"
+    },
+    {
+      "id": "SPAM",
+      "name": "SPAM",
+      "type": "system"
+    },
+    {
+      "id": "TRASH",
+      "name": "TRASH",
+      "type": "system"
+    },
+    {
+      "id": "UNREAD",
+      "name": "UNREAD",
+      "type": "system"
+    },
+    {
+      "id": "STARRED",
+      "name": "STARRED",
+      "type": "system"
+    },
+    {
+      "id": "IMPORTANT",
+      "name": "IMPORTANT",
+      "type": "system"
+    },
+    {
+      "id": "CATEGORY_PROMOTIONS",
+      "name": "CATEGORY_PROMOTIONS",
+      "type": "system"
+    },
+    {
+      "id": "CHAT",
+      "name": "CHAT",
+      "type": "system"
+    },
+    {
+      "id": "Label_1",
+      "name": "Receipts",
+      "type": "user",
+      "messageListVisibility": "show",
+      "labelListVisibility": "labelShow",
+      "color": {
+        "textColor": "#ffffff",
+        "backgroundColor": "#16a766"
+      }
+    },
+    {
+      "id": "Label_2",
+      "name": "Projects/Eloquawk",
+      "type": "user",
+      "messageListVisibility": "show",
+      "labelListVisibility": "labelShowIfUnread"
+    },
+    {
+      "id": "Label_3",
+      "name": "Old stuff",
+      "type": "user",
+      "messageListVisibility": "hide",
+      "labelListVisibility": "labelHide"
+    }
+  ]
+}

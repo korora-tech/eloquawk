@@ -106,7 +106,7 @@ src/...
 | `mail/mod.rs` | Re-exports. | — |
 | `mail/b64.rs` | URL-safe base64 engine that accepts both padded and unpadded input (`DecodePaddingMode::Indifferent`), plus the encoder. | new |
 | `mail/parse.rs` | Gmail `Message`/`Part` tree to `model::Message`: headers (case-insensitive), RFC 2047 fallback, body choice, charset, attachments. `ThreadDto` to `ThreadSummary`. | new |
-| `mail/html.rs` | `html_to_text(html) -> String` via html2text with an inline-links decorator, input cap, panic guard, tracking pixels and remote images dropped. Entity decoding for snippets. | new |
+| `mail/html.rs` | `html_to_text(html) -> Option<Converted { text, truncated }>` via html2text with an inline-links decorator, input cap, panic guard, tracking pixels and remote images dropped; `None` means the conversion failed and the caller uses the snippet (M2 note: the spec's `-> String` could not carry the truncation and failure flags). `decode_entities` for snippets. | new |
 | `mail/links.rs` | Pure `find_links(text) -> Vec<(Range<usize>, LinkTarget)>`: URL and address detection, scheme allowlist (http, https, mailto). | new |
 | `mail/address.rs` | Parses and formats `Name <a@b>` and address lists, handling quoted commas. `display_name`, `participants(..)`. | new |
 | `mail/query.rs` | A subset of Gmail query syntax, parsed and matched locally (demo mode, plus optimistic list membership). | new |
@@ -1631,9 +1631,14 @@ views.
 
 ## 15. Open items to VERIFY during implementation
 
-1. Charset of `body.data` under `format=full`. Decode defensively.
+1. Charset of `body.data` under `format=full`. Decode defensively. **M2:** `mail/parse.rs`
+   takes bytes that are valid UTF-8 as UTF-8 whatever the declared charset (in case Gmail
+   already converted them), and otherwise decodes with the declared charset, falling back to
+   windows-1252. Still to confirm against a live non-UTF-8 message.
 2. Whether `has_attachments` can be derived from `format=metadata`, using `payload.mimeType ==
    multipart/mixed` as a heuristic. If not, fall back to false and fill it in from the detail.
+   **M2:** `thread_summary` uses the heuristic, plus any attachment part when the parts tree is
+   present. Still to confirm what `format=metadata` returns live.
 3. ~~Key name for `#` and `!`~~ **Resolved:** bind `#`, `!`, `?`, `:` as characters (section 9).
    Still verify whether `shift-space` keeps its shift modifier.
 4. ~~`cx.prompt_for_paths` with `default-features = false`~~ **Resolved:** compiled in through
@@ -1644,11 +1649,21 @@ views.
    `close-window`, for antarctical as well; the script must treat a missing PNG as "not
    verified", not as a pass.
 6. That the html2text, lettre and mail-parser versions build in the gpui tree with no tokio.
+   **Checked at M2** for html2text (used) and the whole lock: `cargo tree -i tokio` is empty.
 7. The INBOX `threadsUnread` semantics compared with what the Gmail web UI shows.
 8. The label effects of `threads.trash` (does it strip INBOX?) and `threads.untrash` (does it
    restore INBOX?). The optimistic model and undo's `restore` depend on it.
 9. `threads.list` with `labelIds=TRASH` / `SPAM` and `includeSpamTrash=true`.
-10. The html2text 0.17 custom decorator API for `InlineLinks`.
+10. The html2text 0.17 custom decorator API for `InlineLinks`. **Resolved at M2:**
+    `decorate_link_end` cannot see the link text, so `InlineLinks` emits no markup and only
+    annotates link spans; `lines_from_read` returns the annotated lines and `mail/html.rs`
+    joins them, writing `text <href>` or the bare href (a loose match such as `example.com`
+    for `https://example.com/` shows the href). Relative and `#` links show their text only.
+    Lists use an ASCII `- ` bullet, because html2text 0.17 subtracts the prefix's byte length
+    from a width estimate and underflows on `• `. Rendering uses a 10 000-column width so
+    paragraphs are not hard-wrapped, and runs of 3+ spaces (table column padding) shrink to
+    two. Known limitation: html2text prunes a link with no text (an image-only banner link)
+    before the decorator sees it, so such a link disappears with its image.
 11. That `Keystroke::parse("j")` sets `key_char`, and that `window.dispatch_keystroke` falls
     through to the focused input handler when no binding matches (needed for `type:` and the
     search test).

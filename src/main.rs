@@ -3,6 +3,9 @@
 //! This is the scaffold. The worker, store and three-pane UI arrive in later milestones.
 
 mod branding;
+mod google;
+mod mail;
+mod model;
 
 use gpui::{
     App, AppContext, Bounds, Context, FocusHandle, Focusable, InteractiveElement, IntoElement,
