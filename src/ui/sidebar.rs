@@ -57,7 +57,10 @@ impl MainView {
         account: &str,
         cx: &Context<Self>,
     ) -> Div {
-        let collapsed = store.prefs.collapsed_accounts.contains(account);
+        // The active account is always expanded (SPEC 8.2), so its selected label stays in
+        // sight whatever `collapsed_accounts` remembers; its header does not collapse it.
+        let active = store.view.as_ref().is_some_and(|v| v.account == account);
+        let collapsed = !active && store.prefs.collapsed_accounts.contains(account);
         let toggle_account = account.to_string();
         let inbox_unread = store.unread_badge(account, labels::INBOX);
         let header = div()
@@ -76,6 +79,9 @@ impl MainView {
             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                 let account = toggle_account.clone();
                 this.store.update(cx, |s, cx| {
+                    if s.view.as_ref().is_some_and(|v| v.account == account) {
+                        return;
+                    }
                     if !s.prefs.collapsed_accounts.remove(&account) {
                         s.prefs.collapsed_accounts.insert(account);
                     }

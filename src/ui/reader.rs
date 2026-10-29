@@ -26,6 +26,17 @@ use crate::model::{
 };
 use crate::store::{DetailState, MutationKind, Store};
 
+/// Gives every message not in `seen` its default expansion (unread or last) and records it,
+/// leaving the expansion of messages already seen as the user toggled it.
+fn expand_new(seen: &mut HashSet<String>, expanded: &mut HashSet<String>, messages: &[Message]) {
+    let last = messages.len().saturating_sub(1);
+    for (i, m) in messages.iter().enumerate() {
+        if seen.insert(m.id.clone()) && (i == last || m.label_ids.contains(labels::UNREAD)) {
+            expanded.insert(m.id.clone());
+        }
+    }
+}
+
 /// Bodies longer than this are cut in the reader (SPEC 8.2).
 pub const MAX_BODY: usize = 200 * 1024;
 
@@ -157,8 +168,10 @@ pub struct ReaderView {
     expanded: HashSet<String>,
     /// Message ids whose folded quote is shown.
     unfolded: HashSet<String>,
-    /// The thread `expanded` was initialised for (once its detail loaded).
-    initialised: Option<ThreadKey>,
+    /// Message ids of the open thread already given their default expansion, so a message
+    /// that arrives later (refresh, new mail, a sent reply) gets its default too while the
+    /// user's toggles on the others are kept.
+    seen: HashSet<String>,
     _subscription: Subscription,
 }
 
@@ -171,7 +184,7 @@ impl ReaderView {
                     this.scroll.set_offset(point(px(0.), px(0.)));
                     this.expanded.clear();
                     this.unfolded.clear();
-                    this.initialised = None;
+                    this.seen.clear();
                 }
                 this.last = next;
                 cx.notify();
@@ -185,7 +198,7 @@ impl ReaderView {
             last,
             expanded: HashSet::new(),
             unfolded: HashSet::new(),
-            initialised: None,
+            seen: HashSet::new(),
             _subscription: subscription,
         }
     }
@@ -207,17 +220,7 @@ impl ReaderView {
 
     /// By default the unread messages and the last one are expanded.
     fn initialise(&mut self, detail: &ThreadDetail) {
-        if self.initialised.as_ref() == Some(&detail.key) {
-            return;
-        }
-        self.initialised = Some(detail.key.clone());
-        self.expanded = detail
-            .messages
-            .iter()
-            .filter(|m| m.label_ids.contains(labels::UNREAD))
-            .map(|m| m.id.clone())
-            .chain(detail.messages.last().map(|m| m.id.clone()))
-            .collect();
+        expand_new(&mut self.seen, &mut self.expanded, &detail.messages);
     }
 
     fn action_bar(&self, p: &Palette, summary: Option<&ThreadSummary>, cx: &Context<Self>) -> Div {
@@ -818,5 +821,51 @@ mod tests {
         m.to.clear();
         m.cc.clear();
         assert_eq!(recipients_line(&m), "to undisclosed recipients");
+    }
+
+    #[test]
+    fn new_messages_get_their_default_expansion_and_toggles_are_kept() {
+        let msg = |id: &str, unread: bool| Message {
+            id: id.into(),
+            thread_id: "t".into(),
+            label_ids: if unread {
+                [labels::UNREAD.to_string()].into()
+            } else {
+                BTreeSet::new()
+            },
+            from: Address::new(None, "a@example.com"),
+            to: vec![],
+            cc: vec![],
+            bcc: vec![],
+            reply_to: vec![],
+            date: jiff::Timestamp::UNIX_EPOCH,
+            subject: String::new(),
+            message_id: None,
+            in_reply_to: None,
+            references: vec![],
+            snippet: String::new(),
+            body: String::new(),
+            body_source: BodySource::Plain,
+            body_truncated: false,
+            attachments: vec![],
+        };
+        let (mut seen, mut expanded) = (HashSet::new(), HashSet::new());
+        let mut messages = vec![msg("a", false), msg("b", true), msg("c", false)];
+        expand_new(&mut seen, &mut expanded, &messages);
+        assert_eq!(expanded, HashSet::from(["b".to_string(), "c".to_string()]));
+
+        // The user collapses the unread one; a re-render changes nothing.
+        expanded.remove("b");
+        expand_new(&mut seen, &mut expanded, &messages);
+        assert_eq!(expanded, HashSet::from(["c".to_string()]));
+
+        // A reply arrives: it is last, so it opens; an earlier new unread opens too.
+        messages.push(msg("d", true));
+        messages.push(msg("e", false));
+        expand_new(&mut seen, &mut expanded, &messages);
+        assert_eq!(
+            expanded,
+            HashSet::from(["c".to_string(), "d".to_string(), "e".to_string()])
+        );
     }
 }

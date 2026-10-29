@@ -1476,6 +1476,14 @@ milestone are welcome. **No trailers.** Push to main after each commit.
   - `BackToList` (u, escape) closes the reader, or clears the selection when it is already
     closed. M6 may split escape's overlay handling out.
   - `expect:selection=` always reports an empty selection until M5.
+  - The active account's section is always expanded, whatever `collapsed_accounts` holds, and
+    its header does not collapse it.
+  - The reader gives each message its default expansion (unread or last) the first time it
+    sees it, so a message that arrives in the open thread later opens too while the user's
+    toggles on the others are kept.
+  - Pointer acceptance (clicking a label, thread, star, card header, quote toggle) is
+    verified by reading the handlers only: the dev environment has no pointer injection tool
+    (no `ydotool`), and the demo script drives the keyboard and actions only.
 
 ### M5: Selectable message text and links
 - **Files:** `ui/text_layout.rs`, `ui/body_text.rs`, `ui/reader.rs` (bodies as `BodyText`,
