@@ -1492,10 +1492,14 @@ milestone are welcome. **No trailers.** Push to main after each commit.
 - **Acceptance:**
   - The `text_layout`, `links` and `mailto` tests pass.
   - Mouse drag selects text within a body; ctrl-a then ctrl-c in a focused body puts the body
-    on the clipboard. Verify with
-    `screenshot.sh selection "j,o,selectall:0,ctrl-c,shot"` and, if `wl-paste` is available,
-    `wl-paste -n` matching the start of the demo body; otherwise record that the clipboard was
-    not checked.
+    on the clipboard. Take the shot with `screenshot.sh selection "j,o,selectall:0,shot"`;
+    check the clipboard separately (the capture overwrites it, see the notes) by launching the
+    binary in the dev shell with `--demo-actions "j,o,selectall:0,ctrl-c,wait:1000"` and, if
+    `wl-paste` is available, reading `wl-paste -n` before it exits; it matches the start of the
+    demo body. Otherwise record that the clipboard was not checked.
+  - Dropping a focused body (thread change, card collapse, quote fold) hands the focus to the
+    reader, so Mail keys keep working:
+    `"open:0,selectall:0,j,j,expect:open=2,expect:focus=reader"` reports only `ok`.
   - The "Copy" button copies the whole body.
   - Links in the demo newsletter are underlined, and the one whose text differs from its href
     shows the href. Clicking is verified by inspection of the handler (`open::that` is not
@@ -1516,6 +1520,9 @@ milestone are welcome. **No trailers.** Push to main after each commit.
     its body entities, and with them any selection.
   - `SelectableText` registers a window-wide mouse move listener, so a drag that leaves the
     body keeps extending the selection.
+  - A body takes focus on mouse down and ctrl-a. The reader never drops a body entity while
+    it holds the focus without first focusing the reader itself (`ReaderView::drop_body`);
+    otherwise keys would dispatch from the root, outside the Mail context.
   - `niri msg action screenshot-window` also puts the PNG on the clipboard, so the ctrl-c
     check with `wl-paste -n` must run without a `screenshot.sh` capture (launch the binary
     in the dev shell with the same `--demo-actions` and read the clipboard before killing it).

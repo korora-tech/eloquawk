@@ -235,8 +235,8 @@ pub struct ReaderView {
 }
 
 impl ReaderView {
-    pub fn new(store: Entity<Store>, cx: &mut Context<Self>) -> Self {
-        let subscription = cx.observe(&store, |this, store, cx| {
+    pub fn new(store: Entity<Store>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let subscription = cx.observe_in(&store, window, |this, store, window, cx| {
             let next = Fingerprint::of(store.read(cx));
             if next != this.last {
                 if next.open != this.last.open {
@@ -244,7 +244,10 @@ impl ReaderView {
                     this.expanded.clear();
                     this.unfolded.clear();
                     this.seen.clear();
-                    this.bodies.clear();
+                    let keys: Vec<String> = this.bodies.keys().cloned().collect();
+                    for key in keys {
+                        this.drop_body(&key, window, cx);
+                    }
                 }
                 this.last = next;
                 cx.notify();
@@ -299,6 +302,17 @@ impl ReaderView {
         });
         self.bodies.insert(key, (body.clone(), subscription));
         body
+    }
+
+    /// Drops the body entity under `key`. A focused body takes the focus with it, which would
+    /// leave the Mail context without focus (and j, k, escape dead), so the focus moves to the
+    /// reader first.
+    fn drop_body(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some((body, _)) = self.bodies.remove(key)
+            && body.focus_handle(cx).contains_focused(window, cx)
+        {
+            window.focus(&self.focus, cx);
+        }
     }
 
     /// A selection spans one body: starting one clears the others.
@@ -504,8 +518,8 @@ impl ReaderView {
         p: &Palette,
         ix: usize,
         m: &Message,
-        now: &Zoned,
-        gmail_url: Option<&str>,
+        at: &CardEnv,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let expanded = self.expanded.contains(&m.id);
@@ -519,6 +533,8 @@ impl ReaderView {
             cx.notify();
         });
         let sender = display_name(&m.from).to_string();
+        let CardEnv { now, gmail_url } = at;
+        let gmail_url = gmail_url.as_deref();
         let date = format::list_date(m.date, now, clock);
         let shell = div()
             .mx(px(20.0))
@@ -531,8 +547,8 @@ impl ReaderView {
             .flex_col();
         if !expanded {
             // A collapsed card keeps no body entities, so no hidden selection lingers.
-            self.bodies.remove(&m.id);
-            self.bodies.remove(&quote_key(&m.id));
+            self.drop_body(&m.id, window, cx);
+            self.drop_body(&quote_key(&m.id), window, cx);
             return shell
                 .child(
                     div()
@@ -587,7 +603,7 @@ impl ReaderView {
             let body = unfolded.then(|| self.body(quote_key(&m.id), q, true, cx));
             if !unfolded {
                 // A folded quote keeps no entity (nor selection).
-                self.bodies.remove(&quote_key(&m.id));
+                self.drop_body(&quote_key(&m.id), window, cx);
             }
             body
         });
@@ -808,6 +824,13 @@ impl ReaderView {
 }
 
 /// The thread in Gmail on the web, for "Open in Gmail".
+/// What every card of one render shares.
+struct CardEnv {
+    now: Zoned,
+    /// The thread in Gmail's web UI.
+    gmail_url: Option<String>,
+}
+
 fn gmail_url(s: &ThreadSummary) -> String {
     let email: String = url::form_urlencoded::byte_serialize(s.key.account.as_bytes()).collect();
     format!(
@@ -863,7 +886,7 @@ impl Focusable for ReaderView {
 }
 
 impl Render for ReaderView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
         let root = div()
             .id("reader")
@@ -904,9 +927,12 @@ impl Render for ReaderView {
                     .as_ref()
                     .map_or_else(|| detail.label_ids.clone(), |s| s.label_ids.clone());
                 scroll = scroll.child(self.subject_block(p, &detail.subject, &label_ids));
-                let gmail_url = summary.as_ref().map(gmail_url);
+                let at = CardEnv {
+                    now,
+                    gmail_url: summary.as_ref().map(gmail_url),
+                };
                 for (i, m) in detail.messages.iter().enumerate() {
-                    scroll = scroll.child(self.card(p, i, m, &now, gmail_url.as_deref(), cx));
+                    scroll = scroll.child(self.card(p, i, m, &at, window, cx));
                 }
             }
             Ok(None) => {

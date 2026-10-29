@@ -45,7 +45,7 @@ pub struct MainView {
 
 impl MainView {
     pub fn new(store: Entity<Store>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let reader = cx.new(|cx| ReaderView::new(store.clone(), cx));
+        let reader = cx.new(|cx| ReaderView::new(store.clone(), window, cx));
         // Search is wired in M7; the field is already here so the layout is final.
         let search = cx.new(|cx| TextInput::new("Search mail", false, 0, cx));
         let subscriptions = vec![
