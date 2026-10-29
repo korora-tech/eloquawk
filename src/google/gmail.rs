@@ -3,6 +3,12 @@
 //! The endpoint functions that use these arrive with the sync worker (M10, M11). Ids,
 //! `historyId` and `internalDate` are JSON strings; `mail::parse` turns them into numbers and
 //! `model` types. Every array is `#[serde(default)]` because Gmail omits empty ones.
+//!
+//! The DTOs that carry mail content (snippets, headers, bodies, attachment data) have
+//! hand-written `Debug` impls that print ids, counts and sizes only, so an accidental `{:?}`
+//! in a log never leaks mail (the same rule as the `model` types, SPEC 1).
+
+use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
@@ -75,7 +81,7 @@ pub struct ThreadList {
 }
 
 #[allow(dead_code)] // consumed in M10
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ThreadRef {
     pub id: String,
@@ -86,7 +92,7 @@ pub struct ThreadRef {
 }
 
 /// `GET /threads/{id}` in `metadata` or `full` format.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ThreadDto {
     pub id: String,
@@ -97,7 +103,7 @@ pub struct ThreadDto {
 }
 
 /// A message in a thread, or `GET /messages/{id}`.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MessageDto {
     pub id: String,
@@ -117,7 +123,7 @@ pub struct MessageDto {
 }
 
 /// A MIME part. The message payload is the root part.
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PartDto {
     #[serde(default)]
@@ -134,13 +140,13 @@ pub struct PartDto {
     pub parts: Vec<PartDto>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct Header {
     pub name: String,
     pub value: String,
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BodyDto {
     #[serde(default)]
@@ -210,7 +216,7 @@ pub struct HistoryLabels {
 
 /// `GET /messages/{m}/attachments/{a}`.
 #[allow(dead_code)] // consumed in M12
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct AttachmentBody {
     #[serde(default)]
     pub size: u64,
@@ -249,6 +255,76 @@ pub struct SendResponse {
     pub thread_id: String,
     #[serde(default)]
     pub label_ids: Vec<String>,
+}
+
+impl fmt::Debug for ThreadRef {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ThreadRef")
+            .field("id", &self.id)
+            .field("history_id", &self.history_id)
+            .finish_non_exhaustive()
+    }
+}
+
+impl fmt::Debug for ThreadDto {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ThreadDto")
+            .field("id", &self.id)
+            .field("history_id", &self.history_id)
+            .field("messages", &self.messages)
+            .finish()
+    }
+}
+
+impl fmt::Debug for MessageDto {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("MessageDto")
+            .field("id", &self.id)
+            .field("thread_id", &self.thread_id)
+            .field("label_ids", &self.label_ids)
+            .field("history_id", &self.history_id)
+            .field("payload", &self.payload)
+            .finish_non_exhaustive()
+    }
+}
+
+impl fmt::Debug for PartDto {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PartDto")
+            .field("part_id", &self.part_id)
+            .field("mime_type", &self.mime_type)
+            .field("headers", &self.headers.len())
+            .field("body", &self.body)
+            .field("parts", &self.parts)
+            .finish_non_exhaustive()
+    }
+}
+
+impl fmt::Debug for Header {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Header")
+            .field("name", &self.name)
+            .finish_non_exhaustive()
+    }
+}
+
+impl fmt::Debug for BodyDto {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BodyDto")
+            .field("has_attachment_id", &self.attachment_id.is_some())
+            .field("size", &self.size)
+            .field("data_len", &self.data.as_ref().map(String::len))
+            .finish()
+    }
+}
+
+impl fmt::Debug for AttachmentBody {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AttachmentBody")
+            .field("size", &self.size)
+            .field("data_len", &self.data.len())
+            .finish()
+    }
 }
 
 /// Query parameters for `GET /threads`. `Label(id)` sets `labelIds` (plus
@@ -325,6 +401,21 @@ pub(crate) mod fixtures {
 mod tests {
     use super::fixtures::*;
     use super::*;
+
+    #[test]
+    fn content_dtos_debug_without_mail_content() {
+        let t: ThreadDto = serde_json::from_str(THREAD_FULL).unwrap();
+        let printed = format!("{t:?}");
+        assert!(printed.contains(&t.id));
+        let m = &t.messages[0];
+        assert!(!printed.contains(&m.snippet));
+        let payload = m.payload.as_ref().unwrap();
+        for h in &payload.headers {
+            assert!(!printed.contains(&h.value), "{} leaked", h.name);
+        }
+        let a: AttachmentBody = serde_json::from_str(ATTACHMENT).unwrap();
+        assert!(!format!("{a:?}").contains(&a.data));
+    }
 
     #[test]
     fn profile_deserialises() {
