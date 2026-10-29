@@ -799,7 +799,11 @@ Navigation:
   - `Label(L)` loses a thread when L was removed; when TRASH was added and L ≠ TRASH; or when
     SPAM was added and L ≠ SPAM.
   - `AllMail` loses a thread when TRASH or SPAM was added.
-  - `Search(q)` lists are left alone.
+  - `Search(q)` loses a thread when TRASH or SPAM was added, unless the query asks for them
+    (`in:trash`, `in:spam`, `in:anywhere` or the matching `label:`), as Gmail leaves them out
+    of results; other label changes leave search results alone until the search runs again.
+    (Note, M7 review: originally search lists were always left alone, which kept trashed
+    threads in the results.)
 - If the open thread was removed, the next row opens; failing that, the previous one; failing
   that, the reader closes. This is the Gmail "auto-advance to older" behaviour.
 - It sends the `Command`.

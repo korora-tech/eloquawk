@@ -221,7 +221,7 @@ impl Query {
     }
 
     /// Whether the query asks for Spam or Trash, which are otherwise excluded.
-    fn wants_spam_or_trash(&self, all_labels: &[Label]) -> bool {
+    pub fn wants_spam_or_trash(&self, all_labels: &[Label]) -> bool {
         self.groups.iter().flatten().any(|t| {
             !t.negated
                 && match &t.kind {

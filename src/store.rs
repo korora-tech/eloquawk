@@ -13,6 +13,7 @@ use jiff::Timestamp;
 
 use crate::config::Prefs;
 use crate::mail::address::{self, ParticipantsLabel};
+use crate::mail::query::Query;
 use crate::model::{
     AccountId, Label, LabelDelta, LabelKind, Outgoing, ThreadDetail, ThreadKey, ThreadSummary,
     ViewKey, ViewKind, labels,
@@ -270,8 +271,9 @@ pub struct Store {
     new_mail: Vec<ThreadSummary>,
 }
 
-/// Whether a thread with `delta` applied leaves a list of this kind.
-fn removed_by(kind: &ViewKind, delta: &LabelDelta) -> bool {
+/// Whether a thread with `delta` applied leaves a list of this kind. `all_labels` are the
+/// account's labels, to tell whether a search asks for Spam or Trash by `label:` name.
+fn removed_by(kind: &ViewKind, delta: &LabelDelta, all_labels: &[Label]) -> bool {
     let adds = |id: &str| delta.add.iter().any(|a| a == id);
     match kind {
         ViewKind::Label(l) => {
@@ -280,7 +282,13 @@ fn removed_by(kind: &ViewKind, delta: &LabelDelta) -> bool {
                 || (adds(labels::SPAM) && l != labels::SPAM)
         }
         ViewKind::AllMail => adds(labels::TRASH) || adds(labels::SPAM),
-        ViewKind::Search(_) => false,
+        // Like Gmail, a search leaves out Spam and Trash unless it asks for them, so moving a
+        // result there takes it out. Other label changes leave the results alone until the
+        // search runs again, since the query may not even look at labels.
+        ViewKind::Search(q) => {
+            (adds(labels::TRASH) || adds(labels::SPAM))
+                && !Query::parse(q).wants_spam_or_trash(all_labels)
+        }
     }
 }
 
@@ -773,7 +781,7 @@ impl Store {
     pub fn search(&mut self, query: &str) {
         let query = query.trim();
         // Nothing but whitespace or empty quotes: nothing to search for.
-        if crate::mail::query::Query::parse(query).is_empty() {
+        if Query::parse(query).is_empty() {
             self.end_search();
             return;
         }
@@ -1062,7 +1070,8 @@ impl Store {
             .cloned()
             .collect();
         for view in views {
-            if removed_by(&view.kind, &delta) {
+            let all_labels = self.labels.get(&account).map(Vec::as_slice).unwrap_or(&[]);
+            if removed_by(&view.kind, &delta, all_labels) {
                 if let Some(list) = self.lists.get_mut(&view) {
                     list.ids.retain(|id| !keys.iter().any(|k| k.id == *id));
                 }
@@ -1280,7 +1289,12 @@ impl Store {
                 continue;
             }
             let delta = p.kind.effective();
-            if removed_by(&view.kind, &delta) {
+            let all_labels = self
+                .labels
+                .get(&p.account)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            if removed_by(&view.kind, &delta, all_labels) {
                 member = Some(false);
             } else if current.is_some_and(|s| gained_by(&view.kind, &delta, s)) {
                 member = Some(true);
@@ -2197,6 +2211,18 @@ mod tests {
             kind: ViewKind::Search("ann".into()),
         };
         page(&mut s, &search, 0..3, &["INBOX"], PageMode::Replace, false);
+        let anywhere = ViewKey {
+            account: ME.into(),
+            kind: ViewKind::Search("ann in:anywhere".into()),
+        };
+        page(
+            &mut s,
+            &anywhere,
+            0..3,
+            &["INBOX"],
+            PageMode::Replace,
+            false,
+        );
         page(
             &mut s,
             &view("Label_1"),
@@ -2220,12 +2246,15 @@ mod tests {
         assert_eq!(list(&s, &view("INBOX")), ["t1", "t2"]);
         assert_eq!(list(&s, &view("Label_1")), ["t1", "t2"]);
         assert_eq!(list(&s, &all_mail()), ["t1", "t2"]);
-        assert_eq!(list(&s, &search), ids(0..3), "search lists are left alone");
+        assert_eq!(list(&s, &search), ["t1", "t2"], "search leaves out Spam");
+        assert_eq!(list(&s, &anywhere), ids(0..3), "unless it asks for Spam");
         assert_eq!(list(&s, &view("SPAM")), ["t0", "t7"], "joins Spam by date");
         assert_eq!(
             s.notice.as_ref().unwrap().text,
             "Marked 1 conversation as spam"
         );
+        assert!(s.undo());
+        assert_eq!(list(&s, &search), ids(0..3), "undo puts the result back");
     }
 
     #[test]
