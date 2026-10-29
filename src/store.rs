@@ -2189,6 +2189,40 @@ mod tests {
     }
 
     #[test]
+    fn mutate_threads_ignores_the_selection() {
+        let (mut s, rx) = inbox_store(4);
+        drain(&rx);
+        s.toggle_select(key("t1"));
+        s.toggle_select(key("t2"));
+        // The row star acts on its own thread only.
+        s.mutate_threads(vec![key("t3")], MutationKind::Labels(LabelDelta::star()));
+        assert!(matches!(drain(&rx).as_slice(),
+            [Command::Modify { thread_ids, delta, .. }]
+                if thread_ids == &["t3"] && *delta == LabelDelta::star()));
+        assert!(s.threads[&key("t3")].starred());
+        assert!(!s.threads[&key("t1")].starred());
+        assert!(!s.threads[&key("t2")].starred());
+        assert_eq!(s.targets(), [key("t1"), key("t2")], "the selection is kept");
+
+        // An undoable kind posts its undo for that thread alone.
+        s.mutate_threads(vec![key("t0")], MutationKind::Labels(LabelDelta::archive()));
+        drain(&rx);
+        assert_eq!(list(&s, &view("INBOX")), ["t1", "t2", "t3"]);
+        assert_eq!(s.notice.as_ref().unwrap().action, Some(NoticeAction::Undo));
+        assert!(s.undo());
+        assert!(matches!(drain(&rx).as_slice(),
+            [Command::Modify { thread_ids, .. }] if thread_ids == &["t0"]));
+        assert_eq!(list(&s, &view("INBOX")), ids(0..4));
+    }
+
+    #[test]
+    fn row_key_is_the_thread_shown() {
+        let t = summary(7, &["INBOX"]);
+        assert_eq!(Row::Thread(&t).key(), &key("t7"));
+        assert_eq!(Row::Skeleton(key("t8")).key(), &key("t8"));
+    }
+
+    #[test]
     fn mark_read_on_open_is_not_undoable() {
         let (mut s, rx) = inbox_store(2);
         s.apply(SyncEvent::ThreadsUpdated(vec![summary(
