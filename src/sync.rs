@@ -20,11 +20,13 @@
 //! those threads in chunks, re-lists page 1 of the inbox and the shown view, and reports new
 //! inbox mail. M11 also changes mail (per-thread modify, star on the last message, trash and
 //! untrash with label restore) and sends it with a multipart upload that is never retried.
-//! Saving attachments, and forwarding Gmail-held ones, arrive in M12; until then those are
-//! answered with a "not available yet" message, so the UI never waits for an answer that
-//! will not come.
+//! M12 adds attachments: a save reads the message afresh for a current attachment id,
+//! downloads the part (or takes its inline data) and writes it under a sanitised name to a
+//! new file in the download folder; a forward resolves the original's attachments the same
+//! way before it builds the message.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
@@ -36,10 +38,11 @@ use crate::config::Prefs;
 use crate::google::api::{self, ApiError, Endpoints};
 use crate::google::gmail;
 use crate::google::oauth::{self, AuthError, ClientCredentials, TokenResponse};
-use crate::mail::{compose, parse};
+use crate::mail::{b64, compose, files, parse};
 use crate::model::{
-    AccountId, AttachmentSource, Label, LabelDelta, LabelKind, MAX_OUTGOING_ATTACHMENTS, Outgoing,
-    OutgoingAttachment, ThreadKey, ThreadSummary, ViewKey, ViewKind, labels,
+    AccountId, Attachment, AttachmentSource, Label, LabelDelta, LabelKind,
+    MAX_OUTGOING_ATTACHMENTS, Outgoing, OutgoingAttachment, ThreadKey, ThreadSummary, ViewKey,
+    ViewKind, labels,
 };
 use crate::protocol::{AuthState, Command, OpId, PageMode, SendError, SyncEvent, SyncHandle};
 use crate::secrets::{SecretError, Secrets};
@@ -76,7 +79,8 @@ const NO_REFRESH_TOKEN: &str = concat!(
 );
 const SIGNED_OUT: &str = "This account is not signed in.";
 const MAYBE_SENT: &str = "Couldn't confirm the message was sent. Check Sent before trying again.";
-const FORWARD_NOT_YET: &str = "Forwarding attachments isn't available yet.";
+const ATTACHMENT_TOO_LARGE: &str = "Attachment too large to download";
+const ATTACHMENT_GONE: &str = "The attachment is no longer in Gmail.";
 /// More changed threads than this in one round is a burst: only new inbox mail is refetched,
 /// the rest is dropped from the cache and refetched when a listing shows it (SPEC 7.4).
 const BURST: usize = 100;
@@ -97,7 +101,6 @@ const NOT_NOTIFIED: &[&str] = &[
 /// Labels whose counts every round and every change refreshes.
 const ROUND_COUNTS: &[&str] = &[labels::INBOX, labels::SPAM, labels::DRAFT];
 const CHANGE_COUNTS: &[&str] = &[labels::INBOX, labels::SPAM, labels::TRASH, labels::DRAFT];
-const SAVE_NOT_YET: &str = "Saving attachments isn't available in this build yet.";
 
 /// Starts the Google worker with the real endpoints, the compiled-in client and the sync
 /// preferences from `prefs`.
@@ -110,22 +113,29 @@ pub fn start_google(
         Endpoints::google(),
         oauth::builtin_client(),
         Tuning::new(prefs.refresh_secs, prefs.page_size),
+        None,
     )
 }
 
-/// Starts the worker against `endpoints` with `builtin` as the fallback client.
+/// Starts the worker against `endpoints` with `builtin` as the fallback client, saving
+/// attachments to `downloads` (the user's download folder when `None`).
 fn start_with(
     secrets: Secrets,
     endpoints: Endpoints,
     builtin: Option<ClientCredentials>,
     tuning: Tuning,
+    downloads: Option<PathBuf>,
 ) -> std::io::Result<(SyncHandle, async_channel::Receiver<SyncEvent>)> {
     let (tx, rx) = mpsc::channel();
     let (etx, erx) = async_channel::unbounded();
     let self_tx = tx.clone();
     std::thread::Builder::new()
         .name("eloquawk-sync".into())
-        .spawn(move || Worker::new(secrets, etx, self_tx, endpoints, builtin, tuning).run(rx))?;
+        .spawn(move || {
+            let mut worker = Worker::new(secrets, etx, self_tx, endpoints, builtin, tuning);
+            worker.downloads = downloads;
+            worker.run(rx)
+        })?;
     Ok((SyncHandle::from_sender(tx), erx))
 }
 
@@ -262,7 +272,35 @@ impl PartialEq for Outbox {
 
 impl Eq for Outbox {}
 
-/// One unit of work (SPEC 7.2). Saves join in M12.
+/// An attachment to save (SPEC 7.5 `SaveAttachment`). Two are the same job when they name the
+/// same part of the same message; `Debug` leaves the filename out.
+#[derive(Clone)]
+struct Download {
+    account: AccountId,
+    message_id: String,
+    attachment: Attachment,
+}
+
+impl PartialEq for Download {
+    fn eq(&self, other: &Self) -> bool {
+        self.account == other.account
+            && self.message_id == other.message_id
+            && self.attachment.part_id == other.attachment.part_id
+    }
+}
+
+impl Eq for Download {}
+
+impl std::fmt::Debug for Download {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Download")
+            .field("message_id", &self.message_id)
+            .field("part_id", &self.attachment.part_id)
+            .finish_non_exhaustive()
+    }
+}
+
+/// One unit of work (SPEC 7.2).
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Job {
     // Interactive lane: the front of the queue, FIFO among themselves.
@@ -271,6 +309,7 @@ enum Job {
     ListView(ViewKey, bool),
     Mutate(Mutation),
     Send(Box<Outbox>),
+    Save(Box<Download>),
     // Background lane: the back of the queue, coalesced.
     InitialSync(AccountId),
     /// Label ids whose counts to fetch, at most [`CHUNK`].
@@ -286,7 +325,7 @@ impl Job {
     fn interactive(&self) -> bool {
         matches!(
             self,
-            Job::OpenThread(_) | Job::ListView(..) | Job::Mutate(_) | Job::Send(_)
+            Job::OpenThread(_) | Job::ListView(..) | Job::Mutate(_) | Job::Send(_) | Job::Save(_)
         )
     }
 
@@ -296,6 +335,7 @@ impl Job {
             Job::ListView(view, _) => &view.account,
             Job::Mutate(m) => &m.account,
             Job::Send(s) => &s.outgoing.account,
+            Job::Save(d) => &d.account,
             Job::InitialSync(a)
             | Job::Labels(a, _)
             | Job::FetchMeta(a, _)
@@ -538,9 +578,41 @@ fn send_error(e: &CallError) -> SendError {
     }
 }
 
-/// Reads a message's local attachments within the 25 MB budget. Gmail-held ones (a forward's)
-/// arrive in M12.
-fn local_attachments(out: &Outgoing) -> Result<Vec<(OutgoingAttachment, Vec<u8>)>, SendError> {
+/// The text a failed attachment download shows (a save's toast, a forward's send error).
+fn attachment_message(e: &CallError) -> String {
+    match e {
+        CallError::Api(ApiError::TooLarge) => ATTACHMENT_TOO_LARGE.into(),
+        CallError::Api(ApiError::NotFound) => ATTACHMENT_GONE.into(),
+        e => e.reader_message(),
+    }
+}
+
+/// A short reason for a failed file write, for the toast.
+fn io_message(e: &std::io::Error) -> String {
+    match e.kind() {
+        std::io::ErrorKind::PermissionDenied => "permission denied".into(),
+        std::io::ErrorKind::StorageFull => "the disk is full".into(),
+        std::io::ErrorKind::NotFound => "the download folder was not found".into(),
+        std::io::ErrorKind::ReadOnlyFilesystem => "the disk is read-only".into(),
+        kind => kind.to_string(),
+    }
+}
+
+/// Finds the part `part_id` in a message's part tree.
+fn find_part<'a>(part: &'a gmail::PartDto, part_id: &str) -> Option<&'a gmail::PartDto> {
+    if part.part_id == part_id {
+        return Some(part);
+    }
+    part.parts.iter().find_map(|p| find_part(p, part_id))
+}
+
+/// Gathers a message's attachments within the 25 MB budget, in order: a Gmail-held one (a
+/// forward's) through `gmail`, a local one read from disk. Nothing has been uploaded when this
+/// fails, so every error is `maybe_sent: false`.
+fn gather_attachments(
+    out: &Outgoing,
+    mut gmail: impl FnMut(&str, &str) -> Result<Vec<u8>, String>,
+) -> Result<Vec<(OutgoingAttachment, Vec<u8>)>, SendError> {
     let refuse = |message: String| SendError {
         message,
         maybe_sent: false,
@@ -549,7 +621,19 @@ fn local_attachments(out: &Outgoing) -> Result<Vec<(OutgoingAttachment, Vec<u8>)
     let mut parts = Vec::with_capacity(out.attachments.len());
     for a in &out.attachments {
         let bytes = match &a.source {
-            AttachmentSource::Gmail { .. } => return Err(refuse(FORWARD_NOT_YET.into())),
+            // The declared size is close to the decoded one: refuse before downloading.
+            AttachmentSource::Gmail { .. } if a.size > budget => {
+                return Err(refuse(compose::TOO_LARGE_TO_SEND.into()));
+            }
+            AttachmentSource::Gmail {
+                message_id,
+                part_id,
+            } => gmail(message_id, part_id).map_err(|e| {
+                refuse(format!(
+                    "Couldn't attach {}: {e}",
+                    files::sanitise(&a.filename)
+                ))
+            })?,
             AttachmentSource::Local(path) => compose::read_local(path, budget).map_err(refuse)?,
         };
         budget = budget
@@ -759,6 +843,9 @@ struct Worker {
     last_poll: Instant,
     next_poll: Instant,
     busy: bool,
+    /// Where saved attachments go; `None` resolves the user's download folder on each save.
+    /// Tests point it at a temporary folder.
+    downloads: Option<PathBuf>,
 }
 
 impl Worker {
@@ -791,6 +878,7 @@ impl Worker {
             last_poll: now,
             next_poll: now + tuning.refresh,
             busy: false,
+            downloads: None,
         }
     }
 
@@ -936,6 +1024,7 @@ impl Worker {
             Job::ListView(view, more) => self.list_view(view, more),
             Job::Mutate(m) => self.mutate(m),
             Job::Send(s) => self.send(s.op, s.outgoing),
+            Job::Save(d) => self.save(*d),
             Job::InitialSync(email) => self.initial_sync(&email),
             Job::Labels(email, ids) => self.label_counts(&email, ids),
             Job::FetchMeta(email, ids) => self.fetch_meta(&email, ids),
@@ -1065,7 +1154,24 @@ impl Worker {
                     });
                 }
             }
-            Command::SaveAttachment { .. } => self.emit(SyncEvent::Notice(SAVE_NOT_YET.into())),
+            Command::SaveAttachment {
+                account,
+                message_id,
+                attachment,
+            } => {
+                if self.accounts.contains_key(&account) {
+                    self.queue.push(Job::Save(Box::new(Download {
+                        account,
+                        message_id,
+                        attachment,
+                    })));
+                } else {
+                    let name = files::sanitise(&attachment.filename);
+                    self.emit(SyncEvent::Notice(format!(
+                        "Couldn't save {name}: {SIGNED_OUT}"
+                    )));
+                }
+            }
             Command::Shutdown => {}
         }
     }
@@ -2275,8 +2381,78 @@ impl Worker {
         }
     }
 
+    /// SPEC 7.5 `SaveAttachment`: download the attachment afresh, then write it to a new file
+    /// in the download folder under a sanitised name. The outcome is a toast.
+    fn save(&mut self, d: Download) {
+        let name = files::sanitise(&d.attachment.filename);
+        let bytes = match self.attachment_data(&d.account, &d.message_id, &d.attachment.part_id) {
+            Ok(bytes) => {
+                self.succeeded(&d.account);
+                bytes
+            }
+            Err(e) => {
+                let message = attachment_message(&e);
+                self.failed(&d.account, &e);
+                self.emit(SyncEvent::Notice(format!(
+                    "Couldn't save {name}: {message}"
+                )));
+                return;
+            }
+        };
+        let saved = match &self.downloads {
+            Some(dir) => std::fs::create_dir_all(dir).map(|()| dir.clone()),
+            None => files::download_dir(),
+        }
+        .and_then(|dir| files::save_new(&dir, &name, &bytes));
+        match saved {
+            Ok(path) => self.emit(SyncEvent::Saved(path)),
+            Err(e) => {
+                eprintln!("eloquawk: couldn't save an attachment: {}", e.kind());
+                self.emit(SyncEvent::Notice(format!(
+                    "Couldn't save {name}: {}",
+                    io_message(&e)
+                )));
+            }
+        }
+    }
+
+    /// The bytes of part `part_id` of message `message_id`. The message is read first for a
+    /// fresh attachment id, since Gmail's are not stable; a part whose data is inline (no
+    /// attachment id) needs no second call. A part that is gone is `NotFound`.
+    fn attachment_data(
+        &mut self,
+        email: &str,
+        message_id: &str,
+        part_id: &str,
+    ) -> Result<Vec<u8>, CallError> {
+        let message = self.with_token(email, |agent, ep, token| {
+            gmail::message_full(agent, ep, token, message_id)
+        })?;
+        let body = message
+            .payload
+            .as_ref()
+            .and_then(|root| find_part(root, part_id))
+            .and_then(|part| part.body.clone())
+            .ok_or(CallError::Api(ApiError::NotFound))?;
+        let data = match (body.attachment_id, body.data) {
+            (Some(attachment_id), _) => {
+                self.with_token(email, |agent, ep, token| {
+                    gmail::attachment(agent, ep, token, message_id, &attachment_id, body.size)
+                })?
+                .data
+            }
+            (None, Some(data)) => data,
+            (None, None) => return Err(CallError::Api(ApiError::NotFound)),
+        };
+        b64::decode(&data)
+            .map_err(|_| CallError::Api(ApiError::Decode("attachment data is not base64".into())))
+    }
+
     fn deliver(&mut self, out: &Outgoing) -> Result<(), SendError> {
-        let parts = local_attachments(out)?;
+        let parts = gather_attachments(out, |message_id, part_id| {
+            self.attachment_data(&out.account, message_id, part_id)
+                .map_err(|e| attachment_message(&e))
+        })?;
         let message_id = compose::new_message_id();
         let raw =
             compose::build(out, &parts, Timestamp::now(), &message_id).map_err(|e| SendError {
@@ -2413,7 +2589,7 @@ mod tests {
     #[test]
     fn no_client_at_all_needs_one_and_pasting_saves_it() {
         let secrets = Secrets::memory();
-        let (handle, rx) = start_with(secrets.clone(), nowhere(), None, fast()).unwrap();
+        let (handle, rx) = start_with(secrets.clone(), nowhere(), None, fast(), None).unwrap();
         let events = until(&rx, |e| {
             matches!(e, SyncEvent::Auth(AuthState::NeedsClient))
         });
@@ -2457,7 +2633,7 @@ mod tests {
     #[test]
     fn builtin_client_starts_ready_without_accounts() {
         let (handle, rx) =
-            start_with(Secrets::memory(), nowhere(), Some(client()), fast()).unwrap();
+            start_with(Secrets::memory(), nowhere(), Some(client()), fast(), None).unwrap();
         let events = until(&rx, |e| matches!(e, SyncEvent::Auth(_)));
         assert!(matches!(events[0], SyncEvent::Client(None)));
         assert!(
@@ -3083,8 +3259,14 @@ mod tests {
         let server = FakeServer::start(script);
         let secrets = Secrets::memory();
         secrets.set_token("me@example.com", "rt").unwrap();
-        let (handle, rx) =
-            start_with(secrets, fake_endpoints(&server), Some(client()), fast()).unwrap();
+        let (handle, rx) = start_with(
+            secrets,
+            fake_endpoints(&server),
+            Some(client()),
+            fast(),
+            None,
+        )
+        .unwrap();
 
         // Initial sync, after one failed attempt: labels, page 1 with skeletons, metadata
         // (one chunk deferred by a 429, not lost), then the label counts.
@@ -3458,6 +3640,7 @@ mod tests {
             nowhere(),
             Some(client()),
             fast(),
+            None,
         )
         .unwrap();
         let events = until(&rx, |e| matches!(e, SyncEvent::Problem(Some(_))));
@@ -3483,8 +3666,14 @@ mod tests {
             } else {
                 AuthState::NeedsClient
             };
-            let (handle, rx) =
-                start_with(Secrets::new(store.clone()), nowhere(), builtin, fast()).unwrap();
+            let (handle, rx) = start_with(
+                Secrets::new(store.clone()),
+                nowhere(),
+                builtin,
+                fast(),
+                None,
+            )
+            .unwrap();
             let events = until(&rx, |e| matches!(e, SyncEvent::Problem(Some(_))));
             assert!(
                 events
@@ -3763,10 +3952,10 @@ mod tests {
         assert!(!send_error(&CallError::Network).maybe_sent);
         assert!(!send_error(&CallError::Auth).maybe_sent);
 
-        // Gmail-held attachments wait for M12; nothing is uploaded.
+        // A Gmail-held attachment that cannot be fetched stops the send before any upload.
         let mut out = outgoing("me@example.com", None);
         out.attachments.push(OutgoingAttachment {
-            filename: "a.pdf".into(),
+            filename: "a\u{202E}fdp.exe".into(),
             mime_type: "application/pdf".into(),
             size: 1,
             source: AttachmentSource::Gmail {
@@ -3774,9 +3963,30 @@ mod tests {
                 part_id: "1".into(),
             },
         });
-        let e = local_attachments(&out).err().unwrap();
-        assert_eq!(e.message, FORWARD_NOT_YET);
+        let e = gather_attachments(&out, |_, _| Err(ATTACHMENT_GONE.into()))
+            .err()
+            .unwrap();
+        assert_eq!(
+            e.message,
+            format!("Couldn't attach afdp.exe: {ATTACHMENT_GONE}")
+        );
         assert!(!e.maybe_sent);
+        // Its declared size counts against the 25 MB before anything is downloaded.
+        out.attachments[0].size = MAX_OUTGOING_ATTACHMENTS + 1;
+        let e = gather_attachments(&out, |_, _| panic!("not downloaded"))
+            .err()
+            .unwrap();
+        assert_eq!(e.message, compose::TOO_LARGE_TO_SEND);
+        // The fetched bytes are used, with their real size.
+        out.attachments[0].size = 1;
+        let parts = gather_attachments(&out, |m, p| {
+            assert_eq!((m, p), ("m", "1"));
+            Ok(b"%PDF".to_vec())
+        })
+        .unwrap();
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0].0.size, 4);
+        assert_eq!(parts[0].1, b"%PDF");
     }
 
     #[test]
@@ -3963,6 +4173,24 @@ mod tests {
             {"messagesDeleted":[{"message":{"id":"m5","threadId":"t-old"}}]}
         ],"historyId":"200"}"#;
         let ok = "{}";
+        // A message with an inline attachment (`body.data`) and one held by `attachmentId`.
+        let pdf: &[u8] = b"%PDF-1.4\x00\xff\xfe binary";
+        let message_full = format!(
+            r#"{{"id":"mfull","threadId":"{A}","payload":{{"partId":"","mimeType":"multipart/mixed","parts":[
+                {{"partId":"0","mimeType":"text/plain","body":{{"size":2,"data":"aGk"}}}},
+                {{"partId":"1","mimeType":"text/plain","filename":"notes.txt","body":{{"size":11,"data":"aGVsbG8gd29ybGQ"}}}},
+                {{"partId":"2","mimeType":"application/pdf","filename":"../report.pdf","body":{{"size":{},"attachmentId":"ATT9"}}}}
+            ]}}}}"#,
+            pdf.len()
+        );
+        let attachment_body = format!(
+            r#"{{"size":{},"data":"{}"}}"#,
+            pdf.len(),
+            crate::mail::b64::encode(pdf)
+        );
+        let downloads =
+            std::env::temp_dir().join(format!("eloquawk-sync-downloads-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&downloads);
         let mut script = vec![
             Reply::json(200, TOKEN).for_path("/token"),
             // The second history call finds the access token stale: one refresh, one retry.
@@ -4011,6 +4239,14 @@ mod tests {
             Reply::json(503, r#"{"error":{"code":503,"message":"Unavailable"}}"#)
                 .for_path("/upload/messages/send"),
             Reply::json(200, fixtures::SEND).for_path("/upload/messages/send"),
+            // Saves and a forward read the message afresh, then the attachment by its id.
+            Reply::json(200, &message_full)
+                .for_path("/gmail/messages/mfull")
+                .sticky(),
+            Reply::json(200, &attachment_body)
+                .for_path("/gmail/messages/mfull/attachments/ATT9")
+                .sticky(),
+            Reply::json(200, fixtures::SEND).for_path("/upload/messages/send"),
         ];
         for l in &labels.labels {
             script.push(
@@ -4028,8 +4264,14 @@ mod tests {
         let server = FakeServer::start(script);
         let secrets = Secrets::memory();
         secrets.set_token("me@example.com", "rt").unwrap();
-        let (handle, rx) =
-            start_with(secrets, fake_endpoints(&server), Some(client()), fast()).unwrap();
+        let (handle, rx) = start_with(
+            secrets,
+            fake_endpoints(&server),
+            Some(client()),
+            fast(),
+            Some(downloads.clone()),
+        )
+        .unwrap();
         let me = || "me@example.com".to_string();
         let mut all = Vec::new();
 
@@ -4145,12 +4387,7 @@ mod tests {
         wait_for(&rx, &mut all, |e| {
             matches!(e, SyncEvent::SendFinished { op: 6, .. })
         });
-        let send_result = |op: OpId| {
-            all.iter().find_map(|e| match e {
-                SyncEvent::SendFinished { op: o, error } if *o == op => Some(error.clone()),
-                _ => None,
-            })
-        };
+        let send_result = |op: OpId| send_result_in(&all, op);
         assert_eq!(
             send_result(5),
             Some(Some(SendError {
@@ -4159,6 +4396,83 @@ mod tests {
             }))
         );
         assert_eq!(send_result(6), Some(None));
+
+        // Saves: an inline part, the same part again (never overwritten), and one fetched by
+        // its attachment id under a sanitised name.
+        let part = |part_id: &str, filename: &str, attachment_id: Option<&str>| Attachment {
+            part_id: part_id.into(),
+            // A stale id from an earlier fetch: the worker looks up a fresh one.
+            attachment_id: attachment_id.map(str::to_string),
+            filename: filename.into(),
+            mime_type: "application/octet-stream".into(),
+            size: 11,
+        };
+        let mut saved = Vec::new();
+        for attachment in [
+            part("1", "notes.txt", None),
+            part("1", "notes.txt", None),
+            part("2", "../report.pdf", Some("stale")),
+        ] {
+            handle.send(Command::SaveAttachment {
+                account: me(),
+                message_id: "mfull".into(),
+                attachment,
+            });
+            let events = until(&rx, |e| {
+                matches!(e, SyncEvent::Saved(_) | SyncEvent::Notice(_))
+            });
+            match events.last() {
+                Some(SyncEvent::Saved(path)) => saved.push(path.clone()),
+                other => panic!("not saved: {other:?}"),
+            }
+            all.extend(events);
+        }
+        assert_eq!(
+            saved,
+            [
+                downloads.join("notes.txt"),
+                downloads.join("notes (1).txt"),
+                downloads.join("report.pdf"),
+            ]
+        );
+        assert_eq!(std::fs::read(&saved[0]).unwrap(), b"hello world");
+        assert_eq!(std::fs::read(&saved[1]).unwrap(), b"hello world");
+        assert_eq!(std::fs::read(&saved[2]).unwrap(), pdf);
+        // A part that is no longer in the message is a toast, and nothing is written.
+        handle.send(Command::SaveAttachment {
+            account: me(),
+            message_id: "mfull".into(),
+            attachment: part("9", "gone.bin", None),
+        });
+        let events = until(&rx, |e| {
+            matches!(e, SyncEvent::Saved(_) | SyncEvent::Notice(_))
+        });
+        assert!(
+            matches!(events.last(), Some(SyncEvent::Notice(n)) if n == &format!("Couldn't save gone.bin: {ATTACHMENT_GONE}")),
+            "{events:?}"
+        );
+        all.extend(events);
+        let _ = std::fs::remove_dir_all(&downloads);
+
+        // A forward carrying the original's attachment.
+        let mut forward = outgoing("me@example.com", Some(A));
+        forward.attachments.push(OutgoingAttachment {
+            filename: "report.pdf".into(),
+            mime_type: "application/pdf".into(),
+            size: pdf.len() as u64,
+            source: AttachmentSource::Gmail {
+                message_id: "mfull".into(),
+                part_id: "2".into(),
+            },
+        });
+        handle.send(Command::Send {
+            op: 7,
+            outgoing: forward,
+        });
+        wait_for(&rx, &mut all, |e| {
+            matches!(e, SyncEvent::SendFinished { op: 7, .. })
+        });
+        assert_eq!(send_result_in(&all, 7), Some(None));
         assert_eq!(
             all.iter()
                 .filter(|e| matches!(e, SyncEvent::NewMail { .. }))
@@ -4249,9 +4563,26 @@ mod tests {
             2
         );
 
+        // Saves and the forward: the message read afresh each time, the attachment by the
+        // fresh id (never the stale one), and never for an inline part.
+        let full: Vec<_> = reqs
+            .iter()
+            .filter(|r| r.path() == "/gmail/messages/mfull")
+            .collect();
+        assert_eq!(full.len(), 5, "three saves, a missing part and the forward");
+        assert!(full.iter().all(|r| has(&query(r), "format", "full")));
+        assert_eq!(
+            reqs.iter()
+                .filter(|r| r.path() == "/gmail/messages/mfull/attachments/ATT9")
+                .count(),
+            2,
+            "the pdf save and the forward"
+        );
+        assert!(!reqs.iter().any(|r| r.path().contains("stale")));
+
         // Sends: a multipart upload carrying the thread id and the raw message.
         let sends = posts("/upload/messages/send");
-        assert_eq!(sends.len(), 2);
+        assert_eq!(sends.len(), 3);
         for send in &sends {
             assert!(has(&query(send), "uploadType", "multipart"));
             let ct = send.header("content-type").unwrap();
@@ -4275,5 +4606,21 @@ mod tests {
             let bcc = m.bcc().and_then(|l| l.first()).and_then(|a| a.address());
             assert_eq!(bcc, Some("hidden@example.org"), "Bcc stays for Gmail");
         }
+        let forwarded = multipart_parts(&sends[2].header("content-type").unwrap(), &sends[2].body);
+        let m = mail_parser::MessageParser::default()
+            .parse(&forwarded[1].1[..])
+            .unwrap();
+        let parts: Vec<_> = m.attachments().collect();
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0].attachment_name(), Some("report.pdf"));
+        assert!(parts[0].is_content_type("application", "pdf"));
+        assert_eq!(&parts[0].decoded()[..], pdf, "the original bytes");
+    }
+
+    fn send_result_in(all: &[SyncEvent], op: OpId) -> Option<Option<SendError>> {
+        all.iter().find_map(|e| match e {
+            SyncEvent::SendFinished { op: o, error } if *o == op => Some(error.clone()),
+            _ => None,
+        })
     }
 }

@@ -256,6 +256,11 @@ fn run_step(step: &Step, store: &Entity<Store>, cx: &mut App) {
                 "ELOQUAWK_EXPECT fail step attach:{path} (no compose window)"
             )),
         },
+        Step::Save(n) => match main.read_with(cx, |view, cx| view.save_attachment(*n, cx)) {
+            Ok(Ok(())) => {}
+            Ok(Err(why)) => report(format!("ELOQUAWK_EXPECT fail step save:{n} ({why})")),
+            Err(_) => report(format!("ELOQUAWK_EXPECT fail step save:{n} (no window)")),
+        },
         Step::Expect { raw, cond } => {
             // A focused compose window answers the focus and its own conditions; the main
             // window answers the rest.

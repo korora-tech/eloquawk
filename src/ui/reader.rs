@@ -28,9 +28,10 @@ use crate::mail::address::display_name;
 use crate::mail::links::LinkTarget;
 use crate::mail::mailto;
 use crate::model::{
-    Address, BodySource, LabelDelta, LabelKind, Message, ThreadDetail, ThreadKey, ThreadSummary,
-    ViewKind, labels,
+    Address, Attachment, BodySource, LabelDelta, LabelKind, Message, ThreadDetail, ThreadKey,
+    ThreadSummary, ViewKind, labels,
 };
+use crate::protocol::Command;
 use crate::store::{DetailState, MutationKind, Store};
 
 /// Gives every message not in `seen` its default expansion (unread or last) and records it,
@@ -484,6 +485,28 @@ impl ReaderView {
         Ok(())
     }
 
+    /// Saves the open thread's attachment `n`, counting every message's attachments in
+    /// order, as its Save button does (the demo's `save:N` step).
+    pub fn save_attachment(&self, n: usize, cx: &gpui::App) -> Result<(), String> {
+        let key = self.last.open.clone().ok_or("no open thread")?;
+        let store = self.store.read(cx);
+        let Some(DetailState::Loaded(detail)) = store.details.get(&key) else {
+            return Err("the thread is not loaded".into());
+        };
+        let (message_id, attachment) = detail
+            .messages
+            .iter()
+            .flat_map(|m| m.attachments.iter().map(move |a| (&m.id, a)))
+            .nth(n)
+            .ok_or_else(|| format!("no attachment {n}"))?;
+        store.send_command(Command::SaveAttachment {
+            account: key.account.clone(),
+            message_id: message_id.clone(),
+            attachment: attachment.clone(),
+        });
+        Ok(())
+    }
+
     /// The selected text of whichever body has a selection (at most one has).
     pub fn selection_text(&self, cx: &gpui::App) -> String {
         self.bodies
@@ -921,18 +944,37 @@ impl ReaderView {
                                         .text_color(rgb(p.caption))
                                         .child(format::size_human(a.size)),
                                 )
-                                // Saving arrives in M12.
                                 .child(button(
                                     p,
                                     SharedString::from(format!("save-{ix}-{ai}")),
                                     "Save",
                                     ButtonStyle::Secondary,
-                                    None,
+                                    self.save_click(&m.id, a, cx),
                                 ))
                         })),
                 )
             })
             .into_any_element()
+    }
+
+    /// The Save button's handler: asks the worker to save `attachment` of message
+    /// `message_id` in the open thread's account (SPEC 7.5). The worker answers with a toast.
+    fn save_click(
+        &self,
+        message_id: &str,
+        attachment: &Attachment,
+        cx: &Context<Self>,
+    ) -> Option<OnClick> {
+        let account = self.last.open.as_ref()?.account.clone();
+        let message_id = message_id.to_string();
+        let attachment = attachment.clone();
+        Some(self.click(cx, move |this, _, cx| {
+            this.store.read(cx).send_command(Command::SaveAttachment {
+                account: account.clone(),
+                message_id: message_id.clone(),
+                attachment: attachment.clone(),
+            });
+        }))
     }
 
     fn empty(&self, p: &Palette, title: &str, detail: &str) -> Div {

@@ -377,6 +377,7 @@ pub enum SyncEvent {
     SigningIn(Option<String>),
     Busy(bool), Synced(Timestamp),
     Problem(Option<String>), Notice(String),
+    Saved(PathBuf),                                  // M12: an attachment was saved here
     Labels { account: AccountId, labels: Vec<Label> },      // full list: replaces the account's labels
     LabelCounts { account: AccountId, labels: Vec<Label> }, // count refresh: upserts by label id
     ThreadPage { view: ViewKey, ids: Vec<String>, threads: Vec<ThreadSummary>, mode: PageMode, has_more: bool },
@@ -559,7 +560,7 @@ struct AccountState {
 ```rust
 enum Job {
     // interactive lane: front of the queue, run in FIFO order among themselves
-    OpenThread(ThreadKey), Mutate(Mutation), Send(OpId, Outgoing), Save(..), ListView(ViewKey, bool),
+    OpenThread(ThreadKey), Mutate(Mutation), Send(OpId, Outgoing), Save(Download), ListView(ViewKey, bool),
     // background lane: back of the queue, coalesced (no duplicate (variant, account, ids))
     InitialSync(AccountId), Labels(AccountId, Vec<String> /*label ids, ≤10*/),
     FetchMeta(AccountId, Vec<String> /*≤10*/), History(AccountId), Refetch(AccountId),
@@ -711,6 +712,11 @@ without HTTP.
   5. Never overwrite: try `name.ext`, then `name (1).ext` and so on, each with `create_new`.
      On a write error, remove the partial file.
   6. Emit `Notice("Saved <file> to <dir>")`; the toast offers "Open folder".
+     (M12 change: the worker emits `SyncEvent::Saved(path)` instead, and the store posts
+     "Saved <file> to <dir>" (home shown as `~`) with `NoticeAction::OpenFolder(path)`. A
+     plain `Notice` cannot carry the path the button needs. "Open folder" calls gpui's
+     `cx.reveal_path`, which uses the portal's OpenDirectory with the file selected, or
+     xdg-open on the folder.)
 
 ### 7.6 Tokens, accounts and errors
 
@@ -1273,6 +1279,7 @@ percent-decoding and the RFC 6068 rules, with a strict whitelist:
     | `view:<label id>` | show that label of the current account (`ALL_MAIL` for All Mail); a fallback for views no key reaches, such as Spam and Trash | M6 |
     | `search:<query>` | set the search field and dispatch its Submit | M7 |
     | `attach:<path>` | add a local file to the focused compose window as if picked in the file chooser (the portal cannot be scripted), with the same 25 MB check | M8 |
+    | `save:N` | press Save on the open thread's attachment N (0-based, counted across its messages in order); the button has no key | M12 |
     | anything else | one or more keystrokes separated by spaces, each parsed with `Keystroke::parse` and sent with `window.dispatch_keystroke(..)`, so bindings, context predicates and chords are exercised; `g i` sends `g` then `i`. `comma` stands for `,`. | M4 |
   - In `type:`, `search:` and `expect:` values, `\,` escapes a comma.
   - An unparseable or unknown step prints `ELOQUAWK_EXPECT fail step <step>` and is skipped.
@@ -1884,6 +1891,29 @@ milestone are welcome. **No trailers.** Push to main after each commit.
     rfc822 part carries the original bytes.
   - Saving in demo shows the notice.
   - Live: an attachment saves, if a client is available.
+
+- **M12 notes:**
+  - `SyncEvent::Saved(PathBuf)` replaces the save's `Notice` (see 7.5 step 6), and
+    `NoticeAction` gained `OpenFolder(PathBuf)` (so it is no longer `Copy`). The event's
+    `Debug` prints only the variant name.
+  - Save failures are a toast: "Couldn't save <file>: <reason>", where the reason is
+    "Attachment too large to download" (`TooLarge`), "The attachment is no longer in Gmail."
+    (404, or the part id no longer in the message) or the usual reader message. Network and
+    rate-limit failures also go through the 7.6 handling (banner and backoff), as opening a
+    thread does. A save for an account that is not signed in is answered at once.
+  - Forwarded (Gmail-held) attachments are resolved in the order the composer lists them,
+    mixed with local ones, against one 25 MB budget; a Gmail part whose declared size alone
+    exceeds what is left is refused before it is downloaded. A failed resolution is
+    `SendError { maybe_sent: false, message: "Couldn't attach <file>: <reason>" }` and
+    nothing is uploaded; like every send failure it goes to the composer, not the banner.
+  - The sanitiser also strips U+061C, U+200B–U+200D, U+2060–U+2064 and U+FEFF (invisible
+    characters in the same family as the listed ones) and DEL, and trims trailing
+    whitespace. A dot more than 32 bytes from the end does not count as an extension when a
+    long name is truncated. `$HOME` alone in `user-dirs.dirs` means the home folder; `$HOME`
+    followed by anything but `/` is rejected.
+  - `start_with` takes a download folder override (`None` in production) so the fake-server
+    test saves into a temporary folder.
+  - The live save was not performed by the implementing agent; it is left for the user.
 
 ### M13: Notifications and single instance
 - **Files:** `notify.rs` (pure part, markup escaping, and the notify-rust `show` with icon

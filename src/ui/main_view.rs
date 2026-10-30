@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, Bounds, ClickEvent, Context, Div, Entity, FocusHandle, Focusable, FontWeight,
+    AnyElement, App, Bounds, ClickEvent, Context, Div, Entity, FocusHandle, Focusable, FontWeight,
     Pixels, ScrollStrategy, StyleRefinement, Subscription, Task, UniformListScrollHandle, Window,
     canvas, div, px, rgb,
 };
@@ -592,6 +592,11 @@ impl MainView {
             .update(cx, |reader, cx| reader.select_all_in_card(n, window, cx))
     }
 
+    /// Saves the open thread's attachment `n` (the demo's `save:N` step).
+    pub fn save_attachment(&self, n: usize, cx: &gpui::App) -> Result<(), String> {
+        self.reader.read(cx).save_attachment(n, cx)
+    }
+
     // ----- demo script checks -------------------------------------------------------------
 
     fn focus_target(&self, window: &Window, cx: &gpui::App) -> Option<FocusTarget> {
@@ -942,8 +947,8 @@ impl MainView {
         if notice.posted_at.elapsed() > TOAST_FOR {
             return None;
         }
-        let undo = (notice.action == Some(NoticeAction::Undo)).then(|| {
-            button(
+        let undo = match &notice.action {
+            Some(NoticeAction::Undo) => Some(button(
                 p,
                 "toast-undo",
                 "Undo",
@@ -954,8 +959,23 @@ impl MainView {
                         cx.notify();
                     });
                 }))),
-            )
-        });
+            )),
+            Some(NoticeAction::OpenFolder(path)) => {
+                let path = path.clone();
+                Some(button(
+                    p,
+                    "toast-open-folder",
+                    "Open folder",
+                    ButtonStyle::Secondary,
+                    // The file manager opens on the folder with the saved file selected
+                    // (the portal's OpenDirectory, or xdg-open on the folder).
+                    Some(Box::new(move |_: &ClickEvent, _, cx: &mut App| {
+                        cx.reveal_path(&path)
+                    })),
+                ))
+            }
+            None => None,
+        };
         Some(
             div().absolute().bottom(px(18.0)).right(px(18.0)).child(
                 div()

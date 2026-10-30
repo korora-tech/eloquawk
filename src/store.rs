@@ -7,6 +7,7 @@
 //! if the worker reports a failure, and (for the "move" kinds) undoable from the toast.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use jiff::Timestamp;
@@ -55,9 +56,11 @@ pub enum DetailState {
 }
 
 /// What the toast's button does.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum NoticeAction {
     Undo,
+    /// Shows the folder holding a saved attachment, with the file selected (M12).
+    OpenFolder(PathBuf),
 }
 
 /// A transient message for the toast.
@@ -277,6 +280,23 @@ pub struct Store {
 
 /// Whether a thread with `delta` applied leaves a list of this kind. `all_labels` are the
 /// account's labels, to tell whether a search asks for Spam or Trash by `label:` name.
+/// The toast for a saved attachment: "Saved <file> to <dir>", with the home folder shown as
+/// `~`.
+fn saved_text(path: &Path) -> String {
+    let file = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let dir = path.parent().unwrap_or(Path::new("/"));
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let dir = match home.as_deref().and_then(|h| dir.strip_prefix(h).ok()) {
+        Some(rest) if rest.as_os_str().is_empty() => "~".to_string(),
+        Some(rest) => format!("~/{}", rest.display()),
+        None => dir.display().to_string(),
+    };
+    format!("Saved {file} to {dir}")
+}
+
 fn removed_by(kind: &ViewKind, delta: &LabelDelta, all_labels: &[Label]) -> bool {
     let adds = |id: &str| delta.add.iter().any(|a| a == id);
     match kind {
@@ -1549,6 +1569,10 @@ impl Store {
             }
             SyncEvent::Problem(p) => self.problem = p,
             SyncEvent::Notice(text) => self.post_notice(text, None),
+            SyncEvent::Saved(path) => {
+                let text = saved_text(&path);
+                self.post_notice(text, Some(NoticeAction::OpenFolder(path)));
+            }
             SyncEvent::Labels { account, labels } => {
                 self.labels.insert(account, labels);
             }
@@ -1801,6 +1825,11 @@ mod tests {
         assert_eq!(s.problem.as_deref(), Some("Offline"));
         s.apply(SyncEvent::Notice("Hello".into()));
         assert_eq!(s.notice.as_ref().map(|n| n.text.as_str()), Some("Hello"));
+        let saved = std::path::PathBuf::from("/srv/dl/a (1).pdf");
+        s.apply(SyncEvent::Saved(saved.clone()));
+        let notice = s.notice.clone().unwrap();
+        assert_eq!(notice.text, "Saved a (1).pdf to /srv/dl");
+        assert_eq!(notice.action, Some(NoticeAction::OpenFolder(saved)));
         s.apply(SyncEvent::Labels {
             account: ME.into(),
             labels: vec![

@@ -143,6 +143,8 @@ pub enum Step {
     /// Attach a local file to the focused compose window as if chosen in the file chooser
     /// (the portal cannot be scripted). M8.
     Attach(String),
+    /// Press Save on the open thread's attachment N, counted across its messages. M12.
+    Save(usize),
     /// Dispatch the named action (see [`demo_action`]).
     Act(String),
     /// Send each character as a keystroke.
@@ -345,6 +347,7 @@ fn parse_step(step: &str) -> Step {
             "view" if !value.is_empty() => Step::View(value.to_string()),
             "search" => Step::Search(value.to_string()),
             "attach" if !value.is_empty() => Step::Attach(value.to_string()),
+            "save" => value.parse().map(Step::Save).unwrap_or_else(|_| unknown()),
             "act" if demo_action(value).is_some() => Step::Act(value.to_string()),
             "type" if !value.is_empty() => Step::Type(value.to_string()),
             "expect" => match parse_cond(value) {
@@ -473,7 +476,7 @@ mod tests {
     fn every_step_kind_parses() {
         let steps = parse_steps(
             "wait:800,theme:light,theme:dark,shot,open:3,act:NextThread,type:hello,\
-             expect:cursor=2,selectall:0,view:TRASH,search:from:zoë,attach:/tmp/a b.pdf,j,g i",
+             expect:cursor=2,selectall:0,view:TRASH,search:from:zoë,attach:/tmp/a b.pdf,save:1,j,g i",
         );
         assert_eq!(
             steps,
@@ -493,6 +496,7 @@ mod tests {
                 Step::View("TRASH".into()),
                 Step::Search("from:zoë".into()),
                 Step::Attach("/tmp/a b.pdf".into()),
+                Step::Save(1),
                 keys(&["j"]),
                 keys(&["g", "i"]),
             ]
@@ -650,7 +654,7 @@ mod tests {
     fn unknown_steps_are_reported() {
         assert_eq!(
             parse_steps(
-                "bogus:1,wait:x,theme:sepia,act:Nope,selectall:x,view:,attach:,frobnicate,,"
+                "bogus:1,wait:x,theme:sepia,act:Nope,selectall:x,view:,attach:,save:x,frobnicate,,"
             ),
             vec![
                 Step::Unknown("bogus:1".into()),
@@ -660,6 +664,7 @@ mod tests {
                 Step::Unknown("selectall:x".into()),
                 Step::Unknown("view:".into()),
                 Step::Unknown("attach:".into()),
+                Step::Unknown("save:x".into()),
                 Step::Unknown("frobnicate".into()),
             ]
         );

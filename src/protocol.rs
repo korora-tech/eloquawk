@@ -7,6 +7,7 @@
 //! ids and counts only, never mail content.
 
 use std::fmt;
+use std::path::PathBuf;
 use std::sync::mpsc;
 
 use jiff::Timestamp;
@@ -74,7 +75,6 @@ pub enum Command {
         op: OpId,
         outgoing: Outgoing,
     },
-    #[allow(dead_code)] // consumed in M12
     SaveAttachment {
         account: AccountId,
         message_id: String,
@@ -136,6 +136,8 @@ pub enum SyncEvent {
     Problem(Option<String>),
     /// A one-off message for the toast.
     Notice(String),
+    /// An attachment was saved at `path` (M12): the toast names it and offers "Open folder".
+    Saved(PathBuf),
     /// The full list: replaces the account's labels.
     Labels {
         account: AccountId,
@@ -196,6 +198,7 @@ impl fmt::Debug for SyncEvent {
             SyncEvent::Synced(_) => f.write_str("Synced"),
             SyncEvent::Problem(p) => write!(f, "Problem({})", p.is_some()),
             SyncEvent::Notice(_) => f.write_str("Notice"),
+            SyncEvent::Saved(_) => f.write_str("Saved"),
             SyncEvent::Labels { labels, .. } => write!(f, "Labels({})", labels.len()),
             SyncEvent::LabelCounts { labels, .. } => write!(f, "LabelCounts({})", labels.len()),
             SyncEvent::ThreadPage {
@@ -267,6 +270,7 @@ mod tests {
                 threads: vec![summary.clone()],
             },
             SyncEvent::Notice("secret notice".into()),
+            SyncEvent::Saved(PathBuf::from("/home/me/Downloads/secret.pdf")),
             SyncEvent::Problem(Some("secret problem".into())),
             SyncEvent::ThreadFailed {
                 key: summary.key.clone(),

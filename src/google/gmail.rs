@@ -201,7 +201,6 @@ pub struct HistoryLabels {
 }
 
 /// `GET /messages/{m}/attachments/{a}`.
-#[allow(dead_code)] // consumed in M12
 #[derive(Clone, Deserialize)]
 pub struct AttachmentBody {
     #[serde(default)]
@@ -410,6 +409,47 @@ pub fn thread_full(
         &format!("{}/threads/{}", ep.base, segment(id)),
         &[("format", "full".to_string())],
         Limits::large(FULL_THREAD_BYTES),
+    )
+}
+
+/// `GET /messages/{id}?format=full`: one message with its part tree (5 units), read before a
+/// download because attachment ids are not stable. Large body limit, timeout scaled for 2 MiB.
+pub fn message_full(
+    agent: &ureq::Agent,
+    ep: &Endpoints,
+    token: &str,
+    id: &str,
+) -> Result<MessageDto, ApiError> {
+    api::get(
+        agent,
+        token,
+        &format!("{}/messages/{}", ep.base, segment(id)),
+        &[("format", "full".to_string())],
+        Limits::large(FULL_THREAD_BYTES),
+    )
+}
+
+/// `GET /messages/{m}/attachments/{a}`: one attachment's data (5 units), with the large body
+/// limit and a timeout scaled for `size`, the attachment's size as the part tree gave it.
+pub fn attachment(
+    agent: &ureq::Agent,
+    ep: &Endpoints,
+    token: &str,
+    message_id: &str,
+    attachment_id: &str,
+    size: u64,
+) -> Result<AttachmentBody, ApiError> {
+    api::get(
+        agent,
+        token,
+        &format!(
+            "{}/messages/{}/attachments/{}",
+            ep.base,
+            segment(message_id),
+            segment(attachment_id)
+        ),
+        &[],
+        Limits::large(size),
     )
 }
 
