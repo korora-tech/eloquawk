@@ -8,6 +8,12 @@
 //! input), so this talks to gpui's Wayland connection directly: it wraps the same
 //! `wl_display` and `wl_surface` through their raw handles, binds `xdg_activation_v1` on a
 //! private event queue and sends `activate(token, surface)`.
+//!
+//! The unsafe wrapping depends on gpui_linux (at the zed rev pinned in `Cargo.toml`) using
+//! `wayland-backend` 0.3 with `client_system`, so that our `Backend::from_foreign_display`
+//! and gpui's connection are the same libwayland-client objects. Recheck this when the gpui
+//! rev moves. Each call does a registry roundtrip and leaves one `wl_registry` proxy behind;
+//! hand-offs are rare user actions, so nothing is cached.
 
 use gpui::Window;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle};

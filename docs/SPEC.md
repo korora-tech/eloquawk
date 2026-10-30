@@ -1309,7 +1309,7 @@ percent-decoding and the RFC 6068 rules, with a strict whitelist:
 | `secrets` / `config` | Copied tests (MemoryStore, unknown fields tolerated, ephemeral never saves); `Prefs` round-trip through `save_to` / `load_from` in a temp dir. |
 | `sync` | `Backoff` schedule, cap, HTTP-date hints and deferral (jobs parked, not dropped, and re-queued after `retry_at`); `collect_changes` with `fresh_inbox` filtering (categories excluded) and `messagesDeleted` folded into `changed`; `commit_round` + refetch failure keeps the ids pending for the next round; large-burst path still refetches fresh inbox ids; job-queue coalescing and lane order; the poll queues `InitialSync` (not `History`) after a failed `profile()`; send-error mapping to `maybe_sent` (network, 5xx true; 4xx false); auth network errors take the backoff path. |
 | `store` | Built via `Store::for_tests(SyncHandle::from_sender(tx))` with ephemeral prefs. Named tests (all in M3): `apply_every_event`, `cursor_moves_and_requests_more`, `archive_removes_from_inbox_and_auto_advances`, `rollback_restores_index`, `pending_delta_reapplied_over_fresh_data`, `undo_applies_inverse`, `undo_trash_untrashes_and_restores_labels`, `spam_removes_from_label_views_and_all_mail`, `refresh_page_keeps_tail_and_cursor`, `append_dedupes`, `new_mail_only_when_pref_on`, `account_removal_prunes`, `selection_targets_bulk_mutation`. |
-| `notify` | First-sync suppression, the seen set, grouping into one summary note when more than 3 arrive, body text; a subject or snippet containing `<img src=…>`, `<a href=…>` and `&` comes out escaped; control and bidi characters are stripped from summary and body. |
+| `notify` | The seen set (first-sync suppression is the sync worker's and is covered by the `sync` tests, see M13 notes), grouping into one summary note when more than 3 arrive, body text; a subject or snippet containing `<img src=…>`, `<a href=…>` and `&` comes out escaped; control and bidi characters are stripped from summary and body. |
 | `ui/theme` | Contrast ratios for both palettes. |
 | `ui/text_layout` | Wrap-boundary to byte-offset conversion (pure part), selection range normalisation, word boundaries for double-click. |
 | `ui/text_area` | `TextBuffer` operations. |
@@ -1930,7 +1930,9 @@ milestone are welcome. **No trailers.** Push to main after each commit.
   - The `notify` and `instance` tests pass (lock and probe against a temporary directory).
   - With `dbus-monitor` running, the demo's simulated new mail produces exactly one `Notify`
     call after about 20 s, and none on startup.
-  - With `--demo --instance`, a second launch focuses the existing window, and
+  - With `--demo --instance`, a second launch started with an xdg-activation token (a
+    launcher, a key binding, `niri msg action spawn`) focuses the existing window; one without
+    a token hands over and exits, and the compositor decides (see the M13 notes). And
     `eloquawk --demo --instance 'mailto:x@y?subject=Hi&attach=/etc/passwd'` opens a compose
     window in the running instance with the subject set and no attachment.
 - **M13 notes:**
@@ -1945,7 +1947,12 @@ milestone are welcome. **No trailers.** Push to main after each commit.
     already locks, so `Cargo.lock` gains no packages. A launch with no token (a plain terminal
     that sets none) still hands over, but the compositor decides whether to raise the window.
     The acceptance check was run with launches started by `niri msg action spawn`, which
-    issues a token as a key binding or launcher does.
+    issues a token as a key binding or launcher does. The criterion above is narrowed to that
+    form accordingly. There is no attention fallback for tokenless launches: gpui's
+    `request_attention` is a no-op on Wayland at the pinned rev, and `activate_window` already
+    asks for a token with the app id (which some compositors show as urgency).
+  - `ui/activation.rs` relies on gpui_linux using `wayland-backend` 0.3 with `client_system`
+    at the pinned zed rev; recheck it when the rev moves. It does not cache its binding.
   - **First-sync suppression** is the worker's (7.3 step 4, covered by the sync tests); the
     `notify` tests cover what reaches the notifier: a seen map keyed by thread and newest
     message date (a thread notifies again only for a newer message), threads no longer
