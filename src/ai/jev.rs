@@ -241,15 +241,12 @@ pub fn verdict_from(p_phishing: f32, p_scam: f32, p_spam: f32, t: &Thresholds) -
 }
 
 /// A label is suggested from this probability up (SPEC 16.8).
-#[allow(dead_code)] // consumed by the store's label suggestions (M17)
 pub const SUGGEST_MIN: f32 = 0.70;
 /// At most this many suggestions are shown.
-#[allow(dead_code)] // consumed by the store's label suggestions (M17)
 pub const SUGGEST_MAX: usize = 3;
 
 /// One suggested label for the open thread.
 #[derive(Clone, Debug, PartialEq)]
-#[allow(dead_code)] // consumed by the store's label suggestions (M17)
 pub struct Suggestion {
     pub id: String,
     pub name: String,
@@ -257,7 +254,6 @@ pub struct Suggestion {
 }
 
 /// Whether `ancestor` is a parent of `name` by `/` nesting ("A" of "A/B").
-#[allow(dead_code)] // consumed by the store's label suggestions (M17)
 fn is_ancestor(ancestor: &str, name: &str) -> bool {
     name.len() > ancestor.len() + 1
         && name.starts_with(ancestor)
@@ -268,7 +264,6 @@ fn is_ancestor(ancestor: &str, name: &str) -> bool {
 /// [`SUGGEST_MIN`] or more that still exist (named as they are now, from `labels`), an
 /// ancestor dropped when one of its descendants qualifies, labels in `applied` (already on
 /// the thread) left out, then by probability and name, at most [`SUGGEST_MAX`].
-#[allow(dead_code)] // consumed by the store's label suggestions (M17)
 pub fn select_suggestions(
     probs: &[(String, f32)],
     labels: &[LabelCandidate],

@@ -41,10 +41,8 @@ const MAX_REPLY_TO: usize = 5;
 const MAX_ATTACHMENTS: usize = 10;
 const MAX_DKIM_DOMAINS: usize = 5;
 /// The most labels a check asks about (SPEC 16.8).
-#[allow(dead_code)] // consumed by the store's label suggestions (M17)
 pub const MAX_LABELS: usize = 100;
 /// A label name is cut to this many characters.
-#[allow(dead_code)] // consumed by the store's label suggestions (M17)
 const LABEL_NAME_CHARS: usize = 100;
 /// At most this many requests per check: the triage one and one more for labels.
 pub const MAX_REQUESTS_PER_CHECK: usize = 2;
@@ -580,7 +578,6 @@ pub fn triage_request(input: &AiInput) -> DecisionsRequest {
 // ----- labels (SPEC 16.8) ------------------------------------------------------------------
 
 /// Whether a label may be offered to Jev: a visible user label with a name.
-#[allow(dead_code)] // consumed by the store's label suggestions (M17)
 fn is_candidate(l: &Label) -> bool {
     l.kind == LabelKind::User
         && !l.hidden
@@ -590,7 +587,6 @@ fn is_candidate(l: &Label) -> bool {
 }
 
 /// A label's name as sent: stripped like the message text, trimmed and cut to 100 chars.
-#[allow(dead_code)] // consumed by the store's label suggestions (M17)
 fn candidate_name(name: &str) -> String {
     cut_chars(strip_controls(name).trim(), LABEL_NAME_CHARS).0
 }
@@ -598,8 +594,16 @@ fn candidate_name(name: &str) -> String {
 /// The labels a check asks about (SPEC 16.8): the account's visible user labels, by thread
 /// count then name, at most [`MAX_LABELS`]. It does not look at the thread, so labels already
 /// on it are asked about too and filtered out when the suggestions are shown.
-#[allow(dead_code)] // consumed by the store's label suggestions (M17)
 pub fn label_candidates(account_labels: &[Label]) -> Vec<LabelCandidate> {
+    let mut all = candidate_labels(account_labels);
+    all.truncate(MAX_LABELS);
+    all
+}
+
+/// Every label that could be a candidate, in the candidates' order but uncapped: what the
+/// suggestions look names up in, so a label asked before the counts moved it past the cap
+/// is still shown.
+pub fn candidate_labels(account_labels: &[Label]) -> Vec<LabelCandidate> {
     let mut ls: Vec<&Label> = account_labels.iter().filter(|l| is_candidate(l)).collect();
     ls.sort_by(|a, b| {
         b.threads_total
@@ -607,7 +611,6 @@ pub fn label_candidates(account_labels: &[Label]) -> Vec<LabelCandidate> {
             .then_with(|| a.name.cmp(&b.name))
     });
     ls.into_iter()
-        .take(MAX_LABELS)
         .map(|l| LabelCandidate {
             id: l.id.clone(),
             name: candidate_name(&l.name),
@@ -619,7 +622,6 @@ pub fn label_candidates(account_labels: &[Label]) -> Vec<LabelCandidate> {
 /// A hash of every candidate label's `(id, name)`, uncapped and by id (SPEC 16.8). Counts and
 /// the cap's order do not enter it, so only a rename, a new or deleted label or hiding one
 /// re-asks labels. In memory only; it need not be stable across builds.
-#[allow(dead_code)] // consumed by the store's label suggestions (M17)
 pub fn label_fingerprint(account_labels: &[Label]) -> u64 {
     let mut ls: Vec<(&str, &str)> = account_labels
         .iter()

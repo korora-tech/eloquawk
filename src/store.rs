@@ -12,10 +12,10 @@ use std::time::Instant;
 
 use jiff::Timestamp;
 
-use crate::ai::jev::{Level, Verdict};
+use crate::ai::jev::{Level, Suggestion, Verdict, select_suggestions};
 use crate::ai::prompt::{self, AiInput, Redact};
 use crate::ai::{
-    AiCommand, AiEvent, AiHandle, CheckRequest, DISCLOSURE_VERSION, KeyState, Priority,
+    AiCommand, AiEvent, AiHandle, CheckRequest, DISCLOSURE_VERSION, KeyState, LabelAsk, Priority,
 };
 use crate::config::Prefs;
 use crate::mail::address::{self, ParticipantsLabel};
@@ -90,10 +90,8 @@ pub struct Notice {
 pub struct AiResult {
     pub verdict: Option<Verdict>,
     /// Label probabilities by label id (M17).
-    #[allow(dead_code)] // consumed in M17 by the label suggestions
     pub labels: Option<Vec<(String, f32)>>,
     /// The label fingerprint the labels were asked under; `None` when partial (M17).
-    #[allow(dead_code)] // consumed in M17 by the label suggestions
     pub label_fp: Option<u64>,
 }
 
@@ -114,7 +112,7 @@ pub struct AiState {
     pub checking: HashSet<MessageKey>,
     /// The failure text and whether a retry may help.
     pub failed: HashMap<MessageKey, (String, bool)>,
-    /// Banners dismissed this session.
+    /// Banners dismissed this session, and suggestion rows under `"labels:" + message id`.
     pub dismissed: HashSet<MessageKey>,
     /// Each checked thread's last checked target message.
     pub by_thread: HashMap<ThreadKey, String>,
@@ -1839,7 +1837,6 @@ impl Store {
         let target = prompt::target(detail, &own)?;
         let id: MessageKey = (account.clone(), target.id.clone());
         if self.ai.checking.contains(&id)
-            || self.ai.results.contains_key(&id)
             || self
                 .ai
                 .failed
@@ -1848,14 +1845,40 @@ impl Store {
         {
             return None;
         }
+        // Labels are asked only on open, while suggestions are on (SPEC 16.8, 16.11).
+        let labels = (priority == Priority::Interactive)
+            .then(|| self.label_ask(account))
+            .flatten();
+        let verdict = match self.ai.results.get(&id) {
+            None => true,
+            // Asked before: only the labels again, when the account's labels changed.
+            Some(r) => match &labels {
+                Some(ask) if r.label_fp != Some(ask.fingerprint) => false,
+                _ => return None,
+            },
+        };
         Some(CheckRequest {
             account: account.clone(),
             thread: detail.key.clone(),
             message_id: target.id.clone(),
             priority,
-            verdict: true,
-            labels: None,
+            verdict,
+            labels,
             input: AiInput::from_message(target, &Redact::for_message(target, &own)),
+        })
+    }
+
+    /// The label questions for a check in `account`, while suggestions are on and the
+    /// account has labels to offer.
+    fn label_ask(&self, account: &str) -> Option<LabelAsk> {
+        if !self.prefs.ai.suggest_labels {
+            return None;
+        }
+        let labels = self.labels.get(account)?;
+        let candidates = prompt::label_candidates(labels);
+        (!candidates.is_empty()).then(|| LabelAsk {
+            fingerprint: prompt::label_fingerprint(labels),
+            candidates,
         })
     }
 
@@ -1901,6 +1924,71 @@ impl Store {
                 p.ai.accounts.remove(account);
             }
         });
+    }
+
+    /// The open thread's suggested labels (SPEC 16.8): none while suggestions are off, for
+    /// a dismissed row, or for risky mail (a Warning or Danger verdict, or a local caution),
+    /// so one key press cannot file a scam among real mail. Labels already on the thread are
+    /// left out, so an applied chip disappears without a new request.
+    #[allow(dead_code)] // consumed by the reader's suggestion row (M17)
+    pub fn suggestions(&self, key: &ThreadKey) -> Vec<Suggestion> {
+        self.suggestions_inner(key).unwrap_or_default()
+    }
+
+    fn suggestions_inner(&self, key: &ThreadKey) -> Option<Vec<Suggestion>> {
+        if !self.prefs.ai.suggest_labels || !self.ai_opted_in(&key.account) {
+            return None;
+        }
+        let detail = self.loaded(key)?;
+        let target = self.ai_target(detail)?;
+        if self
+            .ai
+            .dismissed
+            .contains(&(key.account.clone(), format!("labels:{}", target.id)))
+        {
+            return None;
+        }
+        let result = self
+            .ai
+            .results
+            .get(&(key.account.clone(), target.id.clone()))?;
+        if result.verdict.is_some_and(|v| v.level >= Level::Warning)
+            || crate::ui::triage::local_caution(&target.signals).is_some()
+        {
+            return None;
+        }
+        let probs = result.labels.as_ref()?;
+        let names = prompt::candidate_labels(self.labels.get(&key.account)?);
+        let applied = match self.threads.get(key) {
+            Some(s) => &s.label_ids,
+            None => &detail.label_ids,
+        };
+        Some(select_suggestions(probs, &names, applied))
+    }
+
+    /// Applies the open thread's `n`th suggestion (0-based) to that thread only, through the
+    /// label picker's undoable path. Nothing when there is no such suggestion.
+    #[allow(dead_code)] // consumed by the reader's suggestion row (M17)
+    pub fn apply_suggestion(&mut self, n: usize) -> Option<OpId> {
+        let key = self.open.clone()?;
+        let s = self.suggestions(&key).into_iter().nth(n)?;
+        let op = self.set_label(vec![key.clone()], &s.id, true);
+        self.ai.bump(&key);
+        op
+    }
+
+    /// Hides the open thread's suggestion row for this session.
+    #[allow(dead_code)] // consumed by the reader's suggestion row (M17)
+    pub fn dismiss_suggestions(&mut self) {
+        let Some(key) = self.open.clone() else {
+            return;
+        };
+        if let Some(id) = self.target_id(&key) {
+            self.ai
+                .dismissed
+                .insert((key.account.clone(), format!("labels:{id}")));
+            self.ai.bump(&key);
+        }
     }
 
     /// Hides the open thread's banner for this session.
@@ -3589,6 +3677,233 @@ mod tests {
             assert!(work.checks().is_empty());
         }
 
+        /// A ready store with PERSONAL opted in, its demo labels loaded and `id` open with its
+        /// summary listed, so label changes apply optimistically.
+        fn labelled(id: &str) -> (Rig, ThreadDetail) {
+            let mut r = ready(&[PERSONAL], false);
+            r.s.apply(SyncEvent::Labels {
+                account: PERSONAL.into(),
+                labels: demo_data::label_defs(PERSONAL),
+            });
+            let d = demo(id);
+            r.s.apply(SyncEvent::ThreadsUpdated(vec![demo_data::summary_of(
+                &d, 1,
+            )]));
+            r.drain();
+            let d = r.open(id);
+            (r, d)
+        }
+
+        fn fp(r: &Rig) -> u64 {
+            prompt::label_fingerprint(&r.s.labels[PERSONAL])
+        }
+
+        fn checked_labels(
+            r: &mut Rig,
+            d: &ThreadDetail,
+            p: (f32, f32, f32),
+            labels: &[(&str, f32)],
+        ) {
+            let target = r.s.ai_target(d).unwrap().id.clone();
+            let fp = fp(r);
+            r.s.apply_ai(AiEvent::Checked {
+                thread: d.key.clone(),
+                message_id: target,
+                outcome: Outcome {
+                    verdict: Some(verdict_from(p.0, p.1, p.2, &THRESHOLDS)),
+                    labels: Some((
+                        Some(fp),
+                        labels.iter().map(|(id, p)| (id.to_string(), *p)).collect(),
+                    )),
+                },
+            });
+        }
+
+        fn names(s: &Store, key: &ThreadKey) -> Vec<String> {
+            s.suggestions(key).into_iter().map(|s| s.name).collect()
+        }
+
+        #[test]
+        fn open_asks_labels_while_suggestions_are_on() {
+            let (r, _) = labelled("p-ai-order");
+            let checks = r.checks();
+            assert_eq!(checks.len(), 1);
+            let ask = checks[0].labels.as_ref().expect("labels asked on open");
+            assert!(checks[0].verdict);
+            assert_eq!(ask.fingerprint, fp(&r));
+            let names: Vec<&str> = ask.candidates.iter().map(|c| c.name.as_str()).collect();
+            assert!(names.contains(&"Receipts") && names.contains(&"Projects/Eloquawk"));
+            // Off: no label names leave.
+            let mut p = prefs(&[PERSONAL], false);
+            p.ai.suggest_labels = false;
+            let mut r = rig(Mode::Google, p);
+            r.s.apply_ai(AiEvent::Key(KeyState::Saved { hint: "h".into() }));
+            r.s.apply(SyncEvent::Labels {
+                account: PERSONAL.into(),
+                labels: demo_data::label_defs(PERSONAL),
+            });
+            r.open("p-ai-order");
+            let checks = r.checks();
+            assert_eq!(checks.len(), 1);
+            assert!(checks[0].labels.is_none());
+        }
+
+        #[test]
+        fn apply_suggestion_is_undoable_and_hides_chip() {
+            let (mut r, d) = labelled("p-ai-order");
+            r.drain();
+            checked_labels(
+                &mut r,
+                &d,
+                (0.03, 0.02, 0.05),
+                &[(demo_data::RECEIPTS, 0.88), (demo_data::TRAVEL, 0.08)],
+            );
+            assert_eq!(names(&r.s, &d.key), ["Receipts"]);
+            assert!(r.s.apply_suggestion(1).is_none(), "no second suggestion");
+            let op = r.s.apply_suggestion(0).expect("applied");
+            assert!(r.s.threads[&d.key].label_ids.contains(demo_data::RECEIPTS));
+            assert!(names(&r.s, &d.key).is_empty(), "the chip disappears");
+            let notice = r.s.notice.clone().unwrap();
+            assert_eq!(
+                notice.text,
+                "Added \u{201c}Receipts\u{201d} to 1 conversation"
+            );
+            assert_eq!(notice.action, Some(NoticeAction::Undo));
+            let (sync, ai) = r.drain();
+            assert!(
+                sync.iter()
+                    .any(|c| matches!(c, Command::Modify { op: o, .. } if *o == op)),
+                "the label change reaches the worker"
+            );
+            assert!(
+                !ai.iter().any(|c| matches!(c, AiCommand::Check(_))),
+                "no new check"
+            );
+            // z: the label goes and the chip comes back, still without a request.
+            assert!(r.s.undo());
+            assert!(!r.s.threads[&d.key].label_ids.contains(demo_data::RECEIPTS));
+            assert_eq!(names(&r.s, &d.key), ["Receipts"]);
+            assert!(r.checks().is_empty());
+            // ✕ hides the row for the session.
+            r.s.dismiss_suggestions();
+            assert!(names(&r.s, &d.key).is_empty());
+            assert!(r.s.apply_suggestion(0).is_none());
+        }
+
+        #[test]
+        fn label_rename_reasks_labels_only() {
+            let (mut r, d) = labelled("p-ai-order");
+            let first = r.checks();
+            assert!(first[0].verdict);
+            checked_labels(
+                &mut r,
+                &d,
+                (0.03, 0.02, 0.05),
+                &[(demo_data::RECEIPTS, 0.88)],
+            );
+            // Reopening asks nothing; counts arriving change nothing.
+            r.s.close_thread();
+            r.s.open_thread(d.key.clone());
+            assert!(r.checks().is_empty());
+            let mut counted = demo_data::label_defs(PERSONAL);
+            for l in &mut counted {
+                l.threads_total = 3;
+            }
+            r.s.apply(SyncEvent::LabelCounts {
+                account: PERSONAL.into(),
+                labels: counted,
+            });
+            r.s.close_thread();
+            r.s.open_thread(d.key.clone());
+            assert!(r.checks().is_empty());
+            // A rename changes the fingerprint: labels only, no triage questions.
+            let mut renamed = demo_data::label_defs(PERSONAL);
+            renamed
+                .iter_mut()
+                .find(|l| l.id == demo_data::RECEIPTS)
+                .unwrap()
+                .name = "Purchases".into();
+            r.s.apply(SyncEvent::Labels {
+                account: PERSONAL.into(),
+                labels: renamed,
+            });
+            r.s.close_thread();
+            r.s.open_thread(d.key.clone());
+            let again = r.checks();
+            assert_eq!(again.len(), 1);
+            assert!(!again[0].verdict, "labels only");
+            let ask = again[0].labels.as_ref().unwrap();
+            assert_ne!(
+                ask.fingerprint,
+                first[0].labels.as_ref().unwrap().fingerprint
+            );
+            assert!(ask.candidates.iter().any(|c| c.name == "Purchases"));
+            // Until the answer lands, the old probabilities show under the new name.
+            assert_eq!(names(&r.s, &d.key), ["Purchases"]);
+            // The labels-only answer keeps the stored verdict.
+            let target = r.s.ai_target(&d).unwrap().id.clone();
+            r.s.apply_ai(AiEvent::Checked {
+                thread: d.key.clone(),
+                message_id: target.clone(),
+                outcome: Outcome {
+                    verdict: None,
+                    labels: Some((Some(ask.fingerprint), vec![])),
+                },
+            });
+            let res = &r.s.ai.results[&(PERSONAL.to_string(), target)];
+            assert!(res.verdict.is_some());
+            assert_eq!(res.label_fp, Some(ask.fingerprint));
+            assert!(names(&r.s, &d.key).is_empty());
+        }
+
+        #[test]
+        fn danger_message_has_no_suggestions() {
+            let (mut r, d) = labelled("p-ai-phish");
+            checked_labels(
+                &mut r,
+                &d,
+                (0.97, 0.02, 0.05),
+                &[(demo_data::RECEIPTS, 0.95)],
+            );
+            assert!(r.s.suggestions(&d.key).is_empty());
+            assert!(r.s.apply_suggestion(0).is_none());
+            assert!(!r.s.threads[&d.key].label_ids.contains(demo_data::RECEIPTS));
+            // The probabilities are still kept.
+            let target = r.s.ai_target(&d).unwrap().id.clone();
+            assert!(
+                r.s.ai.results[&(PERSONAL.to_string(), target)]
+                    .labels
+                    .is_some()
+            );
+            // A Warning hides them too, and so does a local caution under a clean verdict.
+            let (mut r, d) = labelled("p-ai-order");
+            checked_labels(
+                &mut r,
+                &d,
+                (0.6, 0.02, 0.05),
+                &[(demo_data::RECEIPTS, 0.95)],
+            );
+            assert!(r.s.suggestions(&d.key).is_empty());
+            let (mut r, d) = labelled("p-ai-notice");
+            checked_labels(
+                &mut r,
+                &d,
+                (0.04, 0.02, 0.05),
+                &[(demo_data::RECEIPTS, 0.92)],
+            );
+            assert!(r.s.local_caution(&d.key).is_some());
+            assert!(r.s.suggestions(&d.key).is_empty());
+            // Spam level is not risky: suggestions show.
+            let (mut r, d) = labelled("p-ai-order");
+            checked_labels(
+                &mut r,
+                &d,
+                (0.03, 0.02, 0.9),
+                &[(demo_data::RECEIPTS, 0.95)],
+            );
+            assert_eq!(names(&r.s, &d.key), ["Receipts"]);
+        }
+
         #[test]
         fn ai_disclosure_version_bump_turns_off() {
             let mut p = prefs(&[], false);
@@ -4266,6 +4581,29 @@ mod tests {
         assert!(s.ai_banner(&notice).is_none());
         assert!(s.local_caution(&notice).is_some());
         assert!(s.link_guard(&notice, &target));
+        assert!(s.suggestions(&notice).is_empty(), "risky mail gets none");
+        // (M17) The order receipt suggests Receipts; applying it files the thread and the
+        // chip goes, and undo brings both back.
+        let (order, _) = open_and_check(&mut s, "p-ai-order");
+        let names = |s: &Store| -> Vec<String> {
+            s.suggestions(&order).into_iter().map(|x| x.name).collect()
+        };
+        assert_eq!(names(&s), ["Receipts"]);
+        let op = s.apply_suggestion(0).expect("a suggestion to apply");
+        assert!(pump(&mut s, &events, Duration::from_secs(2), finished(op)));
+        assert!(
+            s.threads[&order]
+                .label_ids
+                .contains(crate::demo_data::RECEIPTS)
+        );
+        assert!(names(&s).is_empty());
+        assert!(s.undo());
+        assert!(
+            !s.threads[&order]
+                .label_ids
+                .contains(crate::demo_data::RECEIPTS)
+        );
+        assert_eq!(names(&s), ["Receipts"]);
         sync.send(Command::Shutdown);
         ai.send(AiCommand::Shutdown);
     }

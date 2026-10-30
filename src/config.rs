@@ -36,8 +36,7 @@ pub const SPEND_LIMIT_CENTS_MAX: u32 = 10_000;
 pub struct AiPrefs {
     /// The disclosure version each account accepted; an absent account is off.
     pub accounts: BTreeMap<AccountId, u32>,
-    /// Suggest labels when a message is opened (M17; ignored before it).
-    #[allow(dead_code)] // consumed in M17 by the label suggestions
+    /// Suggest labels when a message is opened (M17; on by default).
     pub suggest_labels: bool,
     /// Check new inbox mail as it arrives (decision 2: off by default).
     pub background: bool,
