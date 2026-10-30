@@ -278,8 +278,6 @@ pub struct Store {
     new_mail: Vec<ThreadSummary>,
 }
 
-/// Whether a thread with `delta` applied leaves a list of this kind. `all_labels` are the
-/// account's labels, to tell whether a search asks for Spam or Trash by `label:` name.
 /// The toast for a saved attachment: "Saved <file> to <dir>", with the home folder shown as
 /// `~`.
 fn saved_text(path: &Path) -> String {
@@ -297,6 +295,8 @@ fn saved_text(path: &Path) -> String {
     format!("Saved {file} to {dir}")
 }
 
+/// Whether a thread with `delta` applied leaves a list of this kind. `all_labels` are the
+/// account's labels, to tell whether a search asks for Spam or Trash by `label:` name.
 fn removed_by(kind: &ViewKind, delta: &LabelDelta, all_labels: &[Label]) -> bool {
     let adds = |id: &str| delta.add.iter().any(|a| a == id);
     match kind {
