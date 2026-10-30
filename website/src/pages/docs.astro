@@ -1,0 +1,174 @@
+---
+import { getEntry, render } from "astro:content";
+import Base from "../layouts/Base.astro";
+import { SITE } from "../lib/site";
+
+const readme = await getEntry("docs", "readme");
+if (!readme) throw new Error("README.md was not loaded");
+const { Content, headings } = await render(readme);
+const toc = headings.filter((h) => h.depth === 2 || h.depth === 3);
+---
+
+<Base title="Docs" description="How to try, install, connect and use Eloquawk, its keyboard shortcuts and its optional message checks.">
+  <div class="wrap layout">
+    <aside>
+      <nav aria-label="On this page">
+        <p class="eyebrow">On this page</p>
+        <ul>
+          {
+            toc.map((h) => (
+              <li class={`depth-${h.depth}`}>
+                <a href={`#${h.slug}`}>{h.text}</a>
+              </li>
+            ))
+          }
+        </ul>
+      </nav>
+    </aside>
+    <article class="prose">
+      <p class="eyebrow">Documentation</p>
+      <h1>Eloquawk</h1>
+      <Content />
+      <p class="source">
+        This page is the project <a href={`${SITE.repo}/blob/main/README.md`}>README</a>.
+        <a href={`${SITE.repo}/edit/main/README.md`}>Suggest a change</a>.
+      </p>
+    </article>
+  </div>
+</Base>
+
+<style>
+  .layout {
+    display: grid;
+    grid-template-columns: 220px minmax(0, 1fr);
+    gap: 56px;
+    padding-top: 48px;
+  }
+
+  aside nav {
+    position: sticky;
+    top: 92px;
+    max-height: calc(100vh - 120px);
+    overflow-y: auto;
+    font-size: 0.86rem;
+    scrollbar-width: thin;
+  }
+
+  aside ul {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  aside li a {
+    display: block;
+    padding: 4px 0;
+    color: var(--fg-muted);
+    text-decoration: none;
+  }
+
+  aside li a:hover {
+    color: var(--fg);
+  }
+
+  aside .depth-3 a {
+    padding-left: 14px;
+    color: var(--fg-faint);
+  }
+
+  @media (max-width: 860px) {
+    .layout {
+      grid-template-columns: minmax(0, 1fr);
+      gap: 0;
+    }
+
+    aside {
+      display: none;
+    }
+  }
+
+  .prose {
+    max-width: 78ch;
+    min-width: 0;
+  }
+
+  .prose h1 {
+    margin: 0 0 24px;
+    font-size: clamp(2rem, 5vw, 2.8rem);
+  }
+
+  .prose :global(h2) {
+    margin: 64px 0 16px;
+    padding-top: 24px;
+    border-top: 1px solid var(--border);
+    font-size: 1.6rem;
+  }
+
+  .prose :global(h3) {
+    margin: 40px 0 12px;
+    font-size: 1.2rem;
+  }
+
+  .prose :global(:is(h2, h3)) {
+    scroll-margin-top: 84px;
+  }
+
+  .prose :global(p),
+  .prose :global(li) {
+    color: var(--fg-muted);
+  }
+
+  .prose :global(:is(strong, a)) {
+    color: var(--fg);
+  }
+
+  .prose :global(a) {
+    text-decoration-color: var(--accent);
+  }
+
+  .prose :global(ul) {
+    padding-left: 20px;
+  }
+
+  .prose :global(li + li) {
+    margin-top: 8px;
+  }
+
+  .prose :global(pre) {
+    margin: 20px 0;
+  }
+
+  .prose :global(table) {
+    display: block;
+    margin: 20px 0;
+    overflow-x: auto;
+  }
+
+  .prose :global(td) {
+    color: var(--fg-muted);
+  }
+
+  .prose :global(img) {
+    width: 100%;
+    height: auto;
+    margin: 24px 0 0;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--bg-sunken);
+  }
+
+  .prose :global(blockquote) {
+    margin: 24px 0;
+    padding: 4px 20px;
+    border-left: 3px solid var(--accent);
+    border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+    background: var(--select);
+  }
+
+  .source {
+    margin-top: 64px;
+    padding-top: 24px;
+    border-top: 1px solid var(--border);
+    font-size: 0.88rem;
+  }
+</style>
