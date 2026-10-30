@@ -392,6 +392,46 @@ mod tests {
         assert_eq!(seen, mail_rows.len());
     }
 
+    /// The README's shortcut table row for `s`: the keys as the overlay shows them, the
+    /// description and where the keys work.
+    fn readme_row(s: &Shortcut) -> String {
+        let keys = s
+            .keys
+            .iter()
+            .map(|k| format!("`{}`", key_label(k)))
+            .collect::<Vec<_>>()
+            .join(" or ");
+        format!(
+            "| {keys} | {} | {} |",
+            s.description,
+            context_title(s.context)
+        )
+    }
+
+    /// The README's table is a copy of [`SHORTCUTS`], row for row. The Nix package's source
+    /// holds no README, so its check phase skips this; CI's `cargo test` runs in the checkout.
+    #[test]
+    fn readme_lists_every_shortcut() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("README.md");
+        let Ok(readme) = std::fs::read_to_string(&path) else {
+            return;
+        };
+        let listed: Vec<&str> = readme
+            .lines()
+            .skip_while(|l| *l != "## Keyboard shortcuts")
+            .skip(1)
+            .take_while(|l| !l.starts_with("## "))
+            .filter(|l| l.starts_with("| `"))
+            .collect();
+        let expected: Vec<String> = SHORTCUTS.iter().map(readme_row).collect();
+        assert_eq!(
+            listed,
+            expected,
+            "README table should be:\n{}",
+            expected.join("\n")
+        );
+    }
+
     #[test]
     fn keys_are_shown_readably() {
         assert_eq!(key_label("j"), "j");
