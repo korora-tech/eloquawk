@@ -563,8 +563,14 @@ impl Worker {
             self.record_usage(answers.cost, true);
         }
         let revoked = |w: &Self| job.epoch != w.epoch(&job.req.account) || w.shutdown;
-        let second = match (&result, plan.second_request()) {
-            (Ok(_), Some(req)) if alive && !revoked(self) && self.can_send() => {
+        // A second request is skipped once sending stopped or the first one reached the spend
+        // limit; the answer is then partial, like a failed second request.
+        let split = plan.second_request();
+        let planned = split.is_some();
+        let second = match (&result, split) {
+            (Ok(_), Some(req))
+                if alive && !revoked(self) && self.can_send() && self.spent() < self.ceiling() =>
+            {
                 let r = self.ask(&req);
                 if let Ok(answers) = &r {
                     self.record_usage(answers.cost, false);
@@ -611,7 +617,7 @@ impl Worker {
                 };
                 collect(&answers.probs);
                 let complete = match &second {
-                    None => true,
+                    None => !planned,
                     Some(Ok(more)) => {
                         collect(&more.probs);
                         true
@@ -1113,6 +1119,29 @@ mod tests {
         assert!(!probs.is_empty() && probs.len() < 100);
         assert!(outcome.verdict.is_some());
         assert_eq!(server.finish().len(), 2);
+        h.send(AiCommand::Shutdown);
+    }
+
+    #[test]
+    fn fake_openrouter_split_stops_at_spend_limit() {
+        // The first request alone passes the default $1.00 limit: no second request, a
+        // partial answer, and the session pauses.
+        let server = FakeServer::start(vec![
+            Reply::json(200, &labels_body(100).replace("0.00002", "1.5")).for_path(DECISIONS),
+            keep_open(),
+        ]);
+        let (h, rx) = google(&server);
+        let mut req = request("a@x", "over", Priority::Interactive);
+        req.labels = Some(long_labels(100));
+        h.send(AiCommand::Check(Box::new(req)));
+        let evs = wait_for(&rx, |e| matches!(e, AiEvent::Paused(Some(_))));
+        let Some(AiEvent::Checked { outcome, .. }) = evs.iter().find(|e| checked("over")(e)) else {
+            panic!("no Checked in {evs:?}")
+        };
+        let (fp, probs) = outcome.labels.clone().unwrap();
+        assert_eq!(fp, None, "a skipped second request leaves a partial answer");
+        assert!(!probs.is_empty() && probs.len() < 100);
+        assert_eq!(server.requests().len(), 1);
         h.send(AiCommand::Shutdown);
     }
 
