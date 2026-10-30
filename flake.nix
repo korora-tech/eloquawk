@@ -71,6 +71,12 @@
           ];
           buildInputs = buildInputs pkgs;
 
+          # The date tests use named zones (Europe/Berlin); the build sandbox has no tzdb.
+          nativeCheckInputs = [ pkgs.tzdata ];
+          preCheck = ''
+            export TZDIR=${pkgs.tzdata}/share/zoneinfo
+          '';
+
           postFixup = ''
             wrapProgram $out/bin/eloquawk \
               --prefix LD_LIBRARY_PATH : ${runtimeLibraryPath pkgs}
