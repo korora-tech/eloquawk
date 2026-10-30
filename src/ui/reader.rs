@@ -1134,6 +1134,7 @@ mod tests {
             body: String::new(),
             body_source: BodySource::Plain,
             body_truncated: false,
+            signals: Default::default(),
             attachments: vec![],
         }
     }
@@ -1184,6 +1185,7 @@ mod tests {
             body: String::new(),
             body_source: BodySource::Plain,
             body_truncated: false,
+            signals: Default::default(),
             attachments: vec![],
         };
         assert_eq!(recipients_line(&m), "to Bob, cleo@example.com · cc Dee");

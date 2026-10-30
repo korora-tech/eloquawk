@@ -260,6 +260,7 @@ mod tests {
             body: "Shall we?\n\nNoon works.".into(),
             body_source: BodySource::Plain,
             body_truncated: false,
+            signals: Default::default(),
             attachments: vec![],
         }
     }

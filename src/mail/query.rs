@@ -415,6 +415,7 @@ mod tests {
                 body: body.into(),
                 body_source: BodySource::Plain,
                 body_truncated: false,
+                signals: Default::default(),
                 attachments: vec![Attachment {
                     part_id: "1".into(),
                     attachment_id: None,

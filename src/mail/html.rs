@@ -24,6 +24,9 @@ pub struct Converted {
     pub text: String,
     /// The input was over [`MAX_HTML_INPUT`] and only its start was converted.
     pub truncated: bool,
+    /// Every link with a scheme, as `(display text, href)`, from the same spans that produce
+    /// the `text <href>` output (SPEC 16.3). `mail::auth` keeps the http(s) and mailto ones.
+    pub links: Vec<(String, String)>,
 }
 
 /// Converts HTML to plain text. `None` means the conversion failed (html2text returned an
@@ -42,9 +45,12 @@ pub fn html_to_text(html: &str) -> Option<Converted> {
             .allow_width_overflow()
             .lines_from_read(input.as_bytes(), RENDER_WIDTH)
     })?;
+    let mut links = Vec::new();
+    let text = tidy(&render_lines(&lines, &mut links));
     Some(Converted {
-        text: tidy(&render_lines(&lines)),
+        text,
         truncated,
+        links,
     })
 }
 
@@ -157,7 +163,7 @@ impl TextDecorator for InlineLinks {
 
 /// Joins html2text's tagged lines, writing each link as `text <href>`, or as the bare href
 /// when the text already says the same thing.
-fn render_lines(lines: &[TaggedLine<Vec<LinkAnn>>]) -> String {
+fn render_lines(lines: &[TaggedLine<Vec<LinkAnn>>], links: &mut Vec<(String, String)>) -> String {
     let mut out = String::new();
     for line in lines {
         let mut link: Option<(String, String)> = None; // (href, text so far)
@@ -171,7 +177,7 @@ fn render_lines(lines: &[TaggedLine<Vec<LinkAnn>>]) -> String {
                 (Some((cur, text)), Some(h)) if cur == h => text.push_str(piece),
                 _ => {
                     if let Some((h, t)) = link.take() {
-                        push_link(&mut out, &h, &t);
+                        push_link(&mut out, links, &h, &t);
                     }
                     match href {
                         Some(h) => link = Some((h.to_string(), piece.clone())),
@@ -181,14 +187,14 @@ fn render_lines(lines: &[TaggedLine<Vec<LinkAnn>>]) -> String {
             }
         }
         if let Some((h, t)) = link.take() {
-            push_link(&mut out, &h, &t);
+            push_link(&mut out, links, &h, &t);
         }
         out.push('\n');
     }
     out
 }
 
-fn push_link(out: &mut String, href: &str, text: &str) {
+fn push_link(out: &mut String, links: &mut Vec<(String, String)>, href: &str, text: &str) {
     let href = href.trim();
     let shown = text.trim();
     // Relative and in-page links have no target worth showing.
@@ -196,6 +202,7 @@ fn push_link(out: &mut String, href: &str, text: &str) {
         out.push_str(text);
         return;
     }
+    links.push((shown.to_string(), href.to_string()));
     let lead = &text[..text.len() - text.trim_start().len()];
     let trail = &text[text.trim_end().len()..];
     out.push_str(lead);
@@ -428,6 +435,27 @@ mod tests {
         );
         assert!(!t.contains('['));
         assert!(!t.contains('*'));
+    }
+
+    #[test]
+    fn links_are_collected_with_their_text() {
+        let c = html_to_text(
+            "<p><a href=\"https://evil.example/login\">https://bank.example</a> \
+             <a href=\"https://shop.example/x\">Shop <b>now</b></a> <a href=\"#top\">top</a> \
+             <a href=\"javascript:x()\">js</a></p>",
+        )
+        .unwrap();
+        assert_eq!(
+            c.links,
+            vec![
+                (
+                    "https://bank.example".to_string(),
+                    "https://evil.example/login".to_string()
+                ),
+                ("Shop now".to_string(), "https://shop.example/x".to_string()),
+                ("js".to_string(), "javascript:x()".to_string()),
+            ]
+        );
     }
 
     #[test]

@@ -362,6 +362,7 @@ pub fn build_thread(
             body: d.body,
             body_source: d.source,
             body_truncated: d.truncated,
+            signals: Default::default(),
             attachments: d.attachments,
         });
         references.push(message_id);

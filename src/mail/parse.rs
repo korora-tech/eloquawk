@@ -171,14 +171,18 @@ pub fn parse_message(dto: &MessageDto) -> Message {
     let plain = (!texts.is_empty())
         .then(|| join_text_parts(&texts))
         .filter(|t| !t.trim().is_empty() || found.html.is_none());
+    let mut html_links = Vec::new();
     let (body, body_source, body_truncated) = match (plain, found.html) {
         (Some(text), _) => (text, BodySource::Plain, found.unfetched_text),
         (None, Some(part)) => match part_text(part).map(|t| html_to_text(&t)) {
-            Some(Some(c)) => (
-                c.text,
-                BodySource::Html,
-                c.truncated || found.unfetched_text,
-            ),
+            Some(Some(c)) => {
+                html_links = c.links;
+                (
+                    c.text,
+                    BodySource::Html,
+                    c.truncated || found.unfetched_text,
+                )
+            }
             Some(None) => (snippet.clone(), BodySource::Html, true),
             None if found.unfetched_text => (snippet.clone(), BodySource::Empty, true),
             None => (String::new(), BodySource::Empty, false),
@@ -195,6 +199,12 @@ pub fn parse_message(dto: &MessageDto) -> Message {
         })
         .unwrap_or(Timestamp::UNIX_EPOCH);
     let list = |name: &str| h(name).map(parse_list).unwrap_or_default();
+    let body_links = match body_source {
+        BodySource::Plain => super::auth::plain_links(&body),
+        BodySource::Html => html_links,
+        BodySource::Empty => Vec::new(),
+    };
+    let signals = super::auth::signals(&payload.headers, &body_links);
 
     Message {
         id: dto.id.clone(),
@@ -219,6 +229,7 @@ pub fn parse_message(dto: &MessageDto) -> Message {
         body_source,
         body_truncated,
         attachments: found.attachments,
+        signals,
     }
 }
 
@@ -419,6 +430,74 @@ mod tests {
         let m = parse_message(&msg(Some(p)));
         assert_eq!(m.body, "Hello there <https://x.example/>");
         assert_eq!(m.body_source, BodySource::Html);
+    }
+
+    #[test]
+    fn html_links_become_signals() {
+        let mut html = String::from(
+            "<p><a href=\"https://paypa1-verify.example/signin?token=abc\">https://www.paypal.com/signin</a> \
+             <a href=\"https://example.org/a\">https://example.org/a</a> \
+             <a href=\"https://www.example.net/\">www.example.net</a> \
+             <a href=\"https://раураl.com/login\">Sign in</a> \
+             <a href=\"javascript:steal()\">Click</a> \
+             <a href=\"https://example.org/a\">https://example.org/a</a></p>",
+        );
+        for i in 0..50 {
+            html.push_str(&format!(
+                "<a href=\"https://h{i}.example/p?q={i}\">link {i}</a> "
+            ));
+        }
+        let mut p = leaf("", "text/html", vec![], html.as_bytes());
+        p.headers = vec![
+            hdr("Content-Type", "text/html"),
+            hdr(
+                "Authentication-Results",
+                "mx.google.com; spf=softfail; dkim=none; dmarc=fail",
+            ),
+            hdr("List-Unsubscribe", "<mailto:u@x.example>"),
+        ];
+        let m = parse_message(&msg(Some(p)));
+        let s = &m.signals;
+        assert_eq!(s.auth.dmarc, crate::model::AuthResult::Fail);
+        assert!(s.list_unsubscribe);
+        assert_eq!(s.links.len(), crate::mail::auth::MAX_LINKS);
+        let first = &s.links[0];
+        assert_eq!(first.host, "paypa1-verify.example");
+        assert_eq!(first.text_host.as_deref(), Some("www.paypal.com"));
+        assert!(first.mismatched());
+        assert!(!s.links[1].mismatched());
+        assert_eq!(s.links[2].text_host.as_deref(), Some("www.example.net"));
+        assert!(!s.links[2].mismatched());
+        assert!(s.links[3].host.starts_with("xn--"));
+        // javascript: is dropped and the repeated link is deduplicated.
+        assert_eq!(s.links[4].text, "link 0");
+        for l in &s.links {
+            assert!(!l.host.contains(['/', '?']), "{}", l.host);
+        }
+    }
+
+    #[test]
+    fn plain_body_links_become_signals() {
+        let p = leaf(
+            "",
+            "text/plain",
+            vec![],
+            b"Reset at https://x.example/reset?token=abc or www.y.example/path\n",
+        );
+        let m = parse_message(&msg(Some(p)));
+        let hosts: Vec<(&str, Option<&str>)> = m
+            .signals
+            .links
+            .iter()
+            .map(|l| (l.host.as_str(), l.text_host.as_deref()))
+            .collect();
+        assert_eq!(
+            hosts,
+            vec![
+                ("x.example", Some("x.example")),
+                ("www.y.example", Some("www.y.example"))
+            ]
+        );
     }
 
     #[test]

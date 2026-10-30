@@ -1,8 +1,10 @@
-//! Mail domain logic that needs no network or UI: base64, payload parsing, HTML to text,
+//! Mail domain logic that needs no network or UI: base64, payload parsing, sender
+//! authentication and link signals, HTML to text,
 //! link detection, `mailto:` parsing, addresses, local query matching, and the composer's
 //! reply prefills and outgoing MIME, and the naming rules for saved attachments.
 
 pub mod address;
+pub mod auth;
 pub mod b64;
 pub mod compose;
 pub mod files;

@@ -165,6 +165,8 @@ pub struct Message {
     /// The HTML input cap was hit or the conversion failed (SPEC 8.2).
     pub body_truncated: bool,
     pub attachments: Vec<Attachment>,
+    /// Sender authentication and link signals, from `format=full` only (SPEC 16.6.1).
+    pub signals: MessageSignals,
 }
 
 impl fmt::Debug for Message {
@@ -175,6 +177,106 @@ impl fmt::Debug for Message {
             .field("labels", &self.label_ids.len())
             .field("body_len", &self.body.len())
             .field("attachments", &self.attachments.len())
+            .finish_non_exhaustive()
+    }
+}
+
+/// One SPF, DKIM or DMARC verdict from the receiving server (SPEC 16.6.2).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AuthResult {
+    Pass,
+    Fail,
+    SoftFail,
+    Neutral,
+    None,
+    TempError,
+    PermError,
+    #[default]
+    Unknown,
+}
+
+impl AuthResult {
+    /// Parses a result token case-insensitively; anything unknown is [`AuthResult::Unknown`].
+    pub fn parse(token: &str) -> Self {
+        match token.trim().to_ascii_lowercase().as_str() {
+            "pass" => Self::Pass,
+            "fail" => Self::Fail,
+            "softfail" => Self::SoftFail,
+            "neutral" => Self::Neutral,
+            "none" => Self::None,
+            "temperror" => Self::TempError,
+            "permerror" => Self::PermError,
+            _ => Self::Unknown,
+        }
+    }
+
+    /// The lowercase name the AI prompt sends (`"softfail"`, `"unknown"`).
+    #[allow(dead_code)] // consumed in M16 by ai/prompt
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Pass => "pass",
+            Self::Fail => "fail",
+            Self::SoftFail => "softfail",
+            Self::Neutral => "neutral",
+            Self::None => "none",
+            Self::TempError => "temperror",
+            Self::PermError => "permerror",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+/// The receiving server's authentication verdicts for a message.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct AuthResults {
+    pub spf: AuthResult,
+    pub dkim: AuthResult,
+    pub dmarc: AuthResult,
+    /// The `header.d` / `header.i` domains of the DKIM signatures, lowercased, at most 5.
+    pub dkim_domains: Vec<String>,
+}
+
+/// One link of a message body: its display text and where it really goes.
+#[derive(Clone, PartialEq)]
+pub struct LinkSignal {
+    /// The display text, as the body shows it.
+    pub text: String,
+    /// The destination host: lowercase ASCII (punycode), or a `mailto:` address's domain.
+    pub host: String,
+    /// The host the display text itself names, when the text is URL- or domain-shaped.
+    pub text_host: Option<String>,
+}
+
+impl LinkSignal {
+    /// The text names one host and the link goes to another (a leading `www.` aside).
+    #[allow(dead_code)] // consumed in M16 by ai/prompt and ui/triage
+    pub fn mismatched(&self) -> bool {
+        let bare = |h: &str| h.strip_prefix("www.").unwrap_or(h).to_string();
+        self.text_host
+            .as_deref()
+            .is_some_and(|t| bare(t) != bare(&self.host))
+    }
+}
+
+/// What the client measured about a message (SPEC 16.6.1), as opposed to what its sender
+/// wrote. `Debug` is hand-written: it prints verdicts and counts, never hosts or text.
+#[derive(Clone, Default, PartialEq)]
+pub struct MessageSignals {
+    pub auth: AuthResults,
+    pub return_path_domain: Option<String>,
+    pub list_unsubscribe: bool,
+    /// At most 40, deduplicated by (text, host).
+    pub links: Vec<LinkSignal>,
+}
+
+impl fmt::Debug for MessageSignals {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("MessageSignals")
+            .field("spf", &self.auth.spf)
+            .field("dkim", &self.auth.dkim)
+            .field("dmarc", &self.auth.dmarc)
+            .field("list_unsubscribe", &self.list_unsubscribe)
+            .field("links", &self.links.len())
             .finish_non_exhaustive()
     }
 }
@@ -343,6 +445,7 @@ mod tests {
             body_source: BodySource::Plain,
             body_truncated: false,
             attachments: vec![],
+            signals: MessageSignals::default(),
         }
     }
 
@@ -377,9 +480,38 @@ mod tests {
             references: vec![],
             attachments: vec![],
         };
-        for s in [format!("{m:?}"), format!("{detail:?}"), format!("{out:?}")] {
+        let signals = MessageSignals {
+            return_path_domain: Some("secret.example".into()),
+            links: vec![LinkSignal {
+                text: "secret".into(),
+                host: "secret.example".into(),
+                text_host: None,
+            }],
+            ..MessageSignals::default()
+        };
+        for s in [
+            format!("{m:?}"),
+            format!("{detail:?}"),
+            format!("{out:?}"),
+            format!("{signals:?}"),
+        ] {
             assert!(!s.to_lowercase().contains("secret"), "leaked: {s}");
         }
+    }
+
+    #[test]
+    fn link_mismatch_ignores_www() {
+        let link = |text_host: Option<&str>, host: &str| LinkSignal {
+            text: String::new(),
+            host: host.into(),
+            text_host: text_host.map(str::to_string),
+        };
+        assert!(!link(Some("www.paypal.com"), "paypal.com").mismatched());
+        assert!(!link(None, "paypa1.example").mismatched());
+        assert!(link(Some("www.paypal.com"), "paypa1-verify.example").mismatched());
+        assert_eq!(AuthResult::parse("SoftFail"), AuthResult::SoftFail);
+        assert_eq!(AuthResult::parse("bogus"), AuthResult::Unknown);
+        assert_eq!(AuthResult::TempError.as_str(), "temperror");
     }
 
     #[test]
