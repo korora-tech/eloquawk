@@ -1926,8 +1926,8 @@ impl Store {
         });
     }
 
-    /// The open thread's suggested labels (SPEC 16.8): none while suggestions are off, for
-    /// a dismissed row, or for risky mail (a Warning or Danger verdict, or a local caution),
+    /// The open thread's suggested labels (SPEC 16.8): none while suggestions are off, while
+    /// the target's check is in flight (SPEC 16.12.3), for a dismissed row, or for risky mail (a Warning or Danger verdict, or a local caution),
     /// so one key press cannot file a scam among real mail. Labels already on the thread are
     /// left out, so an applied chip disappears without a new request.
     pub fn suggestions(&self, key: &ThreadKey) -> Vec<Suggestion> {
@@ -1940,17 +1940,16 @@ impl Store {
         }
         let detail = self.loaded(key)?;
         let target = self.ai_target(detail)?;
-        if self
-            .ai
-            .dismissed
-            .contains(&(key.account.clone(), format!("labels:{}", target.id)))
+        let id = (key.account.clone(), target.id.clone());
+        if self.ai.checking.contains(&id)
+            || self
+                .ai
+                .dismissed
+                .contains(&(key.account.clone(), format!("labels:{}", target.id)))
         {
             return None;
         }
-        let result = self
-            .ai
-            .results
-            .get(&(key.account.clone(), target.id.clone()))?;
+        let result = self.ai.results.get(&id)?;
         if result.verdict.is_some_and(|v| v.level >= Level::Warning)
             || crate::ui::triage::local_caution(&target.signals).is_some()
         {
@@ -3835,10 +3834,16 @@ mod tests {
                 first[0].labels.as_ref().unwrap().fingerprint
             );
             assert!(ask.candidates.iter().any(|c| c.name == "Purchases"));
-            // Until the answer lands, the old probabilities show under the new name.
-            assert_eq!(names(&r.s, &d.key), ["Purchases"]);
-            // The labels-only answer keeps the stored verdict.
+            // Until the answer lands there is no row, and 1 does nothing (SPEC 16.12.3).
             let target = r.s.ai_target(&d).unwrap().id.clone();
+            r.s.apply_ai(AiEvent::Checking {
+                thread: d.key.clone(),
+                message_id: target.clone(),
+            });
+            assert!(names(&r.s, &d.key).is_empty());
+            assert!(r.s.apply_suggestion(0).is_none());
+            assert!(!r.s.threads[&d.key].label_ids.contains(demo_data::RECEIPTS));
+            // The labels-only answer keeps the stored verdict.
             r.s.apply_ai(AiEvent::Checked {
                 thread: d.key.clone(),
                 message_id: target.clone(),
