@@ -1952,6 +1952,9 @@ milestone are welcome. **No trailers.** Push to main after each commit.
     unread in INBOX skipped, more than 3 grouped into "N new conversations".
   - The store keeps only `NewMail` summaries filed under the account the event names
     (`new_mail_keeps_only_the_named_accounts_summaries`).
+  - A `mailto:` link that arrives before there is an account waits and opens once the first
+    account is signed in; once the store knows there is none, a "Sign in to compose this
+    message" toast says so, and a hand-off raises the main window to show it.
   - The socket is removed on a normal quit, and the lock released with it, so a launch while
     the old process is still exiting becomes the instance. After a crash or SIGTERM the socket
     is left behind and the next launch, holding the lock, finds nobody answering and replaces

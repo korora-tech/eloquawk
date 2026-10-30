@@ -136,9 +136,10 @@ fn main() {
 
             // mailto: links waiting for an account to compose from: this launch's own, and any
             // handed over by later launches.
-            let mailtos: Mailtos = Rc::new(RefCell::new(
-                launch_mailto.into_iter().map(|url| (url, None)).collect(),
-            ));
+            let mailtos: Mailtos = Rc::new(RefCell::new(Waiting {
+                links: launch_mailto.into_iter().map(|url| (url, None)).collect(),
+                announced: false,
+            }));
 
             // New mail → desktop notifications, and pending mailto links once an account is
             // known. Store notifications are frequent; both queues are usually empty.
@@ -154,7 +155,7 @@ fn main() {
                                 .detach();
                         }
                     }
-                    if !mailtos.borrow().is_empty() {
+                    if !mailtos.borrow().links.is_empty() {
                         compose_mailtos(&store, &mailtos, cx);
                     }
                 })
@@ -173,8 +174,15 @@ fn main() {
                                 ui::windows::raise_main_window(&store, token.as_deref(), cx)
                             }
                             instance::Request::Compose(url) => {
-                                mailtos.borrow_mut().push((url, token));
-                                compose_mailtos(&store, &mailtos, cx);
+                                {
+                                    let mut waiting = mailtos.borrow_mut();
+                                    waiting.links.push((url, token.clone()));
+                                    waiting.announced = false;
+                                }
+                                if !compose_mailtos(&store, &mailtos, cx) {
+                                    // No account yet: bring up the window that says why.
+                                    ui::windows::raise_main_window(&store, token.as_deref(), cx);
+                                }
                             }
                         });
                     }
@@ -210,16 +218,46 @@ fn main() {
 
 /// `mailto:` links waiting to be composed, each with the activation token of the launch that
 /// handed it over.
-type Mailtos = Rc<RefCell<Vec<(String, Option<String>)>>>;
+struct Waiting {
+    links: Vec<(String, Option<String>)>,
+    /// The "sign in" toast was shown for these links.
+    announced: bool,
+}
+
+type Mailtos = Rc<RefCell<Waiting>>;
+
+/// The toast for a `mailto:` link that arrives before there is an account to send from.
+const MAILTO_NEEDS_ACCOUNT: &str = "Sign in to compose this message";
 
 /// Opens a compose window for each waiting `mailto:` link, from the current account, once
 /// there is one. The links go through the whitelisted parser only: no attachments, sender or
 /// threading from the link, and nothing is sent until the user presses Send.
-fn compose_mailtos(store: &Entity<Store>, mailtos: &Mailtos, cx: &mut App) {
+///
+/// Returns false when links are left waiting for an account. Once the store knows there is
+/// none (auth no longer `Starting`) that is said with a toast, once per arrival: posting it
+/// notifies the store, which calls this again from the observer.
+fn compose_mailtos(store: &Entity<Store>, mailtos: &Mailtos, cx: &mut App) -> bool {
     let Some(account) = store.read(cx).current_account() else {
-        return;
+        let mut waiting = mailtos.borrow_mut();
+        if waiting.links.is_empty() {
+            return true;
+        }
+        let settled = !matches!(store.read(cx).auth, protocol::AuthState::Starting);
+        if settled && !waiting.announced {
+            waiting.announced = true;
+            drop(waiting);
+            store.update(cx, |s, cx| {
+                s.inform(MAILTO_NEEDS_ACCOUNT);
+                cx.notify();
+            });
+        }
+        return false;
     };
-    let urls = std::mem::take(&mut *mailtos.borrow_mut());
+    let urls = {
+        let mut waiting = mailtos.borrow_mut();
+        waiting.announced = false;
+        std::mem::take(&mut waiting.links)
+    };
     for (url, token) in urls {
         let from = model::Address::new(None, &account);
         match mail::mailto::parse(&url, &account, from) {
@@ -229,6 +267,7 @@ fn compose_mailtos(store: &Entity<Store>, mailtos: &Mailtos, cx: &mut App) {
             None => eprintln!("eloquawk: ignored a link that is not a mailto URL"),
         }
     }
+    true
 }
 
 /// Runs `--demo-actions` steps after the first thread page, one every [`STEP_DELAY`].
