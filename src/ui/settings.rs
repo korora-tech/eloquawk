@@ -288,7 +288,12 @@ impl SettingsView {
                                     "use-builtin",
                                     "Use built-in client",
                                     ButtonStyle::Secondary,
-                                    Some(self.send(cx, || Command::ClearClient)),
+                                    Some(self.click(cx, |this, _, cx| {
+                                        this.store.update(cx, |s, cx| {
+                                            s.clear_client();
+                                            cx.notify();
+                                        })
+                                    })),
                                 ))
                             })
                             .child(button(
@@ -353,9 +358,10 @@ impl SettingsView {
                     ButtonStyle::Secondary,
                     can_change.then(|| {
                         self.click(cx, move |this, _, cx| {
-                            this.store
-                                .read(cx)
-                                .send_command(Command::RemoveAccount(target.clone()))
+                            this.store.update(cx, |s, cx| {
+                                s.remove_account(&target);
+                                cx.notify();
+                            })
                         })
                     }),
                 ))

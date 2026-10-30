@@ -12,12 +12,17 @@ use std::time::Instant;
 
 use jiff::Timestamp;
 
+use crate::ai::jev::{Level, Verdict};
+use crate::ai::prompt::{self, AiInput, Redact};
+use crate::ai::{
+    AiCommand, AiEvent, AiHandle, CheckRequest, DISCLOSURE_VERSION, KeyState, Priority,
+};
 use crate::config::Prefs;
 use crate::mail::address::{self, ParticipantsLabel};
 use crate::mail::query::Query;
 use crate::model::{
-    AccountId, Label, LabelDelta, LabelKind, Outgoing, ThreadDetail, ThreadKey, ThreadSummary,
-    ViewKey, ViewKind, labels,
+    AccountId, Label, LabelDelta, LabelKind, Message, Outgoing, ThreadDetail, ThreadKey,
+    ThreadSummary, ViewKey, ViewKind, labels,
 };
 use crate::protocol::{AuthState, Command, OpId, PageMode, SendError, SyncEvent, SyncHandle};
 
@@ -27,6 +32,13 @@ const DETAIL_CACHE: usize = 30;
 const MORE_THRESHOLD: usize = 10;
 /// The label id `last_view` stores for All Mail, which is not a Gmail label.
 const ALL_MAIL_ID: &str = "ALL_MAIL";
+/// How many AI results are kept; the least recently inserted go first.
+const AI_RESULTS: usize = 1000;
+/// Background prefetches per account per rolling hour (SPEC 16.11).
+pub const BACKGROUND_PER_HOUR: usize = 60;
+/// A prefetch whose detail has not landed by then is forgotten.
+const PREFETCH_TTL: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+const HOUR: std::time::Duration = std::time::Duration::from_secs(3600);
 
 /// Where the data comes from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -69,6 +81,130 @@ pub struct Notice {
     pub text: String,
     pub action: Option<NoticeAction>,
     pub posted_at: Instant,
+}
+
+/// A message's AI answers (SPEC 16.10).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct AiResult {
+    pub verdict: Option<Verdict>,
+    /// Label probabilities by label id (M17).
+    #[allow(dead_code)] // consumed in M17 by the label suggestions
+    pub labels: Option<Vec<(String, f32)>>,
+    /// The label fingerprint the labels were asked under; `None` when partial (M17).
+    #[allow(dead_code)] // consumed in M17 by the label suggestions
+    pub label_fp: Option<u64>,
+}
+
+/// A message, by account and Gmail message id.
+pub type MessageKey = (AccountId, String);
+
+/// What the UI knows of the AI checks (SPEC 16.10). Holds no key and no mail beyond the
+/// verdicts.
+#[derive(Debug)]
+pub struct AiState {
+    pub key: KeyState,
+    pub paused: Option<String>,
+    /// Checks, known cost in USD, and checks whose cost was not reported, this session.
+    pub usage: (u32, f64, u32),
+    pub results: HashMap<MessageKey, AiResult>,
+    /// Insertion order of `results`, for the bound.
+    results_order: VecDeque<MessageKey>,
+    pub checking: HashSet<MessageKey>,
+    /// The failure text and whether a retry may help.
+    pub failed: HashMap<MessageKey, (String, bool)>,
+    /// Banners dismissed this session.
+    pub dismissed: HashSet<MessageKey>,
+    /// Each checked thread's last checked target message.
+    pub by_thread: HashMap<ThreadKey, String>,
+    pub test: Option<Result<String, String>>,
+    /// Background prefetch times per account, for the hourly cap.
+    pub hourly: HashMap<AccountId, VecDeque<Instant>>,
+    /// Prefetches sent whose detail has not landed.
+    pub prefetching: HashMap<ThreadKey, Instant>,
+    /// Bumped on any change for a thread, so the reader re-renders.
+    rev: HashMap<ThreadKey, u64>,
+    /// Bumped on any global change: the key, a pause, the AI prefs.
+    pub ai_rev: u64,
+    /// The first `Reload` went out (after the sync worker left `Starting`).
+    reloaded: bool,
+}
+
+impl Default for AiState {
+    fn default() -> Self {
+        Self {
+            key: KeyState::Unknown,
+            paused: None,
+            usage: (0, 0.0, 0),
+            results: HashMap::new(),
+            results_order: VecDeque::new(),
+            checking: HashSet::new(),
+            failed: HashMap::new(),
+            dismissed: HashSet::new(),
+            by_thread: HashMap::new(),
+            test: None,
+            hourly: HashMap::new(),
+            prefetching: HashMap::new(),
+            rev: HashMap::new(),
+            ai_rev: 0,
+            reloaded: false,
+        }
+    }
+}
+
+impl AiState {
+    /// Drops everything known about `account`'s messages.
+    fn forget_account(&mut self, account: &str) {
+        self.results.retain(|(a, _), _| a != account);
+        self.results_order.retain(|(a, _)| a != account);
+        self.checking.retain(|(a, _)| a != account);
+        self.failed.retain(|(a, _), _| a != account);
+        self.dismissed.retain(|(a, _)| a != account);
+        self.by_thread.retain(|k, _| k.account != account);
+        self.prefetching.retain(|k, _| k.account != account);
+        self.hourly.remove(account);
+        for (k, r) in self.rev.iter_mut() {
+            if k.account == account {
+                *r += 1;
+            }
+        }
+        self.ai_rev += 1;
+    }
+
+    /// Drops every result (the key was removed).
+    fn forget_all(&mut self) {
+        self.results.clear();
+        self.results_order.clear();
+        self.checking.clear();
+        self.failed.clear();
+        self.by_thread.clear();
+        self.prefetching.clear();
+        self.ai_rev += 1;
+    }
+
+    fn bump(&mut self, thread: &ThreadKey) {
+        *self.rev.entry(thread.clone()).or_default() += 1;
+    }
+
+    /// Inserts a result, merging a labels-only one into the stored verdict, and bounds the map.
+    fn insert_result(&mut self, key: MessageKey, result: AiResult) {
+        let merged = match self.results.remove(&key) {
+            Some(old) => AiResult {
+                verdict: result.verdict.or(old.verdict),
+                labels: result.labels.or(old.labels),
+                label_fp: result.label_fp.or(old.label_fp),
+            },
+            None => result,
+        };
+        self.results.insert(key.clone(), merged);
+        self.results_order.retain(|k| k != &key);
+        self.results_order.push_back(key);
+        while self.results.len() > AI_RESULTS {
+            let Some(oldest) = self.results_order.pop_front() else {
+                break;
+            };
+            self.results.remove(&oldest);
+        }
+    }
 }
 
 /// The kinds of optimistic mutation.
@@ -237,6 +373,9 @@ const SYSTEM_LABELS: &[(&str, &str, Count)] = &[
 pub struct Store {
     pub mode: Mode,
     sync: SyncHandle,
+    ai_handle: AiHandle,
+    /// The AI checks (SPEC 16.10).
+    pub ai: AiState,
     pub prefs: Prefs,
     pub auth: AuthState,
     pub client_id: Option<String>,
@@ -388,10 +527,34 @@ fn successor(old: &[String], new: &[String], old_ix: usize) -> Option<String> {
 }
 
 impl Store {
-    pub fn new(sync: SyncHandle, mode: Mode, prefs: Prefs) -> Self {
+    /// The store the app runs on. In demo mode both demo accounts are opted in to the AI
+    /// checks, with background checks on, so every path shows without a click; nothing is
+    /// written (SPEC 16.9). Accounts whose consent is for an older disclosure are forgotten
+    /// by the AI worker at once.
+    pub fn new(sync: SyncHandle, ai: AiHandle, mode: Mode, mut prefs: Prefs) -> Self {
+        if mode == Mode::Demo {
+            for account in [crate::demo_data::PERSONAL, crate::demo_data::WORK] {
+                prefs
+                    .ai
+                    .accounts
+                    .insert(account.to_string(), DISCLOSURE_VERSION);
+            }
+            prefs.ai.background = true;
+        }
+        Self::build(sync, ai, mode, prefs)
+    }
+
+    fn build(sync: SyncHandle, ai: AiHandle, mode: Mode, prefs: Prefs) -> Self {
+        for (account, version) in &prefs.ai.accounts {
+            if *version != DISCLOSURE_VERSION {
+                ai.send(AiCommand::ForgetAccount(account.clone()));
+            }
+        }
         Self {
             mode,
             sync,
+            ai_handle: ai,
+            ai: AiState::default(),
             prefs,
             auth: AuthState::Starting,
             client_id: None,
@@ -424,24 +587,64 @@ impl Store {
     }
 
     /// A demo-mode store with ephemeral prefs, talking to whatever holds `sync`'s receiver.
+    /// Its AI handle goes nowhere and no account is opted in, so it sends no prefetch.
     #[cfg(test)]
     pub fn for_tests(sync: SyncHandle) -> Self {
         let prefs = Prefs {
             ephemeral: true,
             ..Prefs::default()
         };
-        Self::new(sync, Mode::Demo, prefs)
+        Self::build(sync, AiHandle::detached(), Mode::Demo, prefs)
+    }
+
+    /// A store for the AI tests: the mode and (ephemeral) prefs are given, with no demo
+    /// opt-in.
+    #[cfg(test)]
+    pub fn for_tests_with_ai(sync: SyncHandle, ai: AiHandle, mode: Mode, prefs: Prefs) -> Self {
+        Self::build(sync, ai, mode, prefs)
     }
 
     pub fn send_command(&self, cmd: Command) {
         self.sync.send(cmd);
     }
 
+    pub fn send_ai(&self, cmd: AiCommand) {
+        self.ai_handle.send(cmd);
+    }
+
+    /// Ctrl+R, the header's Refresh and the locked card's Retry: re-lists, retries a locked
+    /// keyring, and reloads the OpenRouter key too.
+    pub fn refresh(&self) {
+        self.send_command(Command::Refresh);
+        self.send_ai(AiCommand::Reload);
+    }
+
+    /// Signs an account out from Settings. Only this (and removing the client) forgets the
+    /// account's AI consent; an account that merely drops out of `Accounts` keeps it.
+    pub fn remove_account(&mut self, account: &str) {
+        self.send_command(Command::RemoveAccount(account.to_string()));
+        if self.prefs.ai.accounts.contains_key(account) {
+            self.change_prefs(|p| {
+                p.ai.accounts.remove(account);
+            });
+        }
+    }
+
+    /// Removes the saved OAuth client, which signs every account out.
+    pub fn clear_client(&mut self) {
+        self.send_command(Command::ClearClient);
+        if !self.prefs.ai.accounts.is_empty() {
+            self.change_prefs(|p| p.ai.accounts.clear());
+        }
+    }
+
     /// Changes preferences from Settings: applies `f`, pulls numbers back into range and
     /// saves, except when the prefs are ephemeral (demo mode, tests).
-    /// A new refresh interval or page size reaches the worker straight away.
+    /// A new refresh interval or page size reaches the worker straight away, and a change to
+    /// the AI prefs reaches the AI worker (SPEC 16.9).
     pub fn change_prefs(&mut self, f: impl FnOnce(&mut Prefs)) {
         let before = (self.prefs.refresh_secs, self.prefs.page_size);
+        let ai_before = self.prefs.ai.clone();
         f(&mut self.prefs);
         self.prefs = std::mem::take(&mut self.prefs).clamped();
         if !self.prefs.ephemeral {
@@ -453,6 +656,23 @@ impl Store {
                 refresh_secs,
                 page_size,
             });
+        }
+        if self.prefs.ai != ai_before {
+            self.ai.ai_rev += 1;
+            for (account, version) in &ai_before.accounts {
+                let now = self.prefs.ai.accounts.get(account);
+                if *version == DISCLOSURE_VERSION && now != Some(&DISCLOSURE_VERSION) {
+                    self.ai_handle
+                        .send(AiCommand::ForgetAccount(account.clone()));
+                    self.ai.forget_account(account);
+                }
+            }
+            if ai_before.background && !self.prefs.ai.background {
+                self.ai.prefetching.clear();
+            }
+            if ai_before.spend_limit_cents != self.prefs.ai.spend_limit_cents {
+                self.send_ai(AiCommand::SpendLimit(self.prefs.ai.spend_limit_cents));
+            }
         }
     }
 
@@ -728,7 +948,8 @@ impl Store {
     }
 
     /// Opens a thread: fetches its detail unless a fresh one is cached, and marks it read
-    /// when that preference is on (not undoable, no toast).
+    /// when that preference is on (not undoable, no toast). A cached detail is checked by
+    /// the AI at once when the conditions of SPEC 16.10 hold.
     pub fn open_thread(&mut self, key: ThreadKey) {
         self.open = Some(key.clone());
         let summary_history = self.threads.get(&key).map(|s| s.history_id);
@@ -745,6 +966,8 @@ impl Store {
         if !fresh {
             self.details.insert(key.clone(), DetailState::Loading);
             self.send_command(Command::OpenThread(key.clone()));
+        } else {
+            self.check_open(&key);
         }
         self.touch_detail(&key);
         let unread = self.threads.get(&key).is_some_and(|s| s.unread());
@@ -1517,6 +1740,10 @@ impl Store {
         self.lists.retain(|v, _| known.contains(&v.account));
         self.drop_threads(|k| !known.contains(&k.account));
         self.new_mail.retain(|s| known.contains(&s.key.account));
+        // The runtime AI state goes with the account; its consent stays (SPEC 16.9).
+        for gone in self.accounts.iter().filter(|a| !known.contains(*a)) {
+            self.ai.forget_account(gone);
+        }
         self.accounts = accounts;
         let view_ok = self
             .view
@@ -1554,10 +1781,341 @@ impl Store {
         }
     }
 
+    // ----- AI triage (SPEC 16.10) ------------------------------------------------------------
+
+    /// Every signed-in account, lowercased: their mail is never checked or sent as a field.
+    fn own_accounts(&self) -> Vec<String> {
+        self.accounts.iter().map(|a| a.to_lowercase()).collect()
+    }
+
+    /// Whether `account` accepted the current disclosure.
+    pub fn ai_opted_in(&self, account: &str) -> bool {
+        self.prefs.ai.accounts.get(account) == Some(&DISCLOSURE_VERSION)
+    }
+
+    /// A key is usable (or this is the demo) and nothing is paused.
+    fn ai_ready(&self) -> bool {
+        (self.mode == Mode::Demo || matches!(self.ai.key, KeyState::Saved { .. }))
+            && self.ai.paused.is_none()
+    }
+
+    /// The message a thread's verdict is about (SPEC 16.6.3).
+    pub fn ai_target<'a>(&self, detail: &'a ThreadDetail) -> Option<&'a Message> {
+        prompt::target(detail, &self.own_accounts())
+    }
+
+    fn loaded(&self, key: &ThreadKey) -> Option<&ThreadDetail> {
+        match self.details.get(key) {
+            Some(DetailState::Loaded(d)) => Some(d),
+            _ => None,
+        }
+    }
+
+    /// The open thread's (or any loaded thread's) target message id.
+    fn target_id(&self, key: &ThreadKey) -> Option<String> {
+        match self.loaded(key) {
+            Some(d) => self.ai_target(d).map(|m| m.id.clone()),
+            None => self.ai.by_thread.get(key).cloned(),
+        }
+    }
+
+    /// The check for `detail`'s target, when SPEC 16.10's conditions hold.
+    fn check_request(&self, detail: &ThreadDetail, priority: Priority) -> Option<CheckRequest> {
+        let account = &detail.key.account;
+        if !self.ai_ready() || !self.ai_opted_in(account) {
+            return None;
+        }
+        let own = self.own_accounts();
+        let target = prompt::target(detail, &own)?;
+        let id: MessageKey = (account.clone(), target.id.clone());
+        if self.ai.checking.contains(&id)
+            || self.ai.results.contains_key(&id)
+            || self
+                .ai
+                .failed
+                .get(&id)
+                .is_some_and(|(_, retryable)| !retryable)
+        {
+            return None;
+        }
+        Some(CheckRequest {
+            account: account.clone(),
+            thread: detail.key.clone(),
+            message_id: target.id.clone(),
+            priority,
+            verdict: true,
+            labels: None,
+            input: AiInput::from_message(target, &Redact::for_message(target, &own)),
+        })
+    }
+
+    /// Checks the open thread's target when it is due (SPEC 16.10).
+    fn check_open(&mut self, key: &ThreadKey) {
+        if self.open.as_ref() != Some(key) {
+            return;
+        }
+        let Some(detail) = self.loaded(key) else {
+            return;
+        };
+        if let Some(req) = self.check_request(detail, Priority::Interactive) {
+            self.send_ai(AiCommand::Check(Box::new(req)));
+        }
+    }
+
+    /// The reader's "Retry" after a retryable failure: clears it and checks again.
+    #[allow(dead_code)] // consumed in M16 by the reader and list (ui/triage)
+    pub fn retry_ai(&mut self) {
+        let Some(key) = self.open.clone() else {
+            return;
+        };
+        if let Some(id) = self.target_id(&key) {
+            self.ai.failed.remove(&(key.account.clone(), id));
+            self.ai.bump(&key);
+        }
+        self.check_open(&key);
+    }
+
+    /// Hides the open thread's banner for this session.
+    #[allow(dead_code)] // consumed in M16 by the reader and list (ui/triage)
+    pub fn dismiss_triage(&mut self) {
+        let Some(key) = self.open.clone() else {
+            return;
+        };
+        if let Some(id) = self.target_id(&key) {
+            self.ai.dismissed.insert((key.account.clone(), id));
+            self.ai.bump(&key);
+        }
+    }
+
+    fn on_detail(&mut self, detail: ThreadDetail) {
+        let key = detail.key.clone();
+        let is_open = self.open.as_ref() == Some(&key);
+        let prefetched = self.ai.prefetching.remove(&key).is_some();
+        if !is_open && prefetched {
+            // Re-checked now: whatever held when the prefetch went out is not trusted.
+            let due = self.prefs.ai.background;
+            let req = due
+                .then(|| self.check_request(&detail, Priority::Background))
+                .flatten();
+            if let Some(req) = req {
+                self.send_ai(AiCommand::Check(Box::new(req)));
+            }
+            // A prefetch never evicts the user's cached threads; a cached one is refreshed.
+            if !self.details.contains_key(&key) {
+                return;
+            }
+        }
+        if let Some(s) = self.threads.get(&key) {
+            self.detail_history.insert(key.clone(), s.history_id);
+        }
+        self.details
+            .insert(key.clone(), DetailState::Loaded(detail));
+        self.touch_detail(&key);
+        if is_open {
+            self.check_open(&key);
+        }
+    }
+
+    /// Background checks of new inbox mail (SPEC 16.11): a prefetch per new thread, while the
+    /// pref is on, the account opted in, the key usable and the hourly cap has room.
+    fn prefetch_new_mail(&mut self, account: &str, threads: &[ThreadSummary]) {
+        if !self.prefs.ai.background || !self.ai_opted_in(account) || !self.ai_ready() {
+            return;
+        }
+        let now = Instant::now();
+        let times = self.ai.hourly.entry(account.to_string()).or_default();
+        times.retain(|t| now.duration_since(*t) < HOUR);
+        let mut send = Vec::new();
+        for t in threads {
+            if times.len() >= BACKGROUND_PER_HOUR {
+                break;
+            }
+            if self.ai.prefetching.contains_key(&t.key) {
+                continue;
+            }
+            times.push_back(now);
+            self.ai.prefetching.insert(t.key.clone(), now);
+            send.push(t.key.clone());
+        }
+        for key in send {
+            self.send_command(Command::Prefetch(key));
+        }
+    }
+
+    /// The thread's change counter, for the reader's fingerprint.
+    #[allow(dead_code)] // consumed in M16 by the reader and list (ui/triage)
+    pub fn ai_thread_rev(&self, key: &ThreadKey) -> u64 {
+        self.ai.rev.get(key).copied().unwrap_or(0)
+    }
+
+    fn result_for(&self, key: &ThreadKey) -> Option<(&String, &AiResult)> {
+        let id = self.ai.by_thread.get(key)?;
+        let r = self.ai.results.get(&(key.account.clone(), id.clone()))?;
+        Some((id, r))
+    }
+
+    /// The list badge's level, for threads checked this session; `Level::Spam` is hidden in
+    /// the Spam view.
+    #[allow(dead_code)] // consumed in M16 by the reader and list (ui/triage)
+    pub fn ai_badge(&self, key: &ThreadKey) -> Option<Level> {
+        let level = self.result_for(key)?.1.verdict?.level;
+        match level {
+            Level::None => None,
+            Level::Spam if self.viewing_label(labels::SPAM) => None,
+            l => Some(l),
+        }
+    }
+
+    /// The reader banner's verdict: the open target's, unless dismissed, clean, or spam in
+    /// the Spam view.
+    #[allow(dead_code)] // consumed in M16 by the reader and list (ui/triage)
+    pub fn ai_banner(&self, key: &ThreadKey) -> Option<&Verdict> {
+        let id = self.target_id(key)?;
+        let mk = (key.account.clone(), id);
+        if self.ai.dismissed.contains(&mk) {
+            return None;
+        }
+        let v = self.ai.results.get(&mk)?.verdict.as_ref()?;
+        match v.level {
+            Level::None => None,
+            Level::Spam if self.viewing_label(labels::SPAM) => None,
+            _ => Some(v),
+        }
+    }
+
+    /// Whether the open target's check is in flight.
+    #[allow(dead_code)] // consumed in M16 by the reader and list (ui/triage)
+    pub fn ai_checking(&self, key: &ThreadKey) -> bool {
+        self.target_id(key)
+            .is_some_and(|id| self.ai.checking.contains(&(key.account.clone(), id)))
+    }
+
+    /// The open target's failure, when its check failed.
+    #[allow(dead_code)] // consumed in M16 by the reader and list (ui/triage)
+    pub fn ai_failure(&self, key: &ThreadKey) -> Option<&(String, bool)> {
+        let id = self.target_id(key)?;
+        self.ai.failed.get(&(key.account.clone(), id))
+    }
+
+    /// The local caution's reasons for a loaded thread's target (SPEC 16.12.1): any account,
+    /// no key, no request.
+    #[allow(dead_code)] // consumed in M16 by the reader and list (ui/triage)
+    pub fn local_caution(&self, key: &ThreadKey) -> Option<Vec<String>> {
+        let target = self.ai_target(self.loaded(key)?)?;
+        crate::ui::triage::local_caution(&target.signals)
+    }
+
+    /// Whether a click on a web link in `message_id` must ask first: the message is the
+    /// target and Jev called it dangerous, or the local caution applies (SPEC 16.12.1).
+    #[allow(dead_code)] // consumed in M16 by the reader and list (ui/triage)
+    pub fn link_guard(&self, key: &ThreadKey, message_id: &str) -> bool {
+        let Some(detail) = self.loaded(key) else {
+            return false;
+        };
+        let Some(target) = self.ai_target(detail) else {
+            return false;
+        };
+        if target.id != message_id {
+            return false;
+        }
+        let danger = self
+            .ai
+            .results
+            .get(&(key.account.clone(), target.id.clone()))
+            .and_then(|r| r.verdict)
+            .is_some_and(|v| v.level == Level::Danger);
+        danger || crate::ui::triage::local_caution(&target.signals).is_some()
+    }
+
+    /// Applies one AI worker event (SPEC 16.10).
+    pub fn apply_ai(&mut self, ev: AiEvent) {
+        match ev {
+            AiEvent::Key(k) => {
+                if !matches!(k, KeyState::Saved { .. }) {
+                    self.ai.checking.clear();
+                }
+                if k == KeyState::Missing {
+                    self.ai.forget_all();
+                }
+                self.ai.key = k;
+                self.ai.ai_rev += 1;
+            }
+            AiEvent::Checking { thread, message_id } => {
+                self.ai
+                    .checking
+                    .insert((thread.account.clone(), message_id));
+                self.ai.bump(&thread);
+            }
+            AiEvent::Checked {
+                thread,
+                message_id,
+                outcome,
+            } => {
+                let id = (thread.account.clone(), message_id.clone());
+                self.ai.checking.remove(&id);
+                if !self.ai_opted_in(&thread.account) {
+                    return;
+                }
+                self.ai.failed.remove(&id);
+                let (labels, label_fp) = match outcome.labels {
+                    Some((fp, probs)) => (Some(probs), fp),
+                    None => (None, None),
+                };
+                self.ai.insert_result(
+                    id,
+                    AiResult {
+                        verdict: outcome.verdict,
+                        labels,
+                        label_fp,
+                    },
+                );
+                self.ai.by_thread.insert(thread.clone(), message_id);
+                self.ai.bump(&thread);
+            }
+            AiEvent::Failed {
+                thread,
+                message_id,
+                error,
+                retryable,
+            } => {
+                let id = (thread.account.clone(), message_id);
+                self.ai.checking.remove(&id);
+                self.ai.failed.insert(id, (error, retryable));
+                self.ai.bump(&thread);
+            }
+            AiEvent::Dropped { thread, message_id } => {
+                self.ai
+                    .checking
+                    .remove(&(thread.account.clone(), message_id));
+                self.ai.bump(&thread);
+            }
+            AiEvent::Paused(reason) => {
+                if reason.is_some() {
+                    self.ai.checking.clear();
+                }
+                self.ai.paused = reason;
+                self.ai.ai_rev += 1;
+            }
+            AiEvent::Usage {
+                checks,
+                cost_usd,
+                cost_unknown,
+            } => self.ai.usage = (checks, cost_usd, cost_unknown),
+            AiEvent::TestResult(r) => self.ai.test = Some(r),
+        }
+    }
+
     /// Applies one worker event.
     pub fn apply(&mut self, ev: SyncEvent) {
         match ev {
-            SyncEvent::Auth(a) => self.auth = a,
+            SyncEvent::Auth(a) => {
+                self.auth = a;
+                // The AI worker's first keyring read waits for the sync worker's (SPEC 16.4).
+                if a != AuthState::Starting && !self.ai.reloaded {
+                    self.ai.reloaded = true;
+                    self.send_ai(AiCommand::Reload);
+                }
+            }
             SyncEvent::Client(c) => self.client_id = c,
             SyncEvent::Accounts(a) => self.on_accounts(a),
             SyncEvent::SigningIn(s) => self.signing_in = s,
@@ -1565,6 +2123,9 @@ impl Store {
             SyncEvent::Synced(t) => {
                 self.last_sync = Some(t);
                 self.syncs += 1;
+                self.ai
+                    .prefetching
+                    .retain(|_, at| at.elapsed() < PREFETCH_TTL);
             }
             SyncEvent::Problem(p) => self.problem = p,
             SyncEvent::Notice(text) => self.post_notice(text, None),
@@ -1612,15 +2173,7 @@ impl Store {
                 self.drop_threads(|k| k.account == account && gone.contains(&k.id));
                 self.settle(&old_ids, false);
             }
-            SyncEvent::ThreadDetail(detail) => {
-                let key = detail.key.clone();
-                if let Some(s) = self.threads.get(&key) {
-                    self.detail_history.insert(key.clone(), s.history_id);
-                }
-                self.details
-                    .insert(key.clone(), DetailState::Loaded(detail));
-                self.touch_detail(&key);
-            }
+            SyncEvent::ThreadDetail(detail) => self.on_detail(detail),
             SyncEvent::ThreadFailed { key, error } => {
                 self.details.insert(key, DetailState::Failed(error));
             }
@@ -1659,14 +2212,20 @@ impl Store {
             SyncEvent::NewMail { account, threads } => {
                 // Only the account the event names: a summary filed under another is a
                 // worker bug, and must not notify.
+                let threads: Vec<ThreadSummary> = threads
+                    .into_iter()
+                    .filter(|t| t.key.account == account)
+                    .collect();
+                self.prefetch_new_mail(&account, &threads);
                 if self.prefs.notifications {
-                    self.new_mail
-                        .extend(threads.into_iter().filter(|t| t.key.account == account));
+                    self.new_mail.extend(threads);
                 }
             }
             SyncEvent::AccountReset(account) => {
                 self.lists.retain(|v, _| v.account != account);
                 self.drop_threads(|k| k.account == account);
+                self.send_ai(AiCommand::ForgetAccount(account.clone()));
+                self.ai.forget_account(&account);
             }
         }
     }
@@ -2859,6 +3418,613 @@ mod tests {
         );
     }
 
+    // ----- AI triage (SPEC 16.10, 16.15) ----------------------------------------------------
+
+    mod ai {
+        use std::sync::mpsc;
+
+        use super::*;
+        use crate::ai::jev::{Kind, THRESHOLDS, verdict_from};
+        use crate::ai::{AiCommand, AiEvent, AiHandle, KeyState, Outcome, Priority};
+        use crate::demo_data::{self, PERSONAL, WORK};
+
+        struct Rig {
+            s: Store,
+            sync: mpsc::Receiver<Command>,
+            ai: mpsc::Receiver<AiCommand>,
+        }
+
+        fn prefs(opted: &[&str], background: bool) -> Prefs {
+            let mut p = Prefs {
+                ephemeral: true,
+                ..Prefs::default()
+            };
+            for a in opted {
+                p.ai.accounts.insert(a.to_string(), DISCLOSURE_VERSION);
+            }
+            p.ai.background = background;
+            p
+        }
+
+        fn rig(mode: Mode, prefs: Prefs) -> Rig {
+            let (tx, sync) = mpsc::channel();
+            let (atx, ai) = mpsc::channel();
+            let mut s = Store::for_tests_with_ai(
+                SyncHandle::from_sender(tx),
+                AiHandle::from_sender(atx),
+                mode,
+                prefs,
+            );
+            s.apply(SyncEvent::Accounts(vec![PERSONAL.into(), WORK.into()]));
+            let r = Rig { s, sync, ai };
+            r.drain();
+            r
+        }
+
+        /// A Google-mode store with a saved key and these accounts opted in.
+        fn ready(opted: &[&str], background: bool) -> Rig {
+            let mut r = rig(Mode::Google, prefs(opted, background));
+            r.s.apply_ai(AiEvent::Key(KeyState::Saved {
+                hint: "sk-or-…abcd".into(),
+            }));
+            r
+        }
+
+        impl Rig {
+            fn drain(&self) -> (Vec<Command>, Vec<AiCommand>) {
+                (self.sync.try_iter().collect(), self.ai.try_iter().collect())
+            }
+
+            fn checks(&self) -> Vec<CheckRequest> {
+                self.ai
+                    .try_iter()
+                    .filter_map(|c| match c {
+                        AiCommand::Check(req) => Some(*req),
+                        _ => None,
+                    })
+                    .collect()
+            }
+
+            fn prefetches(&self) -> Vec<ThreadKey> {
+                self.sync
+                    .try_iter()
+                    .filter_map(|c| match c {
+                        Command::Prefetch(k) => Some(k),
+                        _ => None,
+                    })
+                    .collect()
+            }
+
+            /// Opens a demo thread and delivers its detail.
+            fn open(&mut self, id: &str) -> ThreadDetail {
+                let d = demo(id);
+                self.s.open_thread(d.key.clone());
+                self.s.apply(SyncEvent::ThreadDetail(d.clone()));
+                d
+            }
+
+            fn checked(&mut self, d: &ThreadDetail, p: (f32, f32, f32)) {
+                let target = self.s.ai_target(d).unwrap().id.clone();
+                self.s.apply_ai(AiEvent::Checked {
+                    thread: d.key.clone(),
+                    message_id: target,
+                    outcome: Outcome {
+                        verdict: Some(verdict_from(p.0, p.1, p.2, &THRESHOLDS)),
+                        labels: None,
+                    },
+                });
+            }
+        }
+
+        fn demo(id: &str) -> ThreadDetail {
+            demo_data::generate(Timestamp::now())
+                .threads
+                .into_iter()
+                .find(|t| t.0.key.id == id)
+                .unwrap_or_else(|| panic!("no {id}"))
+                .1
+        }
+
+        fn new_mail(r: &mut Rig, ids: &[&str]) {
+            let threads = ids
+                .iter()
+                .map(|id| demo_data::summary_of(&demo(id), 1))
+                .collect();
+            r.s.apply(SyncEvent::NewMail {
+                account: PERSONAL.into(),
+                threads,
+            });
+        }
+
+        #[test]
+        fn ai_checks_only_when_opted_in_with_key() {
+            // No account opted in: no Check, even with a key.
+            let mut r = ready(&[], false);
+            r.open("p-ai-phish");
+            assert!(r.checks().is_empty());
+            // Opted in but no key yet.
+            let mut r = rig(Mode::Google, prefs(&[PERSONAL], false));
+            r.open("p-ai-phish");
+            assert!(r.checks().is_empty());
+            // Both: one interactive check of the target.
+            let mut r = ready(&[PERSONAL], false);
+            let d = r.open("p-ai-phish");
+            let checks = r.checks();
+            assert_eq!(checks.len(), 1);
+            assert_eq!(checks[0].priority, Priority::Interactive);
+            assert_eq!(checks[0].message_id, d.messages[0].id);
+            assert!(checks[0].verdict && checks[0].labels.is_none());
+            // Another account's thread is not checked.
+            let mut work = ready(&[WORK], false);
+            work.open("p-ai-phish");
+            assert!(work.checks().is_empty());
+        }
+
+        #[test]
+        fn ai_disclosure_version_bump_turns_off() {
+            let mut p = prefs(&[], false);
+            p.ai.accounts
+                .insert(PERSONAL.into(), DISCLOSURE_VERSION - 1);
+            let (atx, arx) = mpsc::channel();
+            let (tx, _rx) = mpsc::channel();
+            let mut s = Store::for_tests_with_ai(
+                SyncHandle::from_sender(tx),
+                AiHandle::from_sender(atx),
+                Mode::Google,
+                p,
+            );
+            let sent: Vec<AiCommand> = arx.try_iter().collect();
+            assert!(matches!(&sent[..], [AiCommand::ForgetAccount(a)] if a == PERSONAL));
+            assert!(!s.ai_opted_in(PERSONAL));
+            s.apply_ai(AiEvent::Key(KeyState::Saved { hint: "h".into() }));
+            s.apply(SyncEvent::Accounts(vec![PERSONAL.into()]));
+            let d = demo("p-ai-phish");
+            s.open_thread(d.key.clone());
+            s.apply(SyncEvent::ThreadDetail(d));
+            assert!(!arx.try_iter().any(|c| matches!(c, AiCommand::Check(_))));
+        }
+
+        #[test]
+        fn ai_never_checks_self_sent_or_draft() {
+            let mut r = ready(&[PERSONAL], false);
+            r.open("p-sent");
+            r.open("p-draft");
+            assert!(r.checks().is_empty());
+            // A thread whose last message is the user's checks the last inbound one.
+            let d = r.open("p-cafe");
+            let checks = r.checks();
+            assert_eq!(checks.len(), 1);
+            let zoe = d
+                .messages
+                .iter()
+                .rev()
+                .find(|m| !m.label_ids.contains(labels::SENT));
+            assert_eq!(checks[0].message_id, zoe.unwrap().id);
+        }
+
+        #[test]
+        fn ai_fast_open_sends_latest_only() {
+            let mut r = ready(&[PERSONAL], false);
+            let a = r.open("p-ai-phish");
+            r.open("p-ai-scam");
+            let target = r.s.ai_target(&a).unwrap().id.clone();
+            r.s.apply_ai(AiEvent::Checking {
+                thread: a.key.clone(),
+                message_id: target,
+            });
+            // Back to A while it is still checking: no second request.
+            r.s.open_thread(a.key.clone());
+            let checks = r.checks();
+            assert_eq!(
+                checks
+                    .iter()
+                    .map(|c| c.thread.id.as_str())
+                    .collect::<Vec<_>>(),
+                ["p-ai-phish", "p-ai-scam"]
+            );
+        }
+
+        #[test]
+        fn ai_results_dropped_after_opt_out() {
+            let mut r = ready(&[PERSONAL], false);
+            let d = r.open("p-ai-phish");
+            r.checked(&d, (0.97, 0.0, 0.0));
+            assert!(r.s.ai_banner(&d.key).is_some());
+            r.drain();
+            r.s.change_prefs(|p| {
+                p.ai.accounts.remove(PERSONAL);
+            });
+            let (_, ai) = r.drain();
+            assert!(
+                ai.iter()
+                    .any(|c| matches!(c, AiCommand::ForgetAccount(a) if a == PERSONAL))
+            );
+            assert!(r.s.ai_banner(&d.key).is_none());
+            assert!(r.s.ai.results.is_empty());
+            // A late Checked for an opted-out account is dropped.
+            r.checked(&d, (0.97, 0.0, 0.0));
+            assert!(r.s.ai.results.is_empty());
+        }
+
+        #[test]
+        fn ai_spam_level_hidden_in_spam_view() {
+            let mut r = ready(&[PERSONAL], false);
+            let d = r.open("p-ai-spam");
+            r.checked(&d, (0.0, 0.0, 0.9));
+            assert_eq!(r.s.ai_badge(&d.key), Some(Level::Spam));
+            assert_eq!(r.s.ai_banner(&d.key).map(|v| v.level), Some(Level::Spam));
+            r.s.set_view(ViewKey {
+                account: PERSONAL.into(),
+                kind: ViewKind::Label(labels::SPAM.into()),
+            });
+            assert_eq!(r.s.ai_badge(&d.key), None);
+            assert!(r.s.ai_banner(&d.key).is_none());
+            // Phishing still shows there.
+            let p = r.open("p-ai-phish");
+            r.checked(&p, (0.97, 0.0, 0.0));
+            assert_eq!(r.s.ai_banner(&p.key).map(|v| v.kind), Some(Kind::Phishing));
+        }
+
+        #[test]
+        fn local_caution_and_guard_without_opt_in() {
+            // No consent and no key at all.
+            let mut r = rig(Mode::Google, prefs(&[], false));
+            let d = r.open("p-ai-notice");
+            assert!(r.checks().is_empty());
+            let caution = r.s.local_caution(&d.key).unwrap();
+            assert_eq!(caution[0], "Sender failed DMARC");
+            assert!(caution[1].contains("paypa1-secure.example"));
+            let target = d.messages.last().unwrap().id.clone();
+            assert!(r.s.link_guard(&d.key, &target));
+            assert!(!r.s.link_guard(&d.key, "another-message"));
+            let clean = r.open("p-cafe");
+            assert!(r.s.local_caution(&clean.key).is_none());
+            let id = clean.messages.last().unwrap().id.clone();
+            assert!(!r.s.link_guard(&clean.key, &id));
+        }
+
+        #[test]
+        fn guard_follows_a_danger_verdict() {
+            let mut r = ready(&[PERSONAL], false);
+            let d = r.open("p-ai-scam");
+            let id = d.messages[0].id.clone();
+            assert!(!r.s.link_guard(&d.key, &id));
+            r.checked(&d, (0.0, 0.91, 0.0));
+            assert!(r.s.link_guard(&d.key, &id));
+            // A dismissed banner still guards; a warning does not.
+            r.s.dismiss_triage();
+            assert!(r.s.ai_banner(&d.key).is_none());
+            assert!(r.s.link_guard(&d.key, &id));
+            let n = r.open("p-news");
+            r.checked(&n, (0.62, 0.0, 0.0));
+            assert!(!r.s.link_guard(&n.key, &n.messages[0].id));
+        }
+
+        #[test]
+        fn consent_kept_when_accounts_event_drops_an_account() {
+            let mut r = ready(&[PERSONAL, WORK], false);
+            let d = r.open("p-ai-phish");
+            r.checked(&d, (0.97, 0.0, 0.0));
+            r.s.apply(SyncEvent::Accounts(vec![WORK.into()]));
+            assert!(r.s.ai_opted_in(PERSONAL), "consent survives");
+            assert!(r.s.ai.results.is_empty(), "runtime state goes");
+            r.drain();
+            r.s.remove_account(WORK);
+            assert!(!r.s.ai_opted_in(WORK));
+            let (sync, ai) = r.drain();
+            assert!(
+                sync.iter()
+                    .any(|c| matches!(c, Command::RemoveAccount(a) if a == WORK))
+            );
+            assert!(
+                ai.iter()
+                    .any(|c| matches!(c, AiCommand::ForgetAccount(a) if a == WORK))
+            );
+            r.s.clear_client();
+            assert!(r.s.prefs.ai.accounts.is_empty());
+        }
+
+        #[test]
+        fn first_reload_after_auth_leaves_starting() {
+            let r = rig(Mode::Google, prefs(&[], false));
+            let mut s = r.s;
+            s.apply(SyncEvent::Auth(AuthState::Starting));
+            assert!(r.ai.try_iter().next().is_none());
+            s.apply(SyncEvent::Auth(AuthState::Locked));
+            s.apply(SyncEvent::Auth(AuthState::Ready));
+            let sent: Vec<AiCommand> = r.ai.try_iter().collect();
+            assert_eq!(sent.len(), 1);
+            assert!(matches!(sent[0], AiCommand::Reload));
+            assert_eq!(s.ai.key, KeyState::Unknown);
+        }
+
+        #[test]
+        fn refresh_also_reloads_the_key() {
+            let r = rig(Mode::Google, prefs(&[], false));
+            r.s.refresh();
+            let (sync, ai) = r.drain();
+            assert!(matches!(&sync[..], [Command::Refresh]));
+            assert!(matches!(&ai[..], [AiCommand::Reload]));
+        }
+
+        #[test]
+        fn spend_limit_change_reaches_the_worker() {
+            let mut r = ready(&[], false);
+            r.s.change_prefs(|p| p.ai.spend_limit_cents = 250);
+            let (_, ai) = r.drain();
+            assert!(matches!(&ai[..], [AiCommand::SpendLimit(250)]));
+            r.s.change_prefs(|p| p.ai.spend_limit_cents = 1);
+            let (_, ai) = r.drain();
+            assert!(matches!(&ai[..], [AiCommand::SpendLimit(10)]), "clamped");
+        }
+
+        #[test]
+        fn dropped_clears_checking_and_reopen_rechecks() {
+            let mut r = ready(&[PERSONAL], false);
+            let d = r.open("p-ai-phish");
+            assert_eq!(r.checks().len(), 1);
+            let id = d.messages[0].id.clone();
+            r.s.apply_ai(AiEvent::Checking {
+                thread: d.key.clone(),
+                message_id: id.clone(),
+            });
+            assert!(r.s.ai_checking(&d.key));
+            r.s.apply_ai(AiEvent::Dropped {
+                thread: d.key.clone(),
+                message_id: id,
+            });
+            assert!(!r.s.ai_checking(&d.key));
+            r.s.open_thread(d.key.clone());
+            assert_eq!(r.checks().len(), 1);
+        }
+
+        #[test]
+        fn failures_retry_only_when_retryable() {
+            let mut r = ready(&[PERSONAL], false);
+            let d = r.open("p-ai-fail");
+            r.checks();
+            let id = d.messages[0].id.clone();
+            r.s.apply_ai(AiEvent::Failed {
+                thread: d.key.clone(),
+                message_id: id.clone(),
+                error: "Couldn't check this message".into(),
+                retryable: false,
+            });
+            r.s.open_thread(d.key.clone());
+            assert!(r.checks().is_empty());
+            r.s.apply_ai(AiEvent::Failed {
+                thread: d.key.clone(),
+                message_id: id,
+                error: "Couldn't check this message".into(),
+                retryable: true,
+            });
+            assert_eq!(r.s.ai_failure(&d.key).map(|f| f.1), Some(true));
+            r.s.retry_ai();
+            assert_eq!(r.checks().len(), 1);
+            assert!(r.s.ai_failure(&d.key).is_none());
+        }
+
+        #[test]
+        fn paused_clears_checking() {
+            let mut r = ready(&[PERSONAL], false);
+            let d = r.open("p-ai-phish");
+            r.s.apply_ai(AiEvent::Checking {
+                thread: d.key.clone(),
+                message_id: d.messages[0].id.clone(),
+            });
+            r.s.apply_ai(AiEvent::Paused(Some(
+                "Your OpenRouter credit has run out".into(),
+            )));
+            assert!(r.s.ai.checking.is_empty());
+            r.checks();
+            // While paused, opening sends nothing.
+            r.open("p-ai-scam");
+            assert!(r.checks().is_empty());
+            r.s.apply_ai(AiEvent::Paused(None));
+            r.s.open_thread(d.key.clone());
+            assert_eq!(r.checks().len(), 1);
+        }
+
+        #[test]
+        fn ai_rev_bumps_on_prefs_key_and_pause() {
+            let mut r = ready(&[], false);
+            let mut last = r.s.ai.ai_rev;
+            let mut bumped = |s: &Store| {
+                let b = s.ai.ai_rev > last;
+                last = s.ai.ai_rev;
+                b
+            };
+            r.s.change_prefs(|p| p.ai.background = true);
+            assert!(bumped(&r.s));
+            r.s.change_prefs(|p| p.clock_24h = !p.clock_24h);
+            assert!(!bumped(&r.s));
+            r.s.apply_ai(AiEvent::Key(KeyState::Locked));
+            assert!(bumped(&r.s));
+            r.s.apply_ai(AiEvent::Paused(Some("x".into())));
+            assert!(bumped(&r.s));
+        }
+
+        #[test]
+        fn background_prefetch_respects_hourly_cap() {
+            let mut r = ready(&[PERSONAL], true);
+            let now = Instant::now();
+            r.s.ai.hourly.insert(
+                PERSONAL.into(),
+                std::iter::repeat_n(now, BACKGROUND_PER_HOUR - 1).collect(),
+            );
+            new_mail(&mut r, &["p-ai-phish", "p-ai-scam"]);
+            assert_eq!(r.prefetches().len(), 1);
+            new_mail(&mut r, &["p-ai-spam"]);
+            assert!(r.prefetches().is_empty());
+            // An hour later there is room again.
+            r.s.ai.hourly.insert(
+                PERSONAL.into(),
+                std::iter::repeat_n(now - HOUR, BACKGROUND_PER_HOUR).collect(),
+            );
+            new_mail(&mut r, &["p-ai-spam"]);
+            assert_eq!(r.prefetches().len(), 1);
+        }
+
+        #[test]
+        fn prefetch_detail_checked_but_not_cached() {
+            let mut r = ready(&[PERSONAL], true);
+            new_mail(&mut r, &["p-ai-phish"]);
+            let key = ThreadKey::new(PERSONAL, "p-ai-phish");
+            assert_eq!(r.prefetches(), std::slice::from_ref(&key));
+            r.s.apply(SyncEvent::ThreadDetail(demo("p-ai-phish")));
+            assert!(!r.s.details.contains_key(&key));
+            let checks = r.checks();
+            assert_eq!(checks.len(), 1);
+            assert_eq!(checks[0].priority, Priority::Background);
+            assert!(checks[0].labels.is_none());
+            assert!(r.s.ai.prefetching.is_empty());
+        }
+
+        #[test]
+        fn prefetch_survives_the_synced_after_new_mail() {
+            let mut r = ready(&[PERSONAL], true);
+            new_mail(&mut r, &["p-ai-phish"]);
+            r.s.apply(SyncEvent::Synced(Timestamp::now()));
+            assert_eq!(r.s.ai.prefetching.len(), 1);
+            r.s.apply(SyncEvent::ThreadDetail(demo("p-ai-phish")));
+            assert_eq!(r.checks().len(), 1);
+            // One older than five minutes goes on the next Synced.
+            r.s.ai.prefetching.insert(
+                ThreadKey::new(PERSONAL, "old"),
+                Instant::now() - PREFETCH_TTL,
+            );
+            r.s.apply(SyncEvent::Synced(Timestamp::now()));
+            assert!(r.s.ai.prefetching.is_empty());
+        }
+
+        #[test]
+        fn background_off_drops_pending_prefetch() {
+            let mut r = ready(&[PERSONAL], true);
+            new_mail(&mut r, &["p-ai-phish"]);
+            r.drain();
+            r.s.change_prefs(|p| p.ai.background = false);
+            assert!(r.s.ai.prefetching.is_empty());
+            r.s.apply(SyncEvent::ThreadDetail(demo("p-ai-phish")));
+            assert!(r.checks().is_empty());
+        }
+
+        #[test]
+        fn prefetch_rechecks_consent_on_arrival() {
+            for change in 0..3 {
+                let mut r = ready(&[PERSONAL], true);
+                new_mail(&mut r, &["p-ai-phish"]);
+                match change {
+                    0 => r.s.change_prefs(|p| {
+                        p.ai.accounts.clear();
+                    }),
+                    1 => r.s.apply_ai(AiEvent::Key(KeyState::Missing)),
+                    _ => r.s.apply_ai(AiEvent::Paused(Some("x".into()))),
+                }
+                r.drain();
+                r.s.apply(SyncEvent::ThreadDetail(demo("p-ai-phish")));
+                assert!(r.checks().is_empty(), "change {change}");
+            }
+        }
+
+        #[test]
+        fn for_tests_sends_no_prefetch() {
+            let (mut s, rx) = super::store();
+            s.apply(SyncEvent::NewMail {
+                account: ME.into(),
+                threads: vec![summary(1, &["INBOX", "UNREAD"])],
+            });
+            assert!(!rx.try_iter().any(|c| matches!(c, Command::Prefetch(_))));
+        }
+
+        #[test]
+        fn late_open_detail_not_checked_in_background() {
+            let mut r = ready(&[PERSONAL], true);
+            let a = demo("p-ai-phish");
+            r.s.open_thread(a.key.clone());
+            r.open("p-ai-scam");
+            r.checks();
+            // A's detail lands after the user moved on: cached, not checked.
+            r.s.apply(SyncEvent::ThreadDetail(a.clone()));
+            assert!(r.s.details.contains_key(&a.key));
+            assert!(r.checks().is_empty());
+        }
+
+        #[test]
+        fn no_prefetch_without_key_or_while_paused() {
+            let mut r = rig(Mode::Google, prefs(&[PERSONAL], true));
+            new_mail(&mut r, &["p-ai-phish"]);
+            assert!(r.prefetches().is_empty());
+            r.s.apply_ai(AiEvent::Key(KeyState::Saved { hint: "h".into() }));
+            r.s.apply_ai(AiEvent::Paused(Some("x".into())));
+            new_mail(&mut r, &["p-ai-phish"]);
+            assert!(r.prefetches().is_empty());
+            r.s.apply_ai(AiEvent::Paused(None));
+            new_mail(&mut r, &["p-ai-phish"]);
+            assert_eq!(r.prefetches().len(), 1);
+        }
+
+        #[test]
+        fn key_removed_clears_results() {
+            let mut r = ready(&[PERSONAL], false);
+            let d = r.open("p-ai-phish");
+            r.checked(&d, (0.97, 0.0, 0.0));
+            assert!(r.s.ai_badge(&d.key).is_some());
+            r.s.apply_ai(AiEvent::Key(KeyState::Missing));
+            assert!(r.s.ai.results.is_empty() && r.s.ai.by_thread.is_empty());
+            assert!(r.s.ai_badge(&d.key).is_none());
+        }
+
+        #[test]
+        fn account_reset_forgets_the_account() {
+            let mut r = ready(&[PERSONAL], false);
+            let d = r.open("p-ai-phish");
+            r.checked(&d, (0.97, 0.0, 0.0));
+            r.drain();
+            r.s.apply(SyncEvent::AccountReset(PERSONAL.into()));
+            let (_, ai) = r.drain();
+            assert!(
+                ai.iter()
+                    .any(|c| matches!(c, AiCommand::ForgetAccount(a) if a == PERSONAL))
+            );
+            assert!(r.s.ai.results.is_empty());
+            assert!(r.s.ai_opted_in(PERSONAL));
+        }
+
+        #[test]
+        fn results_are_bounded() {
+            let mut r = ready(&[PERSONAL], false);
+            for i in 0..AI_RESULTS + 5 {
+                r.s.apply_ai(AiEvent::Checked {
+                    thread: ThreadKey::new(PERSONAL, format!("t{i}")),
+                    message_id: format!("m{i}"),
+                    outcome: Outcome {
+                        verdict: None,
+                        labels: None,
+                    },
+                });
+            }
+            assert_eq!(r.s.ai.results.len(), AI_RESULTS);
+            assert!(
+                !r.s.ai
+                    .results
+                    .contains_key(&(PERSONAL.to_string(), "m0".to_string()))
+            );
+        }
+
+        #[test]
+        fn demo_store_opts_in_both_accounts() {
+            let (tx, _rx) = mpsc::channel();
+            let s = Store::new(
+                SyncHandle::from_sender(tx),
+                AiHandle::detached(),
+                Mode::Demo,
+                prefs(&[], false),
+            );
+            assert!(s.ai_opted_in(PERSONAL) && s.ai_opted_in(WORK));
+            assert!(s.prefs.ai.background);
+        }
+    }
+
     /// Pumps worker events into the store until `done` or the deadline.
     fn pump(
         s: &mut Store,
@@ -2893,7 +4059,13 @@ mod tests {
             ..Prefs::default()
         };
         let (sync, events) = crate::demo::start(&prefs).unwrap();
-        let mut s = Store::for_tests(sync.clone());
+        let (ai, ai_events) = crate::ai::start(Mode::Demo, None, &prefs).unwrap();
+        let mut ai_prefs = prefs.clone();
+        ai_prefs
+            .ai
+            .accounts
+            .insert(ME.into(), crate::ai::DISCLOSURE_VERSION);
+        let mut s = Store::for_tests_with_ai(sync.clone(), ai.clone(), Mode::Demo, ai_prefs);
         let page_size = s.prefs.page_size as usize;
         let inbox = view("INBOX");
         pump(&mut s, &events, Duration::from_secs(2), |s, _| {
@@ -3028,6 +4200,66 @@ mod tests {
         assert_eq!(sent.in_reply_to, replied_to);
         assert!(sent.body.contains("wrote:"));
         assert!(s.threads[&first].in_label(labels::SENT));
+
+        // AI triage with the offline checker (SPEC 16.15): the phishing demo is Danger and
+        // arms the link guard.
+        let open_and_check = |s: &mut Store, id: &str| -> (ThreadKey, String) {
+            let key = key(id);
+            s.open_thread(key.clone());
+            assert!(pump(s, &events, Duration::from_secs(2), |s, _| {
+                matches!(s.details.get(&key), Some(DetailState::Loaded(_)))
+            }));
+            let target = match s.details.get(&key) {
+                Some(DetailState::Loaded(d)) => s.ai_target(d).unwrap().id.clone(),
+                _ => unreachable!(),
+            };
+            let mk = (ME.to_string(), target.clone());
+            assert!(
+                pump_ai(s, &ai_events, Duration::from_secs(3), |s| {
+                    s.ai.results.contains_key(&mk)
+                }),
+                "no verdict for {id}"
+            );
+            (key, target)
+        };
+        let (phish, target) = open_and_check(&mut s, "p-ai-phish");
+        let v = s.ai_banner(&phish).copied().unwrap();
+        assert_eq!(
+            (v.level, v.kind),
+            (Level::Danger, crate::ai::jev::Kind::Phishing)
+        );
+        assert!(s.link_guard(&phish, &target));
+        assert_eq!(s.ai_badge(&phish), Some(Level::Danger));
+        // The crafted notice talks the checker down, but the local caution still guards.
+        let (notice, target) = open_and_check(&mut s, "p-ai-notice");
+        let result = &s.ai.results[&(ME.to_string(), target.clone())];
+        assert_eq!(result.verdict.map(|v| v.level), Some(Level::None));
+        assert!(s.ai_banner(&notice).is_none());
+        assert!(s.local_caution(&notice).is_some());
+        assert!(s.link_guard(&notice, &target));
         sync.send(Command::Shutdown);
+        ai.send(AiCommand::Shutdown);
+    }
+
+    /// Pumps AI worker events into the store until `done` or the deadline.
+    fn pump_ai(
+        s: &mut Store,
+        rx: &async_channel::Receiver<AiEvent>,
+        timeout: Duration,
+        done: impl Fn(&Store) -> bool,
+    ) -> bool {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            match rx.try_recv() {
+                Ok(ev) => {
+                    s.apply_ai(ev);
+                    if done(s) {
+                        return true;
+                    }
+                }
+                Err(_) => std::thread::sleep(Duration::from_millis(5)),
+            }
+        }
+        false
     }
 }

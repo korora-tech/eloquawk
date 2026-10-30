@@ -881,9 +881,11 @@ impl MainView {
                     "refresh",
                     "Refresh",
                     (!store.busy).then(|| -> super::widgets::OnClick {
-                        Box::new(cx.listener(|this, _: &ClickEvent, _, cx| {
-                            this.store.read(cx).send_command(Command::Refresh)
-                        }))
+                        Box::new(
+                            cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.store.read(cx).refresh()
+                            }),
+                        )
                     }),
                 )
                 .h(px(CONTROL_H)),
@@ -1091,9 +1093,7 @@ impl Render for MainView {
         };
         div()
             .key_context("Eloquawk")
-            .on_action(cx.listener(|this, _: &Refresh, _, cx| {
-                this.store.read(cx).send_command(Command::Refresh)
-            }))
+            .on_action(cx.listener(|this, _: &Refresh, _, cx| this.store.read(cx).refresh()))
             .on_action(cx.listener(|_, _: &CloseWindow, window, _| window.remove_window()))
             // On the root so the reader's buttons and scripts reach them from any focus.
             .on_action(cx.listener(unless_help(Self::open_label_picker)))

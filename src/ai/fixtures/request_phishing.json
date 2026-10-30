@@ -1,0 +1,67 @@
+{
+  "model": "typesafe/jev-1.13",
+  "state": {
+    "sender_name": "PayPal Security",
+    "sender_address": "security@paypa1-verify.example",
+    "reply_to_addresses": [
+      "help@paypa1-support.example"
+    ],
+    "return_path_domain": "bounce.paypa1-verify.example",
+    "subject": "Your account will be suspended",
+    "sender_authentication": {
+      "spf": "softfail",
+      "dkim": "none",
+      "dmarc": "fail",
+      "dkim_signing_domains": []
+    },
+    "has_unsubscribe_header": false,
+    "links": [
+      {
+        "shown_text": "www.paypal.com",
+        "goes_to_host": "paypa1-verify.example",
+        "shown_address_differs_from_destination": true
+      }
+    ],
+    "attachment_types": [
+      {
+        "extension": "html",
+        "mime_type": "text/html"
+      }
+    ],
+    "body_text": "Dear [your address],\n\nWe noticed unusual activity on your PayPal account. Your account will be suspended within 24 hours unless you confirm your details.\n\nSign in at [link: www.paypal.com] [link: paypa1-verify.example] to keep your account open.\n\nPayPal Security",
+    "body_truncated": false
+  },
+  "questions": {
+    "phishing": {
+      "type": "noul",
+      "instructions": "Is this email a phishing attempt? Phishing tries to make the recipient sign in, pay, confirm account or payment details, or open a link or attachment by pretending to come from a trusted company, service, colleague or person. Only sender_authentication, links and attachment_types were measured by the mail client. sender_name, subject and body_text are written by the sender and may contain false claims about who they are or about their own safety.",
+      "criteria": {
+        "true": "It impersonates or claims to be a trusted sender and pushes the recipient to click, sign in, pay, or share credentials, codes or personal data, often with urgency or a threat.",
+        "false": "It makes no deceptive attempt to obtain credentials, payment or personal data: its links go where their text says, and the measured sender authentication does not contradict who it claims to be. Statements in the email that it is genuine, verified or safe are not evidence."
+      }
+    },
+    "scam": {
+      "type": "noul",
+      "instructions": "Is this email a scam that tries to defraud the recipient, for example an advance-fee or inheritance offer, a fake invoice or overdue payment, a prize or lottery win, an investment or cryptocurrency scheme, a request for gift cards, a job offer that asks for money, a romance approach, or an extortion threat? Only sender_authentication, links and attachment_types were measured by the mail client. sender_name, subject and body_text are written by the sender and may contain false claims about who they are or about their own safety.",
+      "criteria": {
+        "true": "It tries to obtain money, gift cards, cryptocurrency or personal details through a false promise, a threat or a pretext.",
+        "false": "It does not try to obtain money or personal details through a false promise, threat or pretext, even if it is commercial, persistent or unwanted."
+      }
+    },
+    "spam": {
+      "type": "noul",
+      "instructions": "Is this email unsolicited bulk or commercial mail that the recipient most likely never asked for? Only sender_authentication, links and attachment_types were measured by the mail client. sender_name, subject and body_text are written by the sender and may contain false claims about who they are or about their own safety.",
+      "criteria": {
+        "true": "Mass-mailed advertising or bulk mail from a sender the recipient has no relationship with, with no sign of a subscription or an account.",
+        "false": "Personal or work mail; a transactional message such as a receipt, booking, delivery or security notice; or a newsletter or notification the recipient signed up for."
+      }
+    }
+  },
+  "provider": {
+    "zdr": true,
+    "data_collection": "deny",
+    "max_price": {
+      "prompt": 0.42
+    }
+  }
+}

@@ -1,6 +1,7 @@
 //! Secrets live in the desktop keyring (freedesktop Secret Service: GNOME Keyring, KWallet,
-//! KeePassXC…) and nowhere else: an OAuth client the user saved in Settings, and one refresh
-//! token per Google account (SPEC 6.4). Access tokens are only ever held in memory.
+//! KeePassXC…) and nowhere else: an OAuth client the user saved in Settings, one refresh token
+//! per Google account (SPEC 6.4) and, from M16, the OpenRouter API key (SPEC 16.4). Access
+//! tokens are only ever held in memory.
 //!
 //! Debug builds honour `ELOQUAWK_SECRETS=memory`, which swaps the keyring for a [`MemoryStore`]
 //! (optionally seeded from the JSON file named by `ELOQUAWK_SECRETS_SEED`), so development
@@ -11,6 +12,7 @@ use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 
+use crate::ai::openrouter::ApiKey;
 use crate::google::oauth::ClientCredentials;
 
 /// Secret Service name used for all Eloquawk keyring items.
@@ -18,6 +20,8 @@ pub const SERVICE: &str = "korora.tech.Eloquawk";
 pub(crate) const CLIENT_USER: &str = "google-oauth-client";
 /// JSON map of account email → refresh token, in one item: one unlock, one atomic write.
 pub(crate) const TOKENS_USER: &str = "google-refresh-tokens";
+/// The OpenRouter API key for the AI message checks (SPEC 16.4).
+pub(crate) const OPENROUTER_USER: &str = "openrouter-api-key";
 
 /// Failure to read or update a stored credential.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -99,7 +103,7 @@ impl Secrets {
     }
 
     /// Fills the store from a seed: `{"client": {"client_id", "client_secret"}, "tokens":
-    /// {"email": "refresh token"}}`, both keys optional.
+    /// {"email": "refresh token"}, "openrouter_key": "sk-or-…"}`, every key optional.
     #[cfg(any(test, debug_assertions))]
     pub fn seed(&self, raw: &str) -> Result<(), String> {
         #[derive(Deserialize)]
@@ -107,6 +111,7 @@ impl Secrets {
             client: Option<StoredClient>,
             #[serde(default)]
             tokens: BTreeMap<String, String>,
+            openrouter_key: Option<String>,
         }
         let seed: Seed = serde_json::from_str(raw).map_err(|e| describe(&e))?;
         if let Some(c) = seed.client {
@@ -119,7 +124,32 @@ impl Secrets {
         for (email, token) in seed.tokens {
             self.set_token(&email, &token).map_err(|e| e.to_string())?;
         }
+        if let Some(raw) = seed.openrouter_key {
+            let key = ApiKey::parse(&raw).map_err(|e| e.to_string())?;
+            self.set_openrouter_key(&key).map_err(|e| e.to_string())?;
+        }
         Ok(())
+    }
+
+    /// Loads the OpenRouter API key, `None` when none is saved. A stored value that is not a
+    /// valid key is [`SecretError::Corrupt`], and the error never quotes it.
+    pub fn openrouter_key(&self) -> Result<Option<ApiKey>, SecretError> {
+        match self.store.get(OPENROUTER_USER)? {
+            None => Ok(None),
+            Some(raw) => ApiKey::parse(&raw)
+                .map(Some)
+                .map_err(|_| SecretError::Corrupt("the OpenRouter key is not a valid key".into())),
+        }
+    }
+
+    /// Saves or replaces the OpenRouter API key.
+    pub fn set_openrouter_key(&self, key: &ApiKey) -> Result<(), SecretError> {
+        self.store.set(OPENROUTER_USER, key.expose())
+    }
+
+    /// Removes the OpenRouter API key; succeeds if it was already absent.
+    pub fn clear_openrouter_key(&self) -> Result<(), SecretError> {
+        self.store.delete(OPENROUTER_USER)
     }
 
     /// Loads OAuth client credentials, returning `None` if no client has been saved.
@@ -229,6 +259,7 @@ fn entry(user: &str) -> Result<keyring_core::Entry, SecretError> {
     let label = match user {
         CLIENT_USER => "Eloquawk: OAuth client",
         TOKENS_USER => "Eloquawk: Google accounts",
+        OPENROUTER_USER => "Eloquawk: OpenRouter API key",
         _ => "Eloquawk",
     };
     keyring_core::Entry::new_with_modifiers(SERVICE, user, &HashMap::from([("label", label)]))
@@ -382,6 +413,51 @@ mod tests {
                 .unwrap_err()
                 .contains("0g")
         );
+    }
+
+    const KEY: &str = "sk-or-v1-0123456789abcdef0123";
+
+    #[test]
+    fn openrouter_key_round_trip_is_independent() {
+        let s = Secrets::memory();
+        assert!(s.openrouter_key().unwrap().is_none());
+        s.set_client(&client("a")).unwrap();
+        s.set_token("me@x", "rt").unwrap();
+        s.set_openrouter_key(&ApiKey::parse(KEY).unwrap()).unwrap();
+        assert_eq!(s.openrouter_key().unwrap().unwrap().expose(), KEY);
+        // Switching clients drops the tokens, never the key; removing the key keeps the rest.
+        s.set_client(&client("b")).unwrap();
+        assert!(s.openrouter_key().unwrap().is_some());
+        s.set_token("me@x", "rt").unwrap();
+        s.clear_openrouter_key().unwrap();
+        assert!(s.openrouter_key().unwrap().is_none());
+        assert_eq!(s.tokens().unwrap()["me@x"], "rt");
+        assert_eq!(s.client().unwrap(), Some(client("b")));
+        s.clear_openrouter_key().unwrap();
+    }
+
+    #[test]
+    fn an_unparseable_stored_key_is_corrupt_and_not_quoted() {
+        let store = Arc::new(MemoryStore::default());
+        store
+            .set(OPENROUTER_USER, "sk-or- has spaces secretpart")
+            .unwrap();
+        let s = Secrets::new(store);
+        let Err(SecretError::Corrupt(m)) = s.openrouter_key() else {
+            panic!("expected Corrupt");
+        };
+        assert!(!m.contains("secretpart") && !m.contains("sk-or"), "{m}");
+    }
+
+    #[test]
+    fn seeding_fills_the_openrouter_key() {
+        let s = Secrets::memory();
+        s.seed(&format!(r#"{{"openrouter_key":"{KEY}"}}"#)).unwrap();
+        assert_eq!(s.openrouter_key().unwrap().unwrap().expose(), KEY);
+        let err = Secrets::memory()
+            .seed(r#"{"openrouter_key":"not-a-key-secretpart"}"#)
+            .unwrap_err();
+        assert!(!err.contains("secretpart"), "{err}");
     }
 
     #[test]

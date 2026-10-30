@@ -73,7 +73,9 @@ impl MainView {
                     "retry-keyring",
                     "Retry",
                     ButtonStyle::Primary,
-                    Some(self.send_click(cx, || Command::Refresh)),
+                    Some(Box::new(cx.listener(|this, _: &ClickEvent, _, cx| {
+                        this.store.read(cx).refresh()
+                    }))),
                 ))),
             AuthState::Starting => {
                 card(p, "Opening your keyring…").child(body_text(p, KEYRING_STARTING_INFO))

@@ -1,10 +1,12 @@
 //! Eloquawk entry point: parses arguments, claims the single instance (or hands a `show` or
 //! `mailto:` request to the running one and exits), starts the worker, wraps the [`Store`] in
-//! a GPUI entity, pumps worker events into it, applies the theme, opens the main window,
+//! a GPUI entity, pumps worker events (and the AI worker's) into it, applies the theme, opens
+//! the main window,
 //! notifies about new mail, opens compose windows for `mailto:` links and, in demo mode, runs
 //! a `--demo-actions` script. Quits when the last window closes, telling the worker to shut
 //! down.
 
+mod ai;
 mod branding;
 mod cli;
 mod config;
@@ -77,21 +79,30 @@ fn main() {
     let mode = if args.demo { Mode::Demo } else { Mode::Google };
     let mut prefs = config::Prefs::load();
     prefs.ephemeral = mode == Mode::Demo;
-    let (sync, events) = if mode == Mode::Demo {
-        match demo::start(&prefs) {
+    // One keyring handle, shared by the sync worker and the AI worker (SPEC 16.4); demo mode
+    // never opens the keyring.
+    let secrets = (mode == Mode::Google).then(secrets::Secrets::from_env);
+    let (sync, events) = match &secrets {
+        None => match demo::start(&prefs) {
             Ok(worker) => worker,
             Err(e) => {
                 eprintln!("eloquawk: could not start the demo worker: {e}");
                 std::process::exit(1);
             }
-        }
-    } else {
-        match sync::start_google(secrets::Secrets::from_env(), &prefs) {
+        },
+        Some(secrets) => match sync::start_google(secrets.clone(), &prefs) {
             Ok(worker) => worker,
             Err(e) => {
                 eprintln!("eloquawk: could not start the sync worker: {e}");
                 std::process::exit(1);
             }
+        },
+    };
+    let (ai_handle, ai_events) = match ai::start(mode, secrets, &prefs) {
+        Ok(worker) => worker,
+        Err(e) => {
+            eprintln!("eloquawk: could not start the AI worker: {e}");
+            std::process::exit(1);
         }
     };
     let script = args.demo_actions.as_deref().map(demo_script::parse_steps);
@@ -105,7 +116,7 @@ fn main() {
             ui::bind_keys(cx);
             cx.set_global(ThemeOverride(theme_override));
             theme::init_ui_font(cx);
-            let store = cx.new(|_| Store::new(sync.clone(), mode, prefs));
+            let store = cx.new(|_| Store::new(sync.clone(), ai_handle.clone(), mode, prefs));
 
             // Signals the first ThreadPage, which starts the demo script.
             let (first_page_tx, first_page_rx) = async_channel::bounded::<()>(1);
@@ -129,6 +140,20 @@ fn main() {
                         if events.is_empty() {
                             eprintln!("eloquawk: applied {count} worker events");
                         }
+                    }
+                })
+                .detach();
+            }
+
+            // AI worker → store.
+            {
+                let store = store.clone();
+                cx.spawn(async move |cx| {
+                    while let Ok(ev) = ai_events.recv().await {
+                        store.update(cx, |s, cx| {
+                            s.apply_ai(ev);
+                            cx.notify();
+                        });
                     }
                 })
                 .detach();
@@ -204,6 +229,7 @@ fn main() {
                     server.shutdown();
                 }
                 sync.send(Command::Shutdown);
+                ai_handle.send(ai::AiCommand::Shutdown);
                 async {}
             })
             .detach();

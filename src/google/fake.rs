@@ -51,6 +51,8 @@ pub struct Reply {
     status: u16,
     headers: Vec<(String, String)>,
     body: String,
+    /// Held back this long before answering.
+    delay: Option<Duration>,
 }
 
 impl Reply {
@@ -58,6 +60,7 @@ impl Reply {
         Self {
             path: None,
             sticky: false,
+            delay: None,
             status,
             headers: vec![("Content-Type".into(), "application/json".into())],
             body: body.into(),
@@ -71,6 +74,12 @@ impl Reply {
 
     pub fn for_path(mut self, path: &str) -> Self {
         self.path = Some(path.into());
+        self
+    }
+
+    /// Holds the reply back for `d` before sending it (a request in flight).
+    pub fn delayed(mut self, d: Duration) -> Self {
+        self.delay = Some(d);
         self
     }
 
@@ -189,6 +198,9 @@ fn receive(stream: &mut TcpStream) -> Option<Recorded> {
 }
 
 fn respond(stream: &mut TcpStream, reply: &Reply) {
+    if let Some(d) = reply.delay {
+        std::thread::sleep(d);
+    }
     let mut out = format!("HTTP/1.1 {} X\r\n", reply.status);
     for (k, v) in &reply.headers {
         out.push_str(&format!("{k}: {v}\r\n"));

@@ -1,0 +1,1 @@
+{"model":"typesafe/jev-1.13-20260917","answers":{"kind":{"type":"choice","choice":"phishing","probabilities":{"phishing":0.99,"legitimate":0.01},"confidence":0.99}},"usage":{"input_tokens":300,"output_tokens":20,"cost":0.0000126},"id":"gen-dec-choice","provider":"TypeSafe"}

@@ -4,7 +4,7 @@
 //! the last selected label id. Saving is an atomic replace, and an `ephemeral` Prefs (demo
 //! mode, tests) never touches the disk.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -27,6 +27,35 @@ pub const REFRESH_SECS_MAX: u64 = 900;
 pub const PAGE_SIZE_MIN: u32 = 10;
 pub const PAGE_SIZE_MAX: u32 = 100;
 
+pub const SPEND_LIMIT_CENTS_MIN: u32 = 10;
+pub const SPEND_LIMIT_CENTS_MAX: u32 = 10_000;
+
+/// The AI message checks (SPEC 16.9). Holds no key and no mail.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AiPrefs {
+    /// The disclosure version each account accepted; an absent account is off.
+    pub accounts: BTreeMap<AccountId, u32>,
+    /// Suggest labels when a message is opened (M17; ignored before it).
+    #[allow(dead_code)] // consumed in M17 by the label suggestions
+    pub suggest_labels: bool,
+    /// Check new inbox mail as it arrives (decision 2: off by default).
+    pub background: bool,
+    /// Checks stop for the session at this much spend, in cents, clamped to 10..=10_000.
+    pub spend_limit_cents: u32,
+}
+
+impl Default for AiPrefs {
+    fn default() -> Self {
+        Self {
+            accounts: BTreeMap::new(),
+            suggest_labels: true,
+            background: false,
+            spend_limit_cents: 100,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Prefs {
@@ -41,6 +70,8 @@ pub struct Prefs {
     /// The account and label id shown last; restored at start.
     pub last_view: Option<(AccountId, String)>,
     pub collapsed_accounts: BTreeSet<AccountId>,
+    /// The AI message checks (M16).
+    pub ai: AiPrefs,
     /// Demo mode and tests: never written to disk.
     #[serde(skip)]
     pub ephemeral: bool,
@@ -57,6 +88,7 @@ impl Default for Prefs {
             page_size: 50,
             last_view: None,
             collapsed_accounts: BTreeSet::new(),
+            ai: AiPrefs::default(),
             ephemeral: false,
         }
     }
@@ -126,6 +158,10 @@ impl Prefs {
     pub fn clamped(mut self) -> Self {
         self.refresh_secs = self.refresh_secs.clamp(REFRESH_SECS_MIN, REFRESH_SECS_MAX);
         self.page_size = self.page_size.clamp(PAGE_SIZE_MIN, PAGE_SIZE_MAX);
+        self.ai.spend_limit_cents = self
+            .ai
+            .spend_limit_cents
+            .clamp(SPEND_LIMIT_CENTS_MIN, SPEND_LIMIT_CENTS_MAX);
         self
     }
 }
@@ -165,6 +201,10 @@ mod tests {
         assert!(p.clock_24h && p.mark_read_on_open && p.notifications);
         assert_eq!((p.refresh_secs, p.page_size), (60, 50));
         assert!(!p.ephemeral);
+        // A settings file from before M16 has no `ai`: checks are off, with the defaults.
+        assert_eq!(p.ai, AiPrefs::default());
+        assert!(p.ai.accounts.is_empty() && !p.ai.background && p.ai.suggest_labels);
+        assert_eq!(p.ai.spend_limit_cents, 100);
     }
 
     #[test]
@@ -180,6 +220,12 @@ mod tests {
             page_size: 25,
             last_view: Some(("you@example.com".into(), "Label_7".into())),
             collapsed_accounts: ["you@work.example".to_string()].into(),
+            ai: AiPrefs {
+                accounts: [("you@example.com".to_string(), 1)].into(),
+                suggest_labels: false,
+                background: true,
+                spend_limit_cents: 250,
+            },
             ephemeral: false,
         };
         p.save_to(&path);
@@ -203,9 +249,19 @@ mod tests {
     fn out_of_range_numbers_are_clamped_on_load() {
         let dir = TempDir::new("clamp");
         let path = dir.0.join("settings.json");
-        std::fs::write(&path, r#"{"refresh_secs":5,"page_size":1000}"#).unwrap();
+        std::fs::write(
+            &path,
+            r#"{"refresh_secs":5,"page_size":1000,"ai":{"spend_limit_cents":1}}"#,
+        )
+        .unwrap();
         let p = Prefs::load_from(&path);
         assert_eq!((p.refresh_secs, p.page_size), (30, 100));
+        assert_eq!(p.ai.spend_limit_cents, SPEND_LIMIT_CENTS_MIN);
+        std::fs::write(&path, r#"{"ai":{"spend_limit_cents":99999}}"#).unwrap();
+        assert_eq!(
+            Prefs::load_from(&path).ai.spend_limit_cents,
+            SPEND_LIMIT_CENTS_MAX
+        );
     }
 
     #[test]

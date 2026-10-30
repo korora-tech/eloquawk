@@ -25,6 +25,7 @@ pub mod text_input;
 pub mod text_layout;
 pub mod theme;
 pub mod thread_list;
+pub mod triage;
 pub mod widgets;
 pub mod windows;
 
