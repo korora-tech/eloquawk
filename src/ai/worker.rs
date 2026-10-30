@@ -19,7 +19,7 @@ use super::jev::{
     DecisionsRequest, DecisionsResponse, Question, THRESHOLDS, validate, verdict_from,
 };
 use super::openrouter::{self, AiEndpoints, AiError, ApiKey, BACKOFF_CAP, Backoff};
-use super::prompt::{TRIAGE_IDS, fit, shrink, triage_request};
+use super::prompt::{fit, label_question_id, shrink};
 use super::{AiCommand, AiEvent, AiHandle, CheckRequest, KeyState, Outcome, Priority};
 use crate::config::Prefs;
 use crate::model::AccountId;
@@ -541,53 +541,111 @@ impl Worker {
                 None => return,
             },
         };
-        let input = fit(job.req.input.clone(), true, &[]).input;
-        let input = if job.shrunk { shrink(input) } else { input };
-        let req = triage_request(&input);
+        let verdict = job.req.verdict;
+        // A 413 retry sends the smallest body, and no labels beside the triage questions.
+        let input = if job.shrunk {
+            shrink(job.req.input.clone())
+        } else {
+            job.req.input.clone()
+        };
+        let candidates = match &job.req.labels {
+            Some(ask) if !(job.shrunk && verdict) => ask.candidates.as_slice(),
+            _ => &[],
+        };
+        let plan = fit(input, verdict, candidates);
+        let first = plan.first_request(verdict);
         self.in_flight = Some(job.id());
-        let result = self
-            .decider
-            .decide(self.key.as_ref(), &req)
-            .and_then(|resp| validate(&resp, &TRIAGE_IDS));
-        // Revocations and newer opens sent meanwhile are handled before the result is used.
+        let result = self.ask(&first);
+        // Revocations and newer opens sent meanwhile are handled before the result is used,
+        // and before a second request carries the same message out again.
         let alive = self.drain();
+        if let Ok(answers) = &result {
+            self.record_usage(answers.cost, true);
+        }
+        let revoked = |w: &Self| job.epoch != w.epoch(&job.req.account) || w.shutdown;
+        let second = match (&result, plan.second_request()) {
+            (Ok(_), Some(req)) if alive && !revoked(self) && self.can_send() => {
+                let r = self.ask(&req);
+                if let Ok(answers) = &r {
+                    self.record_usage(answers.cost, false);
+                }
+                Some(r)
+            }
+            _ => None,
+        };
+        let alive = alive && self.drain();
         self.in_flight = None;
         if !alive {
             self.shutdown = true;
             return;
         }
-        if let Ok(answers) = &result {
-            self.record_usage(answers.cost, true);
-        }
-        if job.epoch != self.epoch(&job.req.account) || self.shutdown {
+        if revoked(self) {
             self.dropped(&job);
             return;
         }
-        match result {
-            Ok(answers) => {
-                let p = |id: &str| answers.probs.get(id).copied().unwrap_or(0.0);
-                let verdict = verdict_from(p("phishing"), p("scam"), p("spam"), &THRESHOLDS);
-                self.cache.insert(
-                    job.id(),
-                    CacheEntry {
-                        verdict: Some(verdict),
-                        labels: None,
-                    },
-                );
-                self.emit(AiEvent::Checked {
-                    thread: job.req.thread.clone(),
-                    message_id: job.req.message_id.clone(),
-                    outcome: Outcome {
-                        verdict: Some(verdict),
-                        labels: None,
-                    },
-                });
-                if self.paused.is_none() && self.spent() >= self.ceiling() {
-                    self.spend_pause();
-                }
-            }
-            Err(e) => self.failed(job, interactive, e),
+        let answers = match result {
+            Ok(answers) => answers,
+            Err(e) => return self.failed(job, interactive, e),
+        };
+        let p = |id: &str| answers.probs.get(id).copied().unwrap_or(0.0);
+        let verdict =
+            verdict.then(|| verdict_from(p("phishing"), p("scam"), p("spam"), &THRESHOLDS));
+        // The labels' answers, merged from both requests; a failed second request leaves a
+        // partial answer (no fingerprint), so the next open asks about labels again.
+        let mut second_error = None;
+        let labels = job
+            .req
+            .labels
+            .as_ref()
+            .filter(|_| !candidates.is_empty())
+            .map(|ask| {
+                let mut probs: Vec<(String, f32)> = Vec::with_capacity(plan.labels_asked());
+                let mut collect = |from: &std::collections::BTreeMap<String, f32>| {
+                    for i in 0..plan.labels_asked() {
+                        if let (Some(p), Some(id)) =
+                            (from.get(&label_question_id(i)), plan.label_id(i))
+                        {
+                            probs.push((id.to_string(), *p));
+                        }
+                    }
+                };
+                collect(&answers.probs);
+                let complete = match &second {
+                    None => true,
+                    Some(Ok(more)) => {
+                        collect(&more.probs);
+                        true
+                    }
+                    Some(Err(e)) => {
+                        second_error = Some(e.clone());
+                        false
+                    }
+                };
+                (complete.then_some(ask.fingerprint), probs)
+            });
+        self.cache.insert(job.id(), CacheEntry { verdict, labels });
+        let entry = self.cache.get(&job.id()).unwrap_or_default();
+        self.emit(AiEvent::Checked {
+            thread: job.req.thread.clone(),
+            message_id: job.req.message_id.clone(),
+            outcome: Outcome {
+                verdict: entry.verdict,
+                labels: entry.labels,
+            },
+        });
+        if let Some(e) = second_error.filter(AiError::pauses) {
+            self.pause_for(e);
+        } else if self.paused.is_none() && self.spent() >= self.ceiling() {
+            self.spend_pause();
         }
+    }
+
+    /// Sends one request and validates that every question it asked was answered.
+    fn ask(&mut self, req: &DecisionsRequest) -> Result<super::jev::Answers, AiError> {
+        let asked: Vec<&str> = req.questions.keys().map(String::as_str).collect();
+        self.decider
+            .decide(self.key.as_ref(), req)
+            .and_then(|resp| validate(&resp, &asked))
     }
 
     /// Puts a job back for another attempt, unless a newer open took the slot.
@@ -601,6 +659,16 @@ impl Worker {
         } else {
             self.queue.push_front(job);
         }
+    }
+
+    /// Enters the pause an error calls for; a 401 also marks the key rejected.
+    fn pause_for(&mut self, e: AiError) {
+        if e == AiError::KeyRejected {
+            self.rejected = true;
+            let hint = self.key.as_ref().map(ApiKey::hint).unwrap_or_default();
+            self.emit(AiEvent::Key(KeyState::Rejected { hint }));
+        }
+        self.pause(e.user_text());
     }
 
     fn failed(&mut self, mut job: Job, interactive: bool, e: AiError) {
@@ -623,12 +691,7 @@ impl Worker {
         }
         if e.pauses() {
             self.dropped(&job);
-            if e == AiError::KeyRejected {
-                self.rejected = true;
-                let hint = self.key.as_ref().map(ApiKey::hint).unwrap_or_default();
-                self.emit(AiEvent::Key(KeyState::Rejected { hint }));
-            }
-            self.pause(e.user_text());
+            self.pause_for(e);
             return;
         }
         if e.retryable() {
@@ -930,6 +993,126 @@ mod tests {
         assert_eq!(r.header("x-openrouter-title").as_deref(), Some("Eloquawk"));
         let body: serde_json::Value = serde_json::from_slice(&r.body).unwrap();
         assert_eq!(body, golden);
+        h.send(AiCommand::Shutdown);
+    }
+
+    /// A 200 answering the triage questions and labels `l0` to `l<n-1>` (label i at 0.9 when
+    /// i is even).
+    fn labels_body(n: usize) -> String {
+        let mut answers = serde_json::Map::new();
+        for id in ["phishing", "scam", "spam"] {
+            answers.insert(id.into(), serde_json::json!({"type": "noul", "noul": 0.02}));
+        }
+        for i in 0..n {
+            let p = if i % 2 == 0 { 0.9 } else { 0.1 };
+            answers.insert(
+                format!("l{i}"),
+                serde_json::json!({"type": "noul", "noul": p}),
+            );
+        }
+        serde_json::json!({"model": "typesafe/jev-1.13-20260917", "answers": answers,
+            "usage": {"input_tokens": 1, "output_tokens": 1, "cost": 0.00002}})
+        .to_string()
+    }
+
+    fn long_labels(n: usize) -> crate::ai::LabelAsk {
+        crate::ai::LabelAsk {
+            fingerprint: 7,
+            candidates: (0..n)
+                .map(|i| crate::ai::LabelCandidate {
+                    id: format!("Label_{i}"),
+                    name: format!("{i:03} {}", "n".repeat(96)),
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn fake_openrouter_split() {
+        let body = labels_body(100);
+        let server = FakeServer::start(vec![
+            Reply::json(200, &body).for_path(DECISIONS),
+            Reply::json(200, &body).for_path(DECISIONS),
+            Reply::json(200, &body).for_path(DECISIONS),
+        ]);
+        let (h, rx) = google(&server);
+        let mut req = request("a@x", "split", Priority::Interactive);
+        req.labels = Some(long_labels(100));
+        h.send(AiCommand::Check(Box::new(req)));
+        let evs = wait_for(&rx, checked("split"));
+        let done: Vec<&AiEvent> = evs
+            .iter()
+            .filter(|e| matches!(e, AiEvent::Checked { .. }))
+            .collect();
+        assert_eq!(done.len(), 1, "one Checked merges both requests");
+        let AiEvent::Checked { outcome, .. } = done[0] else {
+            unreachable!()
+        };
+        assert!(outcome.verdict.is_some());
+        let (fp, probs) = outcome.labels.clone().unwrap();
+        assert_eq!(fp, Some(7));
+        assert_eq!(probs.len(), 100, "all 100 labels asked across both");
+        assert!(probs.contains(&("Label_98".to_string(), 0.9)));
+        assert!(probs.contains(&("Label_99".to_string(), 0.1)));
+        let reqs = server.requests();
+        assert_eq!(reqs.len(), 2, "exactly two requests, back to back");
+        let bodies: Vec<serde_json::Value> = reqs
+            .iter()
+            .map(|r| serde_json::from_slice(&r.body).unwrap())
+            .collect();
+        assert_eq!(bodies[0]["state"], bodies[1]["state"]);
+        assert!(bodies[0]["questions"].get("phishing").is_some());
+        assert!(bodies[1]["questions"].get("phishing").is_none());
+        assert!(bodies[0]["questions"].get("l0").is_some());
+        assert!(bodies[1]["questions"].get("l99").is_some());
+        for (r, b) in reqs.iter().zip(&bodies) {
+            assert!(r.body.len() <= crate::ai::prompt::REQUEST_BUDGET);
+            assert_eq!(
+                b["state"]["label_names_note"],
+                crate::ai::prompt::LABEL_NOTE
+            );
+        }
+        // A changed fingerprint asks labels only: no triage question, the verdict kept.
+        let mut again = request("a@x", "split", Priority::Interactive);
+        again.verdict = false;
+        again.labels = Some(crate::ai::LabelAsk {
+            fingerprint: 8,
+            candidates: long_labels(3).candidates,
+        });
+        h.send(AiCommand::Check(Box::new(again)));
+        let evs = wait_for(&rx, checked("split"));
+        let Some(AiEvent::Checked { outcome, .. }) = evs.last() else {
+            unreachable!()
+        };
+        assert!(outcome.verdict.is_some(), "the cached verdict is kept");
+        assert_eq!(outcome.labels.as_ref().unwrap().0, Some(8));
+        let reqs = server.finish();
+        assert_eq!(reqs.len(), 3);
+        let last: serde_json::Value = serde_json::from_slice(&reqs[2].body).unwrap();
+        assert!(last["questions"].get("phishing").is_none());
+        assert_eq!(last["questions"].as_object().unwrap().len(), 3);
+        h.send(AiCommand::Shutdown);
+    }
+
+    #[test]
+    fn fake_openrouter_split_partial_when_second_fails() {
+        let server = FakeServer::start(vec![
+            Reply::json(200, &labels_body(100)).for_path(DECISIONS),
+            Reply::json(503, r#"{"error":{"code":503,"message":"busy"}}"#).for_path(DECISIONS),
+        ]);
+        let (h, rx) = google(&server);
+        let mut req = request("a@x", "partial", Priority::Interactive);
+        req.labels = Some(long_labels(100));
+        h.send(AiCommand::Check(Box::new(req)));
+        let evs = wait_for(&rx, checked("partial"));
+        let Some(AiEvent::Checked { outcome, .. }) = evs.last() else {
+            unreachable!()
+        };
+        let (fp, probs) = outcome.labels.clone().unwrap();
+        assert_eq!(fp, None, "a partial answer has no fingerprint");
+        assert!(!probs.is_empty() && probs.len() < 100);
+        assert!(outcome.verdict.is_some());
+        assert_eq!(server.finish().len(), 2);
         h.send(AiCommand::Shutdown);
     }
 

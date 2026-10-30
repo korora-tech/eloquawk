@@ -205,4 +205,46 @@ mod tests {
         );
         assert_eq!(verdict_of("p-ai-pause"), Err(AiError::Credits));
     }
+
+    /// The suggestions the offline checker leads to through the real builder, before the
+    /// store's rule that risky mail gets none.
+    fn suggestions_of(id: &str) -> Vec<String> {
+        use crate::ai::jev::select_suggestions;
+        use crate::ai::prompt::{label_candidates, label_question_id};
+        let m = demo_data::generate("2026-10-29T12:00:00Z".parse().unwrap());
+        let detail = m.threads.into_iter().find(|t| t.0.key.id == id).unwrap().1;
+        let own = vec![PERSONAL.to_string(), WORK.to_string()];
+        let msg = target(&detail, &own).unwrap();
+        let candidates = label_candidates(&demo_data::label_defs(PERSONAL));
+        let plan = fit(
+            AiInput::from_message(msg, &Redact::for_message(msg, &own)),
+            true,
+            &candidates,
+        );
+        let fake = FakeDecider {
+            delay: Duration::ZERO,
+        };
+        let resp = fake.decide(&plan.first_request(true)).unwrap();
+        let probs: Vec<(String, f32)> = (0..plan.labels_asked())
+            .filter_map(|i| {
+                let a = resp.answers.get(&label_question_id(i))?;
+                Some((plan.label_id(i)?.to_string(), a.noul? as f32))
+            })
+            .collect();
+        select_suggestions(&probs, &candidates, &detail.label_ids)
+            .into_iter()
+            .map(|s| s.name)
+            .collect()
+    }
+
+    #[test]
+    fn demo_messages_get_their_expected_suggestions() {
+        assert_eq!(suggestions_of("p-ai-order"), ["Receipts"]);
+        assert_eq!(suggestions_of("p-ai-trip"), ["Travel"]);
+        assert!(suggestions_of("p-cafe").is_empty());
+        // Already filed: the render-time filter leaves nothing to suggest.
+        assert!(suggestions_of("p-receipt").is_empty());
+        // The crafted notice steers the checker towards Receipts; the store hides it.
+        assert_eq!(suggestions_of("p-ai-notice"), ["Receipts"]);
+    }
 }

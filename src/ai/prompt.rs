@@ -47,7 +47,6 @@ pub const MAX_LABELS: usize = 100;
 #[allow(dead_code)] // consumed by the store's label suggestions (M17)
 const LABEL_NAME_CHARS: usize = 100;
 /// At most this many requests per check: the triage one and one more for labels.
-#[allow(dead_code)] // consumed by the worker's label questions (M17)
 pub const MAX_REQUESTS_PER_CHECK: usize = 2;
 /// Even the worst-case message still asks about this many labels in total.
 #[cfg(test)]
@@ -98,6 +97,7 @@ pub const TRIAGE: [(&str, &str, &str, &str); 3] = [
 ];
 
 /// The triage question ids, in request order.
+#[cfg(test)]
 pub const TRIAGE_IDS: [&str; 3] = ["phishing", "scam", "spam"];
 
 /// The three triage questions, each ending with [`PROVENANCE`].
@@ -572,6 +572,7 @@ pub fn state_json(i: &AiInput) -> serde_json::Value {
 }
 
 /// The triage request for an input.
+#[cfg(test)]
 pub fn triage_request(input: &AiInput) -> DecisionsRequest {
     request(input, true, &[], 0)
 }
@@ -681,14 +682,12 @@ pub fn request(
 /// What a check sends (SPEC 16.6.6): the fitted input, the labels asked in the first request
 /// (beside the triage questions, when asked) and those moved to a second request.
 #[derive(Clone)]
-#[allow(dead_code)] // consumed by the worker's label questions (M17)
 pub struct Plan {
     pub input: AiInput,
     pub first: Vec<LabelCandidate>,
     pub second: Vec<LabelCandidate>,
 }
 
-#[allow(dead_code)] // consumed by the worker's label questions (M17)
 impl Plan {
     /// The first request.
     pub fn first_request(&self, triage: bool) -> DecisionsRequest {
@@ -775,6 +774,8 @@ pub fn fit(mut input: AiInput, triage: bool, labels: &[LabelCandidate]) -> Plan 
         size(&input, &first, triage) <= REQUEST_BUDGET,
         "the first request always fits"
     );
+    let requests = 1 + usize::from(!second.is_empty());
+    debug_assert!(requests <= MAX_REQUESTS_PER_CHECK);
     Plan {
         input,
         first,
