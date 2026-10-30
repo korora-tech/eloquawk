@@ -156,6 +156,8 @@ impl Demo {
                 self.emit(SyncEvent::Synced(Timestamp::now()));
             }
             Command::DismissProblems => self.emit(SyncEvent::Problem(None)),
+            // The demo has no poll; a new page size applies to the next page it serves.
+            Command::Tune { page_size, .. } => self.page_size = page_size.max(1) as usize,
             Command::Want { view, more } => {
                 self.want = Some(view.clone());
                 if !more {

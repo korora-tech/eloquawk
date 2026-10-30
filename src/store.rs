@@ -419,11 +419,20 @@ impl Store {
 
     /// Changes preferences from Settings: applies `f`, pulls numbers back into range and
     /// saves, except when the prefs are ephemeral (demo mode, tests).
+    /// A new refresh interval or page size reaches the worker straight away.
     pub fn change_prefs(&mut self, f: impl FnOnce(&mut Prefs)) {
+        let before = (self.prefs.refresh_secs, self.prefs.page_size);
         f(&mut self.prefs);
         self.prefs = std::mem::take(&mut self.prefs).clamped();
         if !self.prefs.ephemeral {
             self.prefs.save();
+        }
+        let (refresh_secs, page_size) = (self.prefs.refresh_secs, self.prefs.page_size);
+        if (refresh_secs, page_size) != before {
+            self.send_command(Command::Tune {
+                refresh_secs,
+                page_size,
+            });
         }
     }
 
@@ -2406,13 +2415,23 @@ mod tests {
 
     #[test]
     fn settings_changes_prefs_in_range_and_stays_ephemeral() {
-        let (mut s, _rx) = store();
+        let (mut s, rx) = store();
         s.change_prefs(|p| {
             p.clock_24h = false;
             p.refresh_secs = 5;
         });
         assert!(!s.prefs.clock_24h);
         assert_eq!(s.prefs.refresh_secs, crate::config::REFRESH_SECS_MIN);
+        // The worker hears about the new interval, clamped.
+        assert!(matches!(
+            drain(&rx).as_slice(),
+            [Command::Tune { refresh_secs, .. }] if *refresh_secs == crate::config::REFRESH_SECS_MIN
+        ));
+        s.change_prefs(|p| p.clock_24h = true);
+        assert!(
+            drain(&rx).is_empty(),
+            "other prefs do not retune the worker"
+        );
         // Ephemeral prefs (demo, tests) stay ephemeral, so `save` can never write them.
         assert!(s.prefs.ephemeral);
     }

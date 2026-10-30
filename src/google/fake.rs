@@ -2,7 +2,9 @@
 //! loopback test in `google/api.rs`. It answers connections in order with the scripted
 //! replies (`Connection: close`, so ureq opens a new connection per request) and records each
 //! request. A reply may be chosen by path with [`Reply::for_path`]; unmatched requests get a
-//! 599 so a test fails loudly instead of hanging.
+//! 599 so a test fails loudly instead of hanging. A [`Reply::sticky`] reply answers its path
+//! any number of times, after the path's one-off replies are used up; it serves requests whose
+//! count depends on timing (a poll), and the server stops once every one-off reply is used.
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -44,6 +46,8 @@ impl Recorded {
 pub struct Reply {
     /// Only answer a request to this path (the first unused matching reply wins).
     path: Option<String>,
+    /// Never used up.
+    sticky: bool,
     status: u16,
     headers: Vec<(String, String)>,
     body: String,
@@ -53,6 +57,7 @@ impl Reply {
     pub fn json(status: u16, body: &str) -> Self {
         Self {
             path: None,
+            sticky: false,
             status,
             headers: vec![("Content-Type".into(), "application/json".into())],
             body: body.into(),
@@ -66,6 +71,12 @@ impl Reply {
 
     pub fn for_path(mut self, path: &str) -> Self {
         self.path = Some(path.into());
+        self
+    }
+
+    /// Answers its path every time it has no one-off reply left.
+    pub fn sticky(mut self) -> Self {
+        self.sticky = true;
         self
     }
 }
@@ -112,7 +123,7 @@ impl FakeServer {
 
 fn serve(listener: TcpListener, mut replies: Vec<Reply>, log: Arc<Mutex<Vec<Recorded>>>) {
     let mut idle_since = Instant::now();
-    while !replies.is_empty() && idle_since.elapsed() < Duration::from_secs(10) {
+    while replies.iter().any(|r| !r.sticky) && idle_since.elapsed() < Duration::from_secs(10) {
         let mut stream = match listener.accept() {
             Ok((s, _)) => s,
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -127,11 +138,15 @@ fn serve(listener: TcpListener, mut replies: Vec<Reply>, log: Arc<Mutex<Vec<Reco
         let Some(req) = receive(&mut stream) else {
             continue;
         };
+        let for_path =
+            |r: &Reply, sticky: bool| r.sticky == sticky && r.path.as_deref() == Some(req.path());
         let pick = replies
             .iter()
-            .position(|r| r.path.as_deref() == Some(req.path()))
-            .or_else(|| replies.iter().position(|r| r.path.is_none()));
+            .position(|r| for_path(r, false))
+            .or_else(|| replies.iter().position(|r| for_path(r, true)))
+            .or_else(|| replies.iter().position(|r| r.path.is_none() && !r.sticky));
         let reply = match pick {
+            Some(i) if replies[i].sticky => replies[i].clone(),
             Some(i) => replies.remove(i),
             None => Reply::json(599, r#"{"error":{"message":"unscripted request"}}"#),
         };

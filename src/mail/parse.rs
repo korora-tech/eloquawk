@@ -44,7 +44,8 @@ pub fn internal_date(value: Option<&str>) -> Option<Timestamp> {
     Timestamp::from_millisecond(ms).ok()
 }
 
-fn parse_u64(s: &str) -> u64 {
+/// A Gmail numeric string (id, `historyId`); anything unparseable is 0.
+pub fn parse_u64(s: &str) -> u64 {
     s.trim().parse().unwrap_or(0)
 }
 
@@ -244,7 +245,6 @@ fn label_union(dto: &ThreadDto) -> BTreeSet<String> {
 ///
 /// `has_attachments` is true when any message has an attachment part (full format) or its
 /// payload is `multipart/mixed` (the metadata heuristic, SPEC 15 item 2).
-#[allow(dead_code)] // consumed in M10
 pub fn thread_summary(account: &AccountId, dto: &ThreadDto) -> Option<ThreadSummary> {
     let last = dto.messages.last()?;
     let dates: Vec<Timestamp> = dto
@@ -294,7 +294,6 @@ pub fn thread_summary(account: &AccountId, dto: &ThreadDto) -> Option<ThreadSumm
 }
 
 /// Converts a `format=full` thread into the reader's detail.
-#[allow(dead_code)] // consumed in M10
 pub fn thread_detail(account: &AccountId, dto: &ThreadDto) -> ThreadDetail {
     ThreadDetail {
         key: ThreadKey::new(account.clone(), dto.id.clone()),
@@ -313,7 +312,6 @@ fn parse_color(s: Option<&str>) -> Option<u32> {
 }
 
 /// Converts a Gmail label. Counts absent from the DTO (as in `labels.list`) are 0.
-#[allow(dead_code)] // consumed in M10
 pub fn label(account: &AccountId, dto: &LabelDto) -> Label {
     let color = dto.color.as_ref().and_then(|c| {
         Some((

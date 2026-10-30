@@ -63,7 +63,7 @@ fn main() {
             }
         }
     } else {
-        match sync::start_google(secrets::Secrets::from_env()) {
+        match sync::start_google(secrets::Secrets::from_env(), &prefs) {
             Ok(worker) => worker,
             Err(e) => {
                 eprintln!("eloquawk: could not start the sync worker: {e}");

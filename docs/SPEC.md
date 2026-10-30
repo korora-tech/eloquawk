@@ -346,6 +346,7 @@ pub enum Command {                                   // NOT Debug
     ClearClient, AddAccount, CancelSignIn, RemoveAccount(AccountId),
     Refresh,                                         // also retries a locked keyring
     DismissProblems,
+    Tune { refresh_secs: u64, page_size: u32 },      // M10: sync prefs changed in Settings
     /// The view the UI is showing; `more` asks for the next page.
     Want { view: ViewKey, more: bool },
     OpenThread(ThreadKey),
@@ -579,8 +580,10 @@ The loop runs like this:
    - queue `InitialSync(account)` if `history_id.is_none() || !synced_once`, otherwise
      `History(account)`;
    - queue `FetchMeta` for any ids in `missing` (skeleton rows left by a failed chunk).
-   Then set the next poll for `prefs.refresh_secs` later. The worker receives that value at
-   start and again through `Refresh` / `SaveClient`. The demo ignores it.
+   Then set the next poll for `prefs.refresh_secs` later. The worker receives that value
+   (and `page_size`) at start and again through `Command::Tune`, which the Store sends
+   whenever Settings changes either. The demo ignores the interval and applies the page size.
+   (M10 note: this said "through `Refresh` / `SaveClient`", which carry no prefs.)
 6. Only one HTTP request is ever in flight. This avoids Gmail's "too many concurrent requests".
 
 `Busy(true)` is emitted when a `ListView`, `InitialSync` or `History` job starts with the
@@ -1772,6 +1775,36 @@ milestone are welcome. **No trailers.** Push to main after each commit.
   - `fake_gmail_read_path` passes.
   - The live read steps of 12.4 (sign in, inbox lists, open a thread) are done if a client is
     available; otherwise marked not performed.
+
+- **M10 notes:**
+  - `Command::Tune { refresh_secs, page_size }` is new (section 5, 7.2 step 5);
+    `sync::start_google` takes `&Prefs`. The durations (poll, backoff base 5 s, cap 300 s,
+    jitter below 1 s) live in a private `Tuning` so tests shrink them.
+  - The queue is two `VecDeque`s (interactive, background) rather than one with two lanes.
+    `FetchMeta` chunks queued by a listing go to the *front* of the background lane, so the
+    rows someone is looking at fill in before label counts.
+  - A retryable failure (rate limit, network, 5xx, decode, quota) of a `FetchMeta`, `Labels`
+    or `ListView` job parks the unfinished part of that job in the account's `deferred`, so a
+    429 defers the chunk rather than losing it. `InitialSync` and `History` are not parked:
+    the poll queues them again (7.3). A non-retryable `ListView` failure (a search Gmail
+    refuses) answers with an empty page so the list stops loading; the reason is in the
+    banner. The first success after a backoff clears the account's problem as well as
+    `"network"`, so a rate limit that passed does not stay in the banner.
+  - `AccountState` keeps the last labels and counts, so the full `Labels` list (which has no
+    counts) is emitted with the previous counts instead of zeros. Counts are fetched for the
+    system labels of section 4.1's table and every user label that is not hidden.
+  - A thread that 404s during `FetchMeta` is emitted as `ThreadsGone`. `OpenThread` also
+    refreshes the thread's summary (and so `has_attachments`) and emits `ThreadsUpdated`
+    when it changed.
+  - Until M11, the `History` job is an interim round: `profile`, and only if its history id
+    moved, a `Refresh` re-list of page 1 of INBOX and the shown view (changed threads are
+    refetched by their list `historyId`) plus INBOX, SPAM and DRAFT counts. It never emits
+    `NewMail`. `Refresh` queues `InitialSync` for every account after resetting backoff; a
+    repeat initial sync merges with `PageMode::Refresh` instead of `Replace`.
+  - The fake server gains `Reply::sticky()` for requests whose count depends on timing (the
+    poll's `profile`); it stops once every one-off reply is used.
+  - Live read steps of 12.4 were not performed by the implementing agent; they are left for
+    the user.
 
 ### M11: Gmail incremental sync, mutations and send
 - **Files:** `sync.rs` (`History`, `collect_changes`, pending sets and `Refetch`, `NewMail`,

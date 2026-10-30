@@ -1,7 +1,8 @@
 //! Gmail API DTOs (serde) and the pure query builders for its list endpoints (SPEC 6.2).
 //!
-//! [`profile`] is the first endpoint function (M9); the rest arrive with the sync worker
-//! (M10, M11). Every endpoint takes the [`Endpoints`] so tests can redirect it. Ids,
+//! The read endpoints ([`profile`], [`labels`], [`label`], [`threads`], [`thread_meta`],
+//! [`thread_full`]) serve the sync worker since M10; the write endpoints arrive in M11. Every
+//! endpoint takes the [`Endpoints`] so tests can redirect it. Ids,
 //! `historyId` and `internalDate` are JSON strings; `mail::parse` turns them into numbers and
 //! `model` types. Every array is `#[serde(default)]` because Gmail omits empty ones.
 //!
@@ -21,19 +22,11 @@ use crate::model::ViewKind;
 #[serde(rename_all = "camelCase")]
 pub struct Profile {
     pub email_address: String,
-    #[allow(dead_code)] // consumed in M10
     #[serde(default)]
     pub history_id: String,
-    #[allow(dead_code)] // consumed in M10
-    #[serde(default)]
-    pub messages_total: Option<u64>,
-    #[allow(dead_code)] // consumed in M10
-    #[serde(default)]
-    pub threads_total: Option<u64>,
 }
 
 /// `GET /labels`.
-#[allow(dead_code)] // consumed in M10
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LabelList {
@@ -71,8 +64,8 @@ pub struct LabelColor {
     pub background_color: Option<String>,
 }
 
-/// `GET /threads`.
-#[allow(dead_code)] // consumed in M10
+/// `GET /threads`. The list's snippets are not kept: the summary comes from the metadata
+/// fetch, which has the same snippet.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ThreadList {
@@ -80,17 +73,12 @@ pub struct ThreadList {
     pub threads: Vec<ThreadRef>,
     #[serde(default)]
     pub next_page_token: Option<String>,
-    #[serde(default)]
-    pub result_size_estimate: Option<u64>,
 }
 
-#[allow(dead_code)] // consumed in M10
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ThreadRef {
     pub id: String,
-    #[serde(default)]
-    pub snippet: String,
     #[serde(default)]
     pub history_id: String,
 }
@@ -331,8 +319,22 @@ impl fmt::Debug for AttachmentBody {
     }
 }
 
-/// Query parameters for `GET /threads`. `Label(id)` sets `labelIds` (plus
-/// `includeSpamTrash=true` for TRASH and SPAM), `AllMail` sets neither, `Search(q)` sets `q`.
+/// The size assumed for a full thread when scaling its timeout (SPEC 6.1).
+const FULL_THREAD_BYTES: u64 = 2 * 1024 * 1024;
+
+/// Percent-encodes one path segment (an id), so no id can change the path.
+fn segment(id: &str) -> String {
+    let mut out = String::with_capacity(id.len());
+    for b in id.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
+            out.push(char::from(b));
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
 /// `GET /profile`: the account's address and current history id (1 unit).
 pub fn profile(agent: &ureq::Agent, ep: &Endpoints, token: &str) -> Result<Profile, ApiError> {
     api::get(
@@ -344,7 +346,86 @@ pub fn profile(agent: &ureq::Agent, ep: &Endpoints, token: &str) -> Result<Profi
     )
 }
 
-#[allow(dead_code)] // consumed in M10
+/// `GET /labels`: every label, without counts (1 unit).
+pub fn labels(agent: &ureq::Agent, ep: &Endpoints, token: &str) -> Result<LabelList, ApiError> {
+    api::get(
+        agent,
+        token,
+        &format!("{}/labels", ep.base),
+        &[],
+        Limits::default(),
+    )
+}
+
+/// `GET /labels/{id}`: one label with its counts (1 unit).
+pub fn label(
+    agent: &ureq::Agent,
+    ep: &Endpoints,
+    token: &str,
+    id: &str,
+) -> Result<LabelDto, ApiError> {
+    api::get(
+        agent,
+        token,
+        &format!("{}/labels/{}", ep.base, segment(id)),
+        &[],
+        Limits::default(),
+    )
+}
+
+/// `GET /threads`: one page of a view (10 units).
+pub fn threads(
+    agent: &ureq::Agent,
+    ep: &Endpoints,
+    token: &str,
+    view: &ViewKind,
+    page_token: Option<&str>,
+    max: u32,
+) -> Result<ThreadList, ApiError> {
+    api::get(
+        agent,
+        token,
+        &format!("{}/threads", ep.base),
+        &threads_query(view, page_token, max),
+        Limits::default(),
+    )
+}
+
+/// `GET /threads/{id}?format=metadata`: the headers a list row needs (10 units).
+pub fn thread_meta(
+    agent: &ureq::Agent,
+    ep: &Endpoints,
+    token: &str,
+    id: &str,
+) -> Result<ThreadDto, ApiError> {
+    api::get(
+        agent,
+        token,
+        &format!("{}/threads/{}", ep.base, segment(id)),
+        &thread_meta_query(),
+        Limits::default(),
+    )
+}
+
+/// `GET /threads/{id}?format=full`: every message with its bodies (10 units), with the large
+/// body limit and a timeout scaled for 2 MiB.
+pub fn thread_full(
+    agent: &ureq::Agent,
+    ep: &Endpoints,
+    token: &str,
+    id: &str,
+) -> Result<ThreadDto, ApiError> {
+    api::get(
+        agent,
+        token,
+        &format!("{}/threads/{}", ep.base, segment(id)),
+        &[("format", "full".to_string())],
+        Limits::large(FULL_THREAD_BYTES),
+    )
+}
+
+/// Query parameters for `GET /threads`. `Label(id)` sets `labelIds` (plus
+/// `includeSpamTrash=true` for TRASH and SPAM), `AllMail` sets neither, `Search(q)` sets `q`.
 pub fn threads_query(
     view: &ViewKind,
     page_token: Option<&str>,
@@ -369,7 +450,6 @@ pub fn threads_query(
 }
 
 /// Query parameters for `GET /threads/{id}?format=metadata`.
-#[allow(dead_code)] // consumed in M10
 pub fn thread_meta_query() -> Vec<(&'static str, String)> {
     let mut q = vec![("format", "metadata".to_string())];
     for h in ["From", "To", "Cc", "Subject", "Date"] {
@@ -554,6 +634,13 @@ mod tests {
         let search = threads_query(&ViewKind::Search("from:bob".into()), None, 50);
         assert!(has(&search, "q", "from:bob"));
         assert!(!search.iter().any(|(k, _)| *k == "labelIds"));
+    }
+
+    #[test]
+    fn ids_cannot_escape_their_path_segment() {
+        assert_eq!(segment("18c0a1b2c3d4e5f6"), "18c0a1b2c3d4e5f6");
+        assert_eq!(segment("Label_1"), "Label_1");
+        assert_eq!(segment("../x?y=1 z"), "..%2Fx%3Fy%3D1%20z");
     }
 
     #[test]

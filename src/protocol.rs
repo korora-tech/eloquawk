@@ -40,6 +40,12 @@ pub enum Command {
     Refresh,
     /// The user dismissed the banner, including sticky problems.
     DismissProblems,
+    /// The sync preferences changed in Settings: the poll interval and the page size. The
+    /// worker gets both at start too. M10 addition (SPEC 5).
+    Tune {
+        refresh_secs: u64,
+        page_size: u32,
+    },
     /// The view the UI is showing; `more` asks for the next page.
     Want {
         view: ViewKey,
@@ -124,7 +130,6 @@ pub enum SyncEvent {
     Accounts(Vec<AccountId>),
     /// A browser sign-in is waiting (`Some(url)`) or not.
     SigningIn(Option<String>),
-    #[allow(dead_code)] // consumed in M10
     Busy(bool),
     Synced(Timestamp),
     /// A persistent problem for the banner; `None` clears it.
@@ -153,7 +158,6 @@ pub enum SyncEvent {
     },
     /// Fresh summaries for threads anywhere (history sync, post-mutation). Upsert only.
     ThreadsUpdated(Vec<ThreadSummary>),
-    #[allow(dead_code)] // consumed in M11
     ThreadsGone {
         account: AccountId,
         ids: Vec<String>,

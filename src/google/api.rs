@@ -172,7 +172,6 @@ impl Default for Limits {
 impl Limits {
     /// Sends, attachments and full fetches: 30 s plus 1 s per 100 KiB of `expected_bytes`,
     /// capped at 10 minutes, with the large body limit.
-    #[allow(dead_code)] // consumed in M10
     pub fn large(expected_bytes: u64) -> Self {
         Self {
             timeout: scaled_timeout(expected_bytes),
