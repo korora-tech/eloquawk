@@ -3192,7 +3192,9 @@ this rate.
   - In the Google worker, `Prefetch` queues a new background-lane `Job::Prefetch(ThreadKey)`,
     coalesced like the others and deferred like them while the account backs off. It calls
     `thread_full`, emits `SyncEvent::ThreadDetail` and never marks the thread read.
-  - On failure it emits nothing (no `ThreadFailed`), so the reader is unaffected. The
+  - On failure it emits nothing (no `ThreadFailed`), so the reader is unaffected. The account
+    still backs off as for any failed call, but the failure is not added to the sync problems
+    banner (`failed_as(.., report: false)`, after the M16 review). The
     `prefetching` entry is dropped once it is older than 5 minutes (checked on every
     `Synced`). It is **not** dropped on the next `Synced` as such: the demo emits `Synced`
     straight after `NewMail`, before it has answered the `Prefetch`.

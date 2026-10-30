@@ -1655,6 +1655,12 @@ impl Worker {
     /// problem but the sync carries on; an oversized or missing item is reported by the
     /// caller.
     fn failed(&mut self, email: &str, error: &CallError) -> bool {
+        self.failed_as(email, error, true)
+    }
+
+    /// [`Self::failed`], with `report` false for a background AI prefetch (SPEC 16.11): the
+    /// account still backs off, but nothing reaches the problems banner.
+    fn failed_as(&mut self, email: &str, error: &CallError, report: bool) -> bool {
         let now = Instant::now();
         let jitter = self.tuning.jitter();
         let tuning = self.tuning;
@@ -1710,8 +1716,10 @@ impl Worker {
             }
             CallError::Api(e) => (email.to_string(), format!("{email}: {e}"), false),
         };
-        self.problems.insert(key, message);
-        self.report();
+        if report {
+            self.problems.insert(key, message);
+            self.report();
+        }
         retry
     }
 
@@ -2062,7 +2070,7 @@ impl Worker {
             }
             Err(e) => {
                 let error = e.reader_message();
-                self.failed(&email, &e);
+                self.failed_as(&email, &e, !prefetch);
                 if !prefetch {
                     self.emit(SyncEvent::ThreadFailed { key, error });
                 }
@@ -3051,6 +3059,22 @@ mod tests {
         assert!(w.failed("me@example.com", &CallError::Api(e)));
         assert!(wait(&w) < Duration::from_secs(3));
         assert!(w.problems["me@example.com"].contains("slow down"));
+    }
+
+    #[test]
+    fn a_failed_prefetch_backs_off_without_a_visible_problem() {
+        let (mut w, _rx) = worker(Secrets::memory(), nowhere());
+        signed_in(&mut w, "me@example.com", "rt");
+        let e = CallError::Api(ApiError::Http {
+            status: 503,
+            body: "Backend Error".into(),
+        });
+        assert!(w.failed_as("me@example.com", &e, false));
+        assert_eq!(w.accounts["me@example.com"].backoff.attempts, 1);
+        assert!(w.problems.is_empty());
+        // The same failure from an open is reported.
+        assert!(w.failed("me@example.com", &e));
+        assert!(w.problems["me@example.com"].contains("503"));
     }
 
     #[test]
