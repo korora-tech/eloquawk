@@ -3465,9 +3465,10 @@ New `you@example.com` INBOX threads in `personal_specials`. **Ages:** `p-ai-phis
 before the next generic thread (about 242), so the `triage-list` shot shows their badges on the
 first screen (about 10 rows of `ROW_H` 68 at 820 px). Rows above `p-news`, including `p-cafe`,
 `p-fail` and `p-code`, do not move; no existing script or test indexes a row below `p-news`
-(only `open:0` and the parser's `open:3`). The other new threads are 2 to 4 days old. The
-personal count (122 today) becomes 130, still inside the `mailbox_is_deterministic_and_sized`
-bound of 110..=130:
+(only `open:0` and the parser's `open:3`). The other new threads are 2 to 4 days old. **M16
+note:** the personal count was 123 before M16, not 122, so it becomes 131; the
+`mailbox_is_deterministic_and_sized` bound widens to 110..=135 rather than dropping a generic
+thread (which would reshuffle the seeded generator's later threads in both accounts):
 
 | Id | Subject | Sender | Signals | Expected |
 |---|---|---|---|---|
@@ -3573,7 +3574,7 @@ Mail sync is never affected by any of this.
 | `store` | Tests of the key, pause and opt-in conditions build the Store with `for_tests_with_ai(.., Mode::Google, ephemeral prefs)` (16.10). `ai_checks_only_when_opted_in_with_key`, `ai_disclosure_version_bump_turns_off` (and sends `ForgetAccount` on start for a stale version), `ai_never_checks_self_sent_or_draft`, `ai_fast_open_sends_latest_only` (the worker side is covered in the worker tests), `ai_results_dropped_after_opt_out`, `ai_spam_level_hidden_in_spam_view`, `local_caution_and_guard_without_opt_in` (decision 5: an account with no consent and no key shows the caution and arms the guard, and sends no `Check`), `consent_kept_when_accounts_event_drops_an_account` (pruned only by `RemoveAccount`), `first_reload_after_auth_leaves_starting`, `refresh_also_reloads_the_key`, `spend_limit_change_reaches_the_worker`, `apply_suggestion_is_undoable_and_hides_chip` (and sends no new `Check`), `label_rename_reasks_labels_only` (`verdict: false`), `danger_message_has_no_suggestions`, `dropped_clears_checking_and_reopen_rechecks`, `paused_clears_checking`, `ai_rev_bumps_on_prefs_key_and_pause`, `background_prefetch_respects_hourly_cap`, `prefetch_detail_checked_but_not_cached` (not in `details`, sends `Check(Background)`), `prefetch_survives_the_synced_after_new_mail`, `background_off_drops_pending_prefetch` (turning `background` off clears `prefetching`, and a detail that then lands sends no `Check`), `prefetch_rechecks_consent_on_arrival` (opt-out, key loss or a pause between `Prefetch` and the detail sends no `Check`), `for_tests_sends_no_prefetch` (`Store::for_tests` has no opt-in, so `NewMail` sends no `Command::Prefetch`), `late_open_detail_not_checked_in_background`, `no_prefetch_without_key_or_while_paused`, `key_removed_clears_results`. |
 | `secrets` | OpenRouter key round trip and clear in `MemoryStore`, independent of the client and tokens; an unparseable stored key is `Corrupt` and the error does not quote it; seeding with `openrouter_key`. |
 | `config` | `AiPrefs` round trip through `save_to` / `load_from`; a settings file without `ai` loads with the defaults; `spend_limit_cents` is clamped. |
-| `demo_data` | The new threads exist with their signals, and `p-ai-phish` has its Reply-To; `p-news` has a mismatched `signals.links` entry; the INBOX rows down to `p-news` are unchanged (`p-cafe` newest, as `newest_inbox_thread_is_unread` already checks) and `p-ai-phish`, `p-ai-scam` and `p-ai-spam` are the three rows straight after `p-news`, within the first 10; the personal count stays within 110..=130. |
+| `demo_data` | The new threads exist with their signals, and `p-ai-phish` has its Reply-To; `p-news` has a mismatched `signals.links` entry; the INBOX rows down to `p-news` are unchanged (`p-cafe` newest, as `newest_inbox_thread_is_unread` already checks) and `p-ai-phish`, `p-ai-scam` and `p-ai-spam` are the three rows straight after `p-news`, within the first 10; the personal count stays within 110..=135 (M16 note in 16.13). |
 
 **Fake OpenRouter server** (`ai::worker::tests`). It reuses the loopback harness of 12.2,
 `crate::google::fake::{FakeServer, Reply}`, which gains `Reply::delayed(Duration)` (the reply is

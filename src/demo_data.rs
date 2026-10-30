@@ -9,10 +9,11 @@ use std::collections::BTreeSet;
 
 use jiff::{SignedDuration, Timestamp};
 
-use crate::mail::{address, html};
+use crate::google::gmail::Header;
+use crate::mail::{address, auth, html};
 use crate::model::{
-    AccountId, Address, Attachment, BodySource, Label, LabelKind, Message, ThreadDetail, ThreadKey,
-    ThreadSummary, labels,
+    AccountId, Address, Attachment, BodySource, Label, LabelKind, Message, MessageSignals,
+    ThreadDetail, ThreadKey, ThreadSummary, labels,
 };
 
 pub const PERSONAL: &str = "you@example.com";
@@ -277,6 +278,9 @@ pub struct Draft {
     pub minutes_ago: i64,
     pub unread: bool,
     pub attachments: Vec<Attachment>,
+    /// What the client "measured" about the message (SPEC 16.13).
+    pub signals: MessageSignals,
+    pub reply_to: Vec<Address>,
 }
 
 impl Draft {
@@ -291,7 +295,41 @@ impl Draft {
             minutes_ago,
             unread: false,
             attachments: vec![],
+            signals: MessageSignals::default(),
+            reply_to: vec![],
         }
+    }
+
+    /// An HTML message: the body is converted as Gmail's would be, and its links feed the
+    /// signals, which `headers` complete.
+    fn html(
+        from: Address,
+        to: Address,
+        html: &str,
+        headers: &[(&str, &str)],
+        minutes_ago: i64,
+    ) -> Self {
+        let converted = html::html_to_text(html);
+        let (body, truncated, links) = match converted {
+            Some(c) => (c.text, c.truncated, c.links),
+            None => (String::new(), true, vec![]),
+        };
+        let mut d = Self::new(from, to, body, minutes_ago);
+        d.source = BodySource::Html;
+        d.truncated = truncated;
+        d.signals = auth::signals(&demo_headers(headers), &links);
+        d
+    }
+
+    /// Sets the signals from demo headers and the plain body's links.
+    fn signals(mut self, headers: &[(&str, &str)]) -> Self {
+        self.signals = auth::signals(&demo_headers(headers), &auth::plain_links(&self.body));
+        self
+    }
+
+    fn reply_to(mut self, to: Address) -> Self {
+        self.reply_to.push(to);
+        self
     }
 
     fn unread(mut self) -> Self {
@@ -352,7 +390,7 @@ pub fn build_thread(
             to: d.to,
             cc: d.cc,
             bcc: vec![],
-            reply_to: vec![],
+            reply_to: d.reply_to,
             date: now - SignedDuration::from_mins(d.minutes_ago),
             subject,
             message_id: Some(message_id.clone()),
@@ -362,7 +400,7 @@ pub fn build_thread(
             body: d.body,
             body_source: d.source,
             body_truncated: d.truncated,
-            signals: Default::default(),
+            signals: d.signals,
             attachments: d.attachments,
         });
         references.push(message_id);
@@ -437,10 +475,21 @@ really go, like this one: <a href="https://phish.example/login">https://bank.exa
 <a href="https://example.org/unsubscribe">Unsubscribe</a></p>
 </body></html>"#;
 
+/// Header lines as Gmail would list them, for a demo message's signals.
+fn demo_headers(headers: &[(&str, &str)]) -> Vec<Header> {
+    headers
+        .iter()
+        .map(|(name, value)| Header {
+            name: name.to_string(),
+            value: value.to_string(),
+        })
+        .collect()
+}
+
 fn newsletter(you: &Address, now_minutes: i64) -> Draft {
-    let (body, truncated) = match html::html_to_text(NEWSLETTER_HTML) {
-        Some(c) => (c.text, c.truncated),
-        None => ("The Weekly Byte, issue 42".to_string(), true),
+    let (body, truncated, links) = match html::html_to_text(NEWSLETTER_HTML) {
+        Some(c) => (c.text, c.truncated, c.links),
+        None => ("The Weekly Byte, issue 42".to_string(), true, vec![]),
     };
     let mut d = Draft::new(
         addr("The Weekly Byte", "news@weeklybyte.example"),
@@ -451,7 +500,175 @@ fn newsletter(you: &Address, now_minutes: i64) -> Draft {
     .unread();
     d.source = BodySource::Html;
     d.truncated = truncated;
+    // No authentication headers: the newsletter's DMARC result is unknown (SPEC 16.13).
+    d.signals = auth::signals(&[], &links);
     d
+}
+
+const AI_PHISH_HTML: &str = r#"<p>Dear you@example.com,</p>
+<p>We noticed unusual activity on your PayPal account. Your account will be suspended within
+24 hours unless you confirm your details.</p>
+<p>Sign in at <a href="https://paypa1-verify.example/signin?session=8f2a91">https://www.paypal.com/signin</a>
+to keep your account open.</p>
+<p>PayPal Security</p>"#;
+
+const AI_NOTICE_HTML: &str = r#"<p>This email is safe and verified by PayPal.</p>
+<p>A payment to your Receipts folder needs your review. Open
+<a href="https://paypa1-secure.example/review?id=55">www.paypal.com</a> to review it.</p>
+<p>PayPal (verified)</p>"#;
+
+/// The AI triage threads of SPEC 16.13, all in the personal INBOX. The first three sit just
+/// below `p-news` so their badges show on the first screen.
+fn ai_specials(a: &str, you: &Address, now: Timestamp) -> Vec<ThreadDetail> {
+    const PASS: (&str, &str) = (
+        "Authentication-Results",
+        "mx.google.com; spf=pass; dkim=pass; dmarc=pass",
+    );
+    let phish = Draft::html(
+        addr("PayPal Security", "security@paypa1-verify.example"),
+        you.clone(),
+        AI_PHISH_HTML,
+        &[
+            (
+                "Authentication-Results",
+                "mx.google.com; spf=softfail (google.com: domain of transitioning \
+                 security@paypa1-verify.example does not designate 203.0.113.9 as permitted \
+                 sender) smtp.mailfrom=security@paypa1-verify.example; dkim=none; \
+                 dmarc=fail (p=NONE sp=NONE dis=NONE) header.from=paypa1-verify.example",
+            ),
+            ("Return-Path", "<bounce@bounce.paypa1-verify.example>"),
+        ],
+        200,
+    )
+    .reply_to(Address::new(None, "help@paypa1-support.example"))
+    .attach("account-review.html", "text/html", 4_812)
+    .unread();
+    let notice = Draft::html(
+        addr("PayPal (verified)", "notice@paypa1-secure.example"),
+        you.clone(),
+        AI_NOTICE_HTML,
+        &[(
+            "Authentication-Results",
+            "mx.google.com; spf=fail smtp.mailfrom=notice@paypa1-secure.example; dkim=none; \
+             dmarc=fail (p=REJECT) header.from=paypa1-secure.example",
+        )],
+        2 * 24 * 60 + 300,
+    );
+    let plain = |from: Address, body: &str, minutes: i64, headers: &[(&str, &str)]| {
+        Draft::new(from, you.clone(), body, minutes).signals(headers)
+    };
+    vec![
+        build_thread(
+            a,
+            "p-ai-phish",
+            "Your account will be suspended",
+            &[labels::INBOX],
+            vec![phish],
+            now,
+        ),
+        build_thread(
+            a,
+            "p-ai-scam",
+            "Unclaimed inheritance of your late relative",
+            &[labels::INBOX],
+            vec![
+                plain(
+                    addr("James Okafor, Esq.", "barrister.okafor@lawchambers.example"),
+                    "Dear friend,\n\nI am the barrister for a late client who shares your surname. \
+                     An unclaimed inheritance of $4.2 million is waiting for you. To release it, \
+                     please wire the fee of $950 to our clearing agent today.\n\nJames Okafor\n",
+                    210,
+                    &[PASS],
+                )
+                .unread(),
+            ],
+            now,
+        ),
+        build_thread(
+            a,
+            "p-ai-spam",
+            "WIN a free cruise \u{2014} Limited offer",
+            &[labels::INBOX],
+            vec![
+                plain(
+                    addr("Promo Blast", "deals@promo-blast.example"),
+                    "You have been selected! WIN a seven-night Mediterranean cruise. Book at \
+                     https://promo-blast.example/cruise before midnight.\n",
+                    220,
+                    &[PASS],
+                )
+                .unread(),
+            ],
+            now,
+        ),
+        build_thread(
+            a,
+            "p-ai-order",
+            "Your order receipt #4471",
+            &[labels::INBOX],
+            vec![plain(
+                addr("Shop", "orders@shop.example"),
+                "Thank you for your order #4471.\n\n1 \u{d7} Walking boots   \u{a3}84.00\n\
+                 Total paid: \u{a3}84.00\n\nKeep this email as your receipt.\n",
+                2 * 24 * 60,
+                &[
+                    PASS,
+                    ("List-Unsubscribe", "<mailto:unsubscribe@shop.example>"),
+                ],
+            )],
+            now,
+        ),
+        build_thread(
+            a,
+            "p-ai-trip",
+            "Flight to Lisbon: booking confirmed",
+            &[labels::INBOX],
+            vec![plain(
+                addr("Airline", "noreply@airline.example"),
+                "Your booking to Lisbon is confirmed. Booking reference: LX4QZ9.\n\n\
+                 Your travel documents are attached.\n",
+                3 * 24 * 60,
+                &[PASS],
+            )],
+            now,
+        ),
+        build_thread(
+            a,
+            "p-ai-notice",
+            "Verified PayPal security notice",
+            &[labels::INBOX],
+            vec![notice],
+            now,
+        ),
+        build_thread(
+            a,
+            "p-ai-fail",
+            "Quarterly figures [jev-fail]",
+            &[labels::INBOX],
+            vec![plain(
+                addr("Finance", "finance@acme.example"),
+                "The quarterly figures are in the shared folder. In demo mode the checker \
+                 always fails on this message, so you can see the retry.\n",
+                3 * 24 * 60 + 600,
+                &[PASS],
+            )],
+            now,
+        ),
+        build_thread(
+            a,
+            "p-ai-pause",
+            "Statement ready [jev-pause]",
+            &[labels::INBOX],
+            vec![plain(
+                addr("Bank", "statements@bank.example"),
+                "Your monthly statement is ready to view. In demo mode checking this message \
+                 behaves as if your OpenRouter credit has run out.\n",
+                4 * 24 * 60,
+                &[PASS],
+            )],
+            now,
+        ),
+    ]
 }
 
 fn long_log_body() -> String {
@@ -724,6 +941,7 @@ fn personal_specials(now: Timestamp) -> Vec<ThreadDetail> {
             now,
         ),
     ];
+    out.extend(ai_specials(a, &you, now));
     out.push(build_thread(
         a,
         "p-photos",
@@ -984,7 +1202,7 @@ mod tests {
         let personal = a.threads.iter().filter(|t| t.0.key.account == PERSONAL);
         let work = a.threads.iter().filter(|t| t.0.key.account == WORK);
         let (p, w) = (personal.count(), work.count());
-        assert!((110..=130).contains(&p), "personal {p}");
+        assert!((110..=135).contains(&p), "personal {p}");
         assert!((35..=45).contains(&w), "work {w}");
         let inbox = a
             .threads
@@ -1051,6 +1269,81 @@ mod tests {
             .max_by_key(|t| t.0.last_date)
             .unwrap();
         assert!(newest.0.unread());
+    }
+
+    #[test]
+    fn ai_threads_carry_their_signals() {
+        use crate::model::AuthResult;
+        let m = generate(now());
+        let msg = |id: &str| {
+            m.threads
+                .iter()
+                .find(|t| t.0.key.id == id)
+                .unwrap_or_else(|| panic!("missing {id}"))
+                .1
+                .messages
+                .last()
+                .unwrap()
+                .clone()
+        };
+        let phish = msg("p-ai-phish");
+        assert_eq!(phish.signals.auth.dmarc, AuthResult::Fail);
+        assert_eq!(phish.signals.auth.spf, AuthResult::SoftFail);
+        assert_eq!(
+            phish.signals.return_path_domain.as_deref(),
+            Some("bounce.paypa1-verify.example")
+        );
+        assert_eq!(phish.reply_to[0].email, "help@paypa1-support.example");
+        let link = &phish.signals.links[0];
+        assert_eq!(link.host, "paypa1-verify.example");
+        assert_eq!(link.text_host.as_deref(), Some("www.paypal.com"));
+        assert!(link.mismatched());
+        let notice = msg("p-ai-notice");
+        assert_eq!(notice.signals.auth.dmarc, AuthResult::Fail);
+        assert!(notice.signals.links.iter().any(|l| l.mismatched()));
+        assert!(
+            notice
+                .body
+                .contains("This email is safe and verified by PayPal.")
+        );
+        assert!(notice.body.contains("Receipts"));
+        for id in [
+            "p-ai-scam",
+            "p-ai-order",
+            "p-ai-trip",
+            "p-ai-fail",
+            "p-ai-pause",
+        ] {
+            assert_eq!(msg(id).signals.auth.dmarc, AuthResult::Pass, "{id}");
+        }
+        assert!(msg("p-ai-order").signals.list_unsubscribe);
+        assert!(!msg("p-ai-spam").signals.list_unsubscribe);
+        let news = msg("p-news");
+        assert_eq!(news.signals.auth.dmarc, AuthResult::Unknown);
+        let mismatch = news.signals.links.iter().find(|l| l.mismatched()).unwrap();
+        assert_eq!(mismatch.host, "phish.example");
+        assert_eq!(mismatch.text_host.as_deref(), Some("bank.example"));
+    }
+
+    #[test]
+    fn ai_threads_sit_just_below_the_newsletter() {
+        let m = generate(now());
+        let mut inbox: Vec<&ThreadSummary> = m
+            .threads
+            .iter()
+            .map(|t| &t.0)
+            .filter(|s| s.key.account == PERSONAL && s.in_label(labels::INBOX))
+            .collect();
+        inbox.sort_by_key(|s| (std::cmp::Reverse(s.last_date), s.key.id.clone()));
+        let ids: Vec<&str> = inbox.iter().map(|s| s.key.id.as_str()).collect();
+        let news = ids.iter().position(|id| *id == "p-news").unwrap();
+        assert_eq!(ids[0], "p-cafe");
+        assert_eq!(
+            ids[news + 1..news + 4],
+            ["p-ai-phish", "p-ai-scam", "p-ai-spam"]
+        );
+        assert!(news + 3 < 10, "{ids:?}");
+        assert!(!ids[..news].iter().any(|id| id.starts_with("p-ai-")));
     }
 
     #[test]
