@@ -119,6 +119,8 @@ pub struct AiState {
     /// Each checked thread's last checked target message.
     pub by_thread: HashMap<ThreadKey, String>,
     pub test: Option<Result<String, String>>,
+    /// A key test is waiting for its result.
+    pub testing: bool,
     /// Background prefetch times per account, for the hourly cap.
     pub hourly: HashMap<AccountId, VecDeque<Instant>>,
     /// Prefetches sent whose detail has not landed.
@@ -144,6 +146,7 @@ impl Default for AiState {
             dismissed: HashSet::new(),
             by_thread: HashMap::new(),
             test: None,
+            testing: false,
             hourly: HashMap::new(),
             prefetching: HashMap::new(),
             rev: HashMap::new(),
@@ -1881,6 +1884,25 @@ impl Store {
         self.check_open(&key);
     }
 
+    /// Settings' Test: the typed key, or the saved one with `None`.
+    pub fn test_ai_key(&mut self, key: Option<crate::ai::openrouter::ApiKey>) {
+        self.ai.test = None;
+        self.ai.testing = true;
+        self.send_ai(AiCommand::TestKey(key));
+    }
+
+    /// Turns the AI checks on (at the current disclosure) or off for an account.
+    pub fn set_ai_consent(&mut self, account: &str, on: bool) {
+        self.change_prefs(|p| {
+            if on {
+                p.ai.accounts
+                    .insert(account.to_string(), DISCLOSURE_VERSION);
+            } else {
+                p.ai.accounts.remove(account);
+            }
+        });
+    }
+
     /// Hides the open thread's banner for this session.
     pub fn dismiss_triage(&mut self) {
         let Some(key) = self.open.clone() else {
@@ -2105,7 +2127,10 @@ impl Store {
                 cost_usd,
                 cost_unknown,
             } => self.ai.usage = (checks, cost_usd, cost_unknown),
-            AiEvent::TestResult(r) => self.ai.test = Some(r),
+            AiEvent::TestResult(r) => {
+                self.ai.testing = false;
+                self.ai.test = Some(r);
+            }
         }
     }
 

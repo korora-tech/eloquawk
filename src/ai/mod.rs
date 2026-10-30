@@ -68,7 +68,6 @@ pub struct CheckRequest {
 }
 
 /// UI to worker. Not `Debug`: it carries the key and mail.
-#[allow(dead_code)] // SaveKey, ClearKey, TestKey and ResumePaused: consumed in M16 by Settings
 pub enum AiCommand {
     SaveKey(ApiKey),
     ClearKey,

@@ -138,7 +138,7 @@ impl MainView {
         let view = match &self.settings {
             Some((view, _)) => view.clone(),
             None => {
-                let view = cx.new(|cx| SettingsView::new(self.store.clone(), cx));
+                let view = cx.new(|cx| SettingsView::new(self.store.clone(), window, cx));
                 let sub =
                     cx.subscribe_in(&view, window, |this, _, event, window, cx| match event {
                         SettingsEvent::Close => this.close_settings(window, cx),
@@ -152,7 +152,8 @@ impl MainView {
     }
 
     fn close_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.settings.take().is_some() {
+        if let Some((view, _)) = self.settings.take() {
+            view.update(cx, |v, cx| v.closing(cx));
             self.focus_mail(window, cx);
             cx.notify();
         }
