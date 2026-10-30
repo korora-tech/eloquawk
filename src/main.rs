@@ -1,7 +1,9 @@
-//! Eloquawk entry point: parses arguments, starts the worker, wraps the [`Store`] in a GPUI
-//! entity, pumps worker events into it, applies the theme, opens the main window and, in demo
-//! mode, runs a `--demo-actions` script. Quits when the last window closes, telling the
-//! worker to shut down.
+//! Eloquawk entry point: parses arguments, claims the single instance (or hands a `show` or
+//! `mailto:` request to the running one and exits), starts the worker, wraps the [`Store`] in
+//! a GPUI entity, pumps worker events into it, applies the theme, opens the main window,
+//! notifies about new mail, opens compose windows for `mailto:` links and, in demo mode, runs
+//! a `--demo-actions` script. Quits when the last window closes, telling the worker to shut
+//! down.
 
 mod branding;
 mod cli;
@@ -10,15 +12,19 @@ mod demo;
 mod demo_data;
 mod demo_script;
 mod google;
+mod instance;
 mod mail;
 mod model;
+mod notify;
 mod protocol;
 mod secrets;
 mod store;
 mod sync;
 mod ui;
 
+use std::cell::RefCell;
 use std::io::Write as _;
+use std::rc::Rc;
 use std::time::Duration;
 
 use gpui::{AnyWindowHandle, App, AppContext, Entity, Keystroke, QuitMode};
@@ -51,6 +57,23 @@ fn main() {
         }
     };
 
+    // Before the keyring or the worker: either another Eloquawk takes the request, or this one
+    // becomes the instance. A demo stays out unless asked (`--instance`), and then uses its
+    // own names.
+    let listener = if args.claims_instance() {
+        let request = instance::Request::for_launch(args.mailto.as_deref());
+        match instance::claim(args.demo, &request) {
+            instance::Claim::Bound(l) => Some(l),
+            instance::Claim::HandedOff => return,
+            instance::Claim::Unavailable(why) => {
+                eprintln!("eloquawk: running without single instance ({why})");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     let mode = if args.demo { Mode::Demo } else { Mode::Google };
     let mut prefs = config::Prefs::load();
     prefs.ephemeral = mode == Mode::Demo;
@@ -73,6 +96,7 @@ fn main() {
     };
     let script = args.demo_actions.as_deref().map(demo_script::parse_steps);
     let theme_override = args.theme;
+    let launch_mailto = args.mailto;
 
     // Explicit: the app decides when to quit, which is when its last window has closed.
     application()
@@ -110,6 +134,55 @@ fn main() {
                 .detach();
             }
 
+            // mailto: links waiting for an account to compose from: this launch's own, and any
+            // handed over by later launches.
+            let mailtos: Mailtos = Rc::new(RefCell::new(
+                launch_mailto.into_iter().map(|url| (url, None)).collect(),
+            ));
+
+            // New mail → desktop notifications, and pending mailto links once an account is
+            // known. Store notifications are frequent; both queues are usually empty.
+            {
+                let mailtos = mailtos.clone();
+                let mut seen = notify::Seen::new();
+                cx.observe(&store, move |store, cx| {
+                    let threads = store.update(cx, |s, _| s.take_new_mail());
+                    if !threads.is_empty() {
+                        for note in notify::new_mail_notes(&threads, &mut seen) {
+                            // notify-rust blocks on D-Bus; keep it off the UI thread.
+                            cx.background_spawn(async move { notify::show(note) })
+                                .detach();
+                        }
+                    }
+                    if !mailtos.borrow().is_empty() {
+                        compose_mailtos(&store, &mailtos, cx);
+                    }
+                })
+                .detach();
+            }
+
+            // Later launches → this instance.
+            let server = listener.map(|listener| {
+                let (tx, rx) = async_channel::unbounded();
+                let store = store.clone();
+                let mailtos = mailtos.clone();
+                cx.spawn(async move |cx| {
+                    while let Ok(instance::Handoff { request, token }) = rx.recv().await {
+                        cx.update(|cx| match request {
+                            instance::Request::Show => {
+                                ui::windows::raise_main_window(&store, token.as_deref(), cx)
+                            }
+                            instance::Request::Compose(url) => {
+                                mailtos.borrow_mut().push((url, token));
+                                compose_mailtos(&store, &mailtos, cx);
+                            }
+                        });
+                    }
+                })
+                .detach();
+                listener.serve(tx)
+            });
+
             // Edited compose windows ask before the app quits.
             cx.on_action(|_: &ui::Quit, cx| cx.defer(ui::compose::request_quit));
             cx.on_window_closed(|cx, _| {
@@ -119,16 +192,43 @@ fn main() {
             })
             .detach();
             cx.on_app_quit(move |_| {
+                if let Some(server) = &server {
+                    server.shutdown();
+                }
                 sync.send(Command::Shutdown);
                 async {}
             })
             .detach();
             ui::windows::show_main_window(&store, cx);
+            compose_mailtos(&store, &mailtos, cx);
 
             if let Some(steps) = script {
                 run_script(steps, store, first_page_rx, cx);
             }
         });
+}
+
+/// `mailto:` links waiting to be composed, each with the activation token of the launch that
+/// handed it over.
+type Mailtos = Rc<RefCell<Vec<(String, Option<String>)>>>;
+
+/// Opens a compose window for each waiting `mailto:` link, from the current account, once
+/// there is one. The links go through the whitelisted parser only: no attachments, sender or
+/// threading from the link, and nothing is sent until the user presses Send.
+fn compose_mailtos(store: &Entity<Store>, mailtos: &Mailtos, cx: &mut App) {
+    let Some(account) = store.read(cx).current_account() else {
+        return;
+    };
+    let urls = std::mem::take(&mut *mailtos.borrow_mut());
+    for (url, token) in urls {
+        let from = model::Address::new(None, &account);
+        match mail::mailto::parse(&url, &account, from) {
+            Some(prefill) => {
+                ui::windows::open_compose_window_raised(store, prefill, token.as_deref(), cx)
+            }
+            None => eprintln!("eloquawk: ignored a link that is not a mailto URL"),
+        }
+    }
 }
 
 /// Runs `--demo-actions` steps after the first thread page, one every [`STEP_DELAY`].

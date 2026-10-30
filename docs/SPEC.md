@@ -1933,6 +1933,26 @@ milestone are welcome. **No trailers.** Push to main after each commit.
   - With `--demo --instance`, a second launch focuses the existing window, and
     `eloquawk --demo --instance 'mailto:x@y?subject=Hi&attach=/etc/passwd'` opens a compose
     window in the running instance with the subject set and no attachment.
+- **M13 notes:**
+  - **Focus needs the launcher's token.** On Wayland a window may only take focus with an
+    xdg-activation token the compositor issued for a user action; gpui's `activate_window`
+    asks for a token of its own, which niri refuses without recent input to Eloquawk. A second
+    launch therefore sends its `XDG_ACTIVATION_TOKEN` as `"token"` with `show` / `compose`, and
+    the running instance spends it on the window through `ui/activation.rs`, which wraps gpui's
+    `wl_display` and `wl_surface` (raw handles) and sends `xdg_activation_v1.activate`. This
+    adds the direct dependencies `raw-window-handle`, `wayland-backend` (`client_system`),
+    `wayland-client` and `wayland-protocols` (`client`, `staging`), all at the versions gpui
+    already locks, so `Cargo.lock` gains no packages. A launch with no token (a plain terminal
+    that sets none) still hands over, but the compositor decides whether to raise the window.
+    The acceptance check was run with launches started by `niri msg action spawn`, which
+    issues a token as a key binding or launcher does.
+  - **First-sync suppression** is the worker's (7.3 step 4, covered by the sync tests); the
+    `notify` tests cover what reaches the notifier: a seen map keyed by thread and newest
+    message date (a thread notifies again only for a newer message), threads no longer
+    unread in INBOX skipped, more than 3 grouped into "N new conversations".
+  - The store keeps only `NewMail` summaries filed under the account the event names.
+  - The socket is removed on a normal quit; after a crash or SIGTERM it is left behind and
+    the next launch, holding the lock, finds nobody answering and replaces it.
 
 ### M14: Desktop integration and Nix module
 - **Files:**

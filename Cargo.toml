@@ -26,6 +26,13 @@ keyring-core = "1"
 zbus-secret-service-keyring-store = { version = "1", features = ["rt-async-io-crypto-rust"] }
 # New-mail desktop notifications over D-Bus (zbus, no tokio).
 notify-rust = { version = "4.18", default-features = false, features = ["z"] }
+# Raising the window with an xdg-activation token a second launch hands over (gpui has no
+# API for it): gpui's own Wayland connection, wrapped through its raw handles. The same
+# versions and backend gpui_linux already uses, so the lock gains no packages.
+raw-window-handle = "0.6"
+wayland-backend = { version = "0.3", features = ["client_system"] }
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client", "staging"] }
 # Opens links and the OAuth consent page in the user's browser.
 open = "5.4"
 # Grapheme-aware cursor movement in the text inputs.

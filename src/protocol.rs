@@ -179,7 +179,6 @@ pub enum SyncEvent {
     },
     /// New unread INBOX threads found by an incremental sync (never on the first sync).
     NewMail {
-        #[allow(dead_code)] // consumed in M13
         account: AccountId,
         threads: Vec<ThreadSummary>,
     },

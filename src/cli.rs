@@ -1,13 +1,16 @@
-//! Command-line parsing as a pure function (SPEC 2.1). Flags grow per milestone; at M4 they
-//! are `--demo`, `--theme`, `--demo-actions`, `-h` / `--help` and `-V` / `--version`.
+//! Command-line parsing as a pure function (SPEC 2.1). The flags are `--demo`, `--theme`,
+//! `--demo-actions`, `--instance`, `-h` / `--help` and `-V` / `--version`, plus an optional
+//! positional `mailto:` URL (how a desktop opens Eloquawk as the mail handler).
 //! `ELOQUAWK_DEMO=1` is read by `main` and passed in, so parsing stays testable.
 
 use crate::config::ThemePref;
 
-pub const USAGE: &str =
-    "usage: eloquawk [--demo] [--theme light|dark|system] [--demo-actions <steps>]
+pub const USAGE: &str = "usage: eloquawk [--demo] [--instance] [--theme light|dark|system] [--demo-actions <steps>] [mailto:...]
 
+  mailto:...              open a new message prefilled from this link (in the running
+                          Eloquawk, if there is one)
   --demo                  run with a generated mailbox (no Google account, nothing saved)
+  --instance              demo only: hand over to a running demo, as a normal launch does
   --theme <theme>         light, dark or system for this session (not saved)
   --demo-actions <steps>  demo only: run comma-separated scripted steps (see docs/SPEC.md)
   -h, --help              show this help
@@ -23,6 +26,24 @@ pub struct Args {
     pub theme: Option<ThemePref>,
     /// A `--demo-actions` script, unparsed.
     pub demo_actions: Option<String>,
+    /// `--instance`: claim the single instance in demo mode too. A normal launch always
+    /// claims it, so the flag means nothing there.
+    pub instance: bool,
+    /// A positional `mailto:` URL to compose.
+    pub mailto: Option<String>,
+}
+
+impl Args {
+    /// True when this launch takes part in the single instance.
+    pub fn claims_instance(&self) -> bool {
+        !self.demo || self.instance
+    }
+}
+
+/// True for an argument that is a `mailto:` URL.
+fn is_mailto(arg: &str) -> bool {
+    arg.get(..7)
+        .is_some_and(|s| s.eq_ignore_ascii_case("mailto:"))
 }
 
 /// What `main` should do.
@@ -69,8 +90,15 @@ pub fn parse<S: AsRef<str>>(args: &[S], env_demo: bool) -> Result<Parsed, String
                 })
             }
             "--demo-actions" => out.demo_actions = Some(value("--demo-actions")?),
+            "--instance" if inline.is_none() => out.instance = true,
             "-h" | "--help" => return Ok(Parsed::Help),
             "-V" | "--version" => return Ok(Parsed::Version),
+            _ if is_mailto(arg) => {
+                if out.mailto.is_some() {
+                    return Err("only one mailto: link can be given".into());
+                }
+                out.mailto = Some(arg.to_string());
+            }
             _ => return Err(format!("unknown argument {arg}")),
         }
     }
@@ -160,6 +188,55 @@ mod tests {
         assert_eq!(
             parse(&["--demo", "--demo-actions"], false),
             Err("--demo-actions needs a value".into())
+        );
+    }
+
+    #[test]
+    fn instance_flag() {
+        let run = |a: &[&str]| match parse(a, false) {
+            Ok(Parsed::Run(args)) => args,
+            other => panic!("{other:?}"),
+        };
+        let demo_instance = run(&["--demo", "--instance"]);
+        assert!(demo_instance.instance && demo_instance.claims_instance());
+        assert!(!run(&["--demo"]).claims_instance());
+        // Accepted and ignored without --demo: a normal launch always claims.
+        let plain = run(&["--instance"]);
+        assert!(plain.instance && plain.claims_instance());
+        assert!(run(&[]).claims_instance());
+        assert_eq!(
+            parse(&["--instance=yes"], false),
+            Err("unknown argument --instance=yes".into())
+        );
+    }
+
+    #[test]
+    fn positional_mailto() {
+        let url = "mailto:x@y?subject=Hi&attach=/etc/passwd";
+        let expected = Args {
+            instance: true,
+            mailto: Some(url.into()),
+            ..demo()
+        };
+        assert_eq!(
+            parse(&["--demo", "--instance", url], false),
+            Ok(Parsed::Run(expected))
+        );
+        match parse(&["MAILTO:a@b"], false) {
+            Ok(Parsed::Run(args)) => assert_eq!(args.mailto.as_deref(), Some("MAILTO:a@b")),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(
+            parse(&["mailto:a@b", "mailto:c@d"], false),
+            Err("only one mailto: link can be given".into())
+        );
+        assert_eq!(
+            parse(&["https://example.com"], false),
+            Err("unknown argument https://example.com".into())
+        );
+        assert_eq!(
+            parse(&["/etc/passwd"], false),
+            Err("unknown argument /etc/passwd".into())
         );
     }
 }

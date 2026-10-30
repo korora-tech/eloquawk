@@ -9,6 +9,7 @@
 //! focused body does not block them. The help overlay lists the same table ([`help::SHORTCUTS`]),
 //! and a test keeps the two in step.
 
+pub mod activation;
 pub mod auth;
 pub mod body_text;
 pub mod compose;

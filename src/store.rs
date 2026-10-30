@@ -644,7 +644,6 @@ impl Store {
     }
 
     /// Hands new-mail summaries to the notifier and forgets them.
-    #[allow(dead_code)] // consumed in M13
     pub fn take_new_mail(&mut self) -> Vec<ThreadSummary> {
         std::mem::take(&mut self.new_mail)
     }
@@ -1657,9 +1656,12 @@ impl Store {
                     }
                 }
             }
-            SyncEvent::NewMail { threads, .. } => {
+            SyncEvent::NewMail { account, threads } => {
+                // Only the account the event names: a summary filed under another is a
+                // worker bug, and must not notify.
                 if self.prefs.notifications {
-                    self.new_mail.extend(threads);
+                    self.new_mail
+                        .extend(threads.into_iter().filter(|t| t.key.account == account));
                 }
             }
             SyncEvent::AccountReset(account) => {

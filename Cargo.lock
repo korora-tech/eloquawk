@@ -1474,6 +1474,7 @@ dependencies = [
  "mail-parser",
  "notify-rust",
  "open",
+ "raw-window-handle",
  "rfc2047-decoder",
  "serde",
  "serde_json",
@@ -1481,6 +1482,9 @@ dependencies = [
  "unicode-segmentation",
  "ureq",
  "url",
+ "wayland-backend",
+ "wayland-client",
+ "wayland-protocols",
  "zbus-secret-service-keyring-store",
 ]
 
