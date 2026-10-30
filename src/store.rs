@@ -2445,6 +2445,25 @@ mod tests {
     }
 
     #[test]
+    fn new_mail_keeps_only_the_named_accounts_summaries() {
+        let (mut s, _rx) = store();
+        let mut theirs = summary(1, &["INBOX", "UNREAD"]);
+        theirs.key.account = "someone@example.org".into();
+        s.apply(SyncEvent::NewMail {
+            account: ME.into(),
+            threads: vec![theirs.clone()],
+        });
+        assert!(s.take_new_mail().is_empty(), "another account's summary");
+        s.apply(SyncEvent::NewMail {
+            account: ME.into(),
+            threads: vec![theirs, summary(0, &["INBOX", "UNREAD"])],
+        });
+        let kept = s.take_new_mail();
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].key.account, ME);
+    }
+
+    #[test]
     fn settings_changes_prefs_in_range_and_stays_ephemeral() {
         let (mut s, rx) = store();
         s.change_prefs(|p| {

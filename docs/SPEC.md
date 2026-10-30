@@ -1950,7 +1950,8 @@ milestone are welcome. **No trailers.** Push to main after each commit.
     `notify` tests cover what reaches the notifier: a seen map keyed by thread and newest
     message date (a thread notifies again only for a newer message), threads no longer
     unread in INBOX skipped, more than 3 grouped into "N new conversations".
-  - The store keeps only `NewMail` summaries filed under the account the event names.
+  - The store keeps only `NewMail` summaries filed under the account the event names
+    (`new_mail_keeps_only_the_named_accounts_summaries`).
   - The socket is removed on a normal quit, and the lock released with it, so a launch while
     the old process is still exiting becomes the instance. After a crash or SIGTERM the socket
     is left behind and the next launch, holding the lock, finds nobody answering and replaces
