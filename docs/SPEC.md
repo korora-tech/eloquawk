@@ -443,7 +443,10 @@ Rules:
 - `ApiError` keeps antarctical's variants (`Unauthorized`, `Forbidden(String)`, `NotFound`,
   `Network(NetKind)`, `Http{status, body}`, `Decode`, `InvalidRequest`) and adds:
   - `RateLimited { retry_after: Option<Duration> }`
-  - `QuotaExhausted(String)`, for daily limits and sending limits
+  - `QuotaExhausted { message: String, retry_after: Option<Duration> }`, for daily limits
+    and sending limits (M10 review note: this was `QuotaExhausted(String)`, which lost the
+    hint of a converted long rate limit, so the worker waited 15 minutes instead of the
+    hinted time)
   - `TooLarge`
   `Network` holds only an error kind (timeout, connect, tls, io, other) and never the URL.
 - Error classification:
@@ -1805,6 +1808,19 @@ milestone are welcome. **No trailers.** Push to main after each commit.
     poll's `profile`); it stops once every one-off reply is used.
   - Live read steps of 12.4 were not performed by the implementing agent; they are left for
     the user.
+  - Review fixes: a long rate limit keeps its hint as `QuotaExhausted.retry_after`, and the
+    worker also treats any `RateLimited` over 15 minutes as a quota problem (message and
+    timing). While an account already waits, a retryable failure (only interactive jobs run
+    then) does not raise `attempts`; it only lengthens `retry_at` to a longer hint, and a
+    quota wait is never shortened. A thread whose metadata is refused without a retry (403,
+    `TooLarge`) moves from `missing` to `refused` with its listed history id; neither the
+    poll nor a listing fetches it again until a listing shows a new history id. The poll
+    queues only skeleton ids that no queued or parked `FetchMeta` chunk holds, and a listing
+    takes its ids out of queued chunks before queuing them at the front (ids in parked
+    chunks wait for the backoff). Next-page tokens of searches are dropped when the shown
+    view moves away from them. Not changed: a parked `ListView` leaves the list loading until
+    the backoff passes (the worker keeps no per-view id list to answer with), and `known`
+    still grows over a session (eviction is revisited in M11).
 
 ### M11: Gmail incremental sync, mutations and send
 - **Files:** `sync.rs` (`History`, `collect_changes`, pending sets and `Refetch`, `NewMail`,

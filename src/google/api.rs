@@ -95,8 +95,12 @@ pub enum ApiError {
     RateLimited {
         retry_after: Option<Duration>,
     },
-    /// A daily or sending limit, with Google's message.
-    QuotaExhausted(String),
+    /// A daily or sending limit, with Google's message and, for a rate limit whose hint was
+    /// too long to be a burst, that hint (the worker waits for it).
+    QuotaExhausted {
+        message: String,
+        retry_after: Option<Duration>,
+    },
     Network(NetKind),
     Http {
         status: u16,
@@ -116,7 +120,7 @@ impl fmt::Display for ApiError {
             ApiError::Forbidden(m) => write!(f, "Access denied: {m}"),
             ApiError::NotFound => write!(f, "Not found in Gmail"),
             ApiError::RateLimited { .. } => write!(f, "Gmail asked Eloquawk to slow down"),
-            ApiError::QuotaExhausted(m) => write!(f, "Gmail limit reached: {m}"),
+            ApiError::QuotaExhausted { message, .. } => write!(f, "Gmail limit reached: {message}"),
             ApiError::Network(kind) => write!(f, "Network error: {kind}"),
             ApiError::Http { status, body } => write!(f, "Gmail returned HTTP {status}: {body}"),
             ApiError::TooLarge => write!(f, "The response was too large to download"),
@@ -252,7 +256,10 @@ pub fn classify(status: u16, retry_after: Option<&str>, body: &str, now: Timesta
             .and_then(|v| parse_retry_after(v, now))
             .or_else(|| envelope_retry_after(body, now));
         match hint {
-            Some(d) if d > LONGEST_RATE_LIMIT => ApiError::QuotaExhausted(error_message(body)),
+            Some(d) if d > LONGEST_RATE_LIMIT => ApiError::QuotaExhausted {
+                message: error_message(body),
+                retry_after: Some(d),
+            },
             _ => ApiError::RateLimited { retry_after: hint },
         }
     };
@@ -265,7 +272,10 @@ pub fn classify(status: u16, retry_after: Option<&str>, body: &str, now: Timesta
             || lower.contains("sending limit")
             || lower.contains("sending quota") =>
         {
-            ApiError::QuotaExhausted(error_message(body))
+            ApiError::QuotaExhausted {
+                message: error_message(body),
+                retry_after: None,
+            }
         }
         403 => ApiError::Forbidden(error_message(body)),
         _ => ApiError::Http {
@@ -487,12 +497,15 @@ mod tests {
         let daily = r#"{"error":{"message":"Daily Limit Exceeded","errors":[{"reason":"dailyLimitExceeded"}]}}"#;
         assert_eq!(
             classify(403, None, daily, now()),
-            ApiError::QuotaExhausted("Daily Limit Exceeded (dailyLimitExceeded)".into())
+            ApiError::QuotaExhausted {
+                message: "Daily Limit Exceeded (dailyLimitExceeded)".into(),
+                retry_after: None,
+            }
         );
         let sending = r#"{"error":{"message":"Daily user Sending limit exceeded."}}"#;
         assert!(matches!(
             classify(403, None, sending, now()),
-            ApiError::QuotaExhausted(_)
+            ApiError::QuotaExhausted { .. }
         ));
         assert!(matches!(
             classify(403, None, r#"{"error":{"message":"nope"}}"#, now()),
@@ -562,7 +575,8 @@ mod tests {
     fn long_rate_limits_become_quota_exhausted() {
         assert!(matches!(
             classify(429, Some("901"), r#"{"error":{"message":"slow"}}"#, now()),
-            ApiError::QuotaExhausted(m) if m == "slow"
+            ApiError::QuotaExhausted { message, retry_after: Some(d) }
+                if message == "slow" && d == Duration::from_secs(901)
         ));
         assert!(matches!(
             classify(429, Some("900"), "", now()),

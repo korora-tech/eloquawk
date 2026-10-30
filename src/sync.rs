@@ -20,7 +20,7 @@
 //! commands are answered with a "not available yet" error, so the UI never waits for an
 //! answer that will not come.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
@@ -172,8 +172,16 @@ impl Backoff {
     }
 
     /// A rate limit, network failure, 5xx or unreadable answer: wait
-    /// `max(hint, min(base·2^attempts, cap)) + jitter`.
+    /// `max(hint, min(base·2^attempts, cap)) + jitter`. While the account is already waiting
+    /// only interactive jobs run, and their failures (clicks while offline) must not hurry
+    /// the schedule towards the cap: they only lengthen the wait to a longer hint.
     fn failed(&mut self, now: Instant, hint: Option<Duration>, jitter: Duration, t: &Tuning) {
+        if self.waiting(now) {
+            if let Some(hint) = hint {
+                self.retry_at = self.retry_at.max(Some(now + hint));
+            }
+            return;
+        }
         let factor = 1u32.checked_shl(self.attempts).unwrap_or(u32::MAX);
         let exp = t.backoff_base.saturating_mul(factor).min(t.backoff_cap);
         self.attempts = self.attempts.saturating_add(1);
@@ -184,7 +192,8 @@ impl Backoff {
     /// is later.
     fn quota(&mut self, now: Instant, hint: Option<Duration>) {
         self.attempts = self.attempts.saturating_add(1);
-        self.retry_at = Some(now + hint.unwrap_or_default().max(QUOTA_WAIT));
+        let until = now + hint.unwrap_or_default().max(QUOTA_WAIT);
+        self.retry_at = self.retry_at.max(Some(until));
     }
 
     /// A success, or a manual Refresh: start afresh.
@@ -272,10 +281,25 @@ impl Queue {
         self.interactive.is_empty() && self.background.is_empty()
     }
 
-    fn has_fetch_meta(&self, account: &str) -> bool {
-        self.background
-            .iter()
-            .any(|j| matches!(j, Job::FetchMeta(a, _) if a == account))
+    /// The thread ids already waiting in `account`'s queued metadata chunks.
+    fn queued_meta(&self, account: &str) -> HashSet<String> {
+        meta_ids(self.background.iter(), account)
+    }
+
+    /// Takes `ids` out of `account`'s queued metadata chunks (dropping chunks left empty),
+    /// so a fresh listing can queue them again at the front without fetching them twice.
+    fn strip_meta(&mut self, account: &str, ids: &[String]) {
+        if ids.is_empty() {
+            return;
+        }
+        let ids: HashSet<&String> = ids.iter().collect();
+        self.background.retain_mut(|job| match job {
+            Job::FetchMeta(a, chunk) if a == account => {
+                chunk.retain(|id| !ids.contains(id));
+                !chunk.is_empty()
+            }
+            _ => true,
+        });
     }
 
     /// Drops every job of a signed-out account.
@@ -283,6 +307,17 @@ impl Queue {
         self.interactive.retain(|j| j.account() != account);
         self.background.retain(|j| j.account() != account);
     }
+}
+
+/// The thread ids in `account`'s metadata chunks among `jobs`.
+fn meta_ids<'a>(jobs: impl Iterator<Item = &'a Job>, account: &str) -> HashSet<String> {
+    jobs.filter_map(|j| match j {
+        Job::FetchMeta(a, ids) if a == account => Some(ids),
+        _ => None,
+    })
+    .flatten()
+    .cloned()
+    .collect()
 }
 
 /// Splits `ids` into jobs of at most [`CHUNK`] ids.
@@ -337,8 +372,12 @@ struct AccountState {
     known: HashMap<String, Known>,
     /// The next page token per view; `None` once the last page is in.
     pages: HashMap<ViewKind, Option<String>>,
-    /// Listed ids still without a summary (skeleton rows).
-    missing: BTreeSet<String>,
+    /// Listed ids still without a summary (skeleton rows), with their listed history ids.
+    missing: BTreeMap<String, u64>,
+    /// Ids whose metadata Gmail refused without a retry (403, too large), with the history
+    /// id they were refused at. Neither the poll nor a listing fetches them again until a
+    /// listing shows a new history id.
+    refused: HashMap<String, u64>,
     /// Background jobs parked while in backoff.
     deferred: Vec<Job>,
     backoff: Backoff,
@@ -355,7 +394,8 @@ impl AccountState {
             synced_once: false,
             known: HashMap::new(),
             pages: HashMap::new(),
-            missing: BTreeSet::new(),
+            missing: BTreeMap::new(),
+            refused: HashMap::new(),
             deferred: Vec::new(),
             backoff: Backoff::default(),
             labels: BTreeMap::new(),
@@ -543,10 +583,16 @@ impl Worker {
             } else {
                 jobs.push(Job::History(email.clone()));
             }
-            if !account.missing.is_empty() && !self.queue.has_fetch_meta(email) {
-                let missing: Vec<String> = account.missing.iter().cloned().collect();
-                jobs.extend(chunked(&missing, |ids| Job::FetchMeta(email.clone(), ids)));
-            }
+            // Only the skeleton rows no queued or parked chunk will fetch anyway.
+            let mut pending = self.queue.queued_meta(email);
+            pending.extend(meta_ids(account.deferred.iter(), email));
+            let missing: Vec<String> = account
+                .missing
+                .keys()
+                .filter(|id| !pending.contains(*id))
+                .cloned()
+                .collect();
+            jobs.extend(chunked(&missing, |ids| Job::FetchMeta(email.clone(), ids)));
         }
         for job in jobs {
             self.queue.push(job);
@@ -627,6 +673,13 @@ impl Worker {
             }
             Command::Want { view, more } => {
                 if !more {
+                    // The next-page tokens of searches no longer shown are dropped, so a long
+                    // session of searches does not keep one entry per query.
+                    for account in self.accounts.values_mut() {
+                        account.pages.retain(|kind, _| {
+                            !matches!(kind, ViewKind::Search(_)) || *kind == view.kind
+                        });
+                    }
                     self.want = Some(view.clone());
                 }
                 if self.accounts.contains_key(&view.account) {
@@ -1154,6 +1207,20 @@ impl Worker {
                 backoff(None, false);
                 ("network".to_string(), NETWORK_PROBLEM.to_string(), true)
             }
+            // `classify` already turns these into `QuotaExhausted`; this guards any other
+            // source of a rate limit too long to be a burst (SPEC 7.6).
+            CallError::Api(
+                e @ ApiError::RateLimited {
+                    retry_after: Some(hint),
+                },
+            ) if *hint > QUOTA_WAIT => {
+                backoff(Some(*hint), true);
+                let quota = ApiError::QuotaExhausted {
+                    message: e.to_string(),
+                    retry_after: Some(*hint),
+                };
+                (email.to_string(), format!("{email}: {quota}"), true)
+            }
             CallError::Api(e @ ApiError::RateLimited { retry_after }) => {
                 backoff(*retry_after, false);
                 (email.to_string(), format!("{email}: {e}"), true)
@@ -1162,8 +1229,8 @@ impl Worker {
                 backoff(None, false);
                 (email.to_string(), format!("{email}: {e}"), true)
             }
-            CallError::Api(e @ ApiError::QuotaExhausted(_)) => {
-                backoff(None, true);
+            CallError::Api(e @ ApiError::QuotaExhausted { retry_after, .. }) => {
+                backoff(*retry_after, true);
                 (email.to_string(), format!("{email}: {e}"), true)
             }
             CallError::Api(ApiError::NotFound | ApiError::TooLarge) => return false,
@@ -1352,16 +1419,25 @@ impl Worker {
         let mut fetch = Vec::new();
         for r in &page.threads {
             ids.push(r.id.clone());
+            let history_id = parse::parse_u64(&r.history_id);
             match account.known.get(&r.id) {
-                Some(k) if k.history_id == parse::parse_u64(&r.history_id) => {
+                Some(k) if k.history_id == history_id => {
                     threads.push(k.summary.clone());
                 }
+                // Refused at this very history id: it stays a skeleton row.
+                _ if account.refused.get(&r.id) == Some(&history_id) => {}
                 _ => {
-                    account.missing.insert(r.id.clone());
+                    account.refused.remove(&r.id);
+                    account.missing.insert(r.id.clone(), history_id);
                     fetch.push(r.id.clone());
                 }
             }
         }
+        // A parked chunk fetches its ids once the backoff passes; ids in queued chunks move
+        // to the front with this page's.
+        let parked = meta_ids(account.deferred.iter(), email);
+        fetch.retain(|id| !parked.contains(id));
+        self.queue.strip_meta(email, &fetch);
         self.emit(SyncEvent::ThreadPage {
             view: view.clone(),
             ids,
@@ -1382,6 +1458,7 @@ impl Worker {
         let summary = parse::thread_summary(&email.to_string(), dto)?;
         let account = self.accounts.get_mut(email)?;
         account.missing.remove(&dto.id);
+        account.refused.remove(&dto.id);
         account.known.insert(
             dto.id.clone(),
             Known {
@@ -1395,7 +1472,8 @@ impl Worker {
 
     /// One `FetchMeta` chunk: each summary lands as soon as the chunk ends. A thread that is
     /// gone is reported gone; a retryable failure parks the rest of the chunk; a refused
-    /// thread stays a skeleton for the next poll, and the chunk carries on.
+    /// thread stays a skeleton, is not fetched again until a listing shows it changed, and
+    /// the chunk carries on.
     fn fetch_meta(&mut self, email: &str, ids: Vec<String>) {
         let mut updated = Vec::new();
         let mut gone = Vec::new();
@@ -1419,12 +1497,19 @@ impl Worker {
                     if matches!(e, CallError::Auth | CallError::Gone) {
                         break;
                     }
+                    // Refused for good at this history id: not asked again on every poll.
+                    if let Some(account) = self.accounts.get_mut(email)
+                        && let Some(history_id) = account.missing.remove(id)
+                    {
+                        account.refused.insert(id.clone(), history_id);
+                    }
                 }
             }
         }
         if let Some(account) = self.accounts.get_mut(email) {
             for id in &gone {
                 account.missing.remove(id);
+                account.refused.remove(id);
                 account.known.remove(id);
             }
         }
@@ -1776,14 +1861,17 @@ mod tests {
         let now = Instant::now();
         let mut b = Backoff::default();
         let mut waits = Vec::new();
+        // Each failure comes once the previous wait is over.
+        let mut at = now;
         for _ in 0..8 {
-            b.failed(now, None, Duration::ZERO, &t);
-            waits.push(b.retry_at.unwrap() - now);
+            b.failed(at, None, Duration::ZERO, &t);
+            waits.push(b.retry_at.unwrap() - at);
+            at = b.retry_at.unwrap();
         }
         let secs: Vec<u64> = waits.iter().map(Duration::as_secs).collect();
         assert_eq!(secs, [5, 10, 20, 40, 80, 160, 300, 300]);
-        assert!(b.waiting(now));
-        assert!(!b.waiting(now + Duration::from_secs(300)));
+        assert!(b.waiting(at - Duration::from_secs(1)));
+        assert!(!b.waiting(at));
 
         // Jitter is added on top; a longer hint wins over the schedule.
         b.reset();
@@ -1882,7 +1970,10 @@ mod tests {
         ]);
         q.push_soon(vec![Job::FetchMeta(a(), vec!["1".into()])]);
         q.push(Job::History("other@example.com".into()));
-        assert!(q.has_fetch_meta("me@example.com"));
+        assert_eq!(
+            q.queued_meta("me@example.com"),
+            HashSet::from(["1".to_string(), "2".to_string()])
+        );
         let order: Vec<Job> = std::iter::from_fn(|| q.pop()).collect();
         assert_eq!(
             order,
@@ -1939,7 +2030,7 @@ mod tests {
         {
             let account = w.accounts.get_mut("me@example.com").unwrap();
             account.synced_once = true;
-            account.missing.insert("t9".into());
+            account.missing.insert("t9".into(), 1);
         }
         assert_eq!(
             poll(&mut w),
@@ -1963,6 +2054,231 @@ mod tests {
             .reset();
         w.auth = AuthState::Locked;
         assert!(poll(&mut w).is_empty());
+    }
+
+    #[test]
+    fn failures_while_waiting_do_not_hurry_the_schedule() {
+        let t = Tuning::new(60, 50);
+        let now = Instant::now();
+        let mut b = Backoff::default();
+        b.failed(now, None, Duration::ZERO, &t);
+        let first = b.clone();
+        // Clicks while offline: the interactive jobs fail again within the wait.
+        for i in 1..5 {
+            b.failed(now + Duration::from_secs(i), None, Duration::ZERO, &t);
+        }
+        assert_eq!(b, first, "neither the attempts nor the wait grow");
+        // A longer hint still lengthens the wait.
+        b.failed(
+            now + Duration::from_secs(1),
+            Some(Duration::from_secs(30)),
+            Duration::ZERO,
+            &t,
+        );
+        assert_eq!(b.retry_at.unwrap() - now, Duration::from_secs(31));
+        assert_eq!(b.attempts, 1);
+        // Once the wait is over the schedule moves on as before.
+        b.failed(now + Duration::from_secs(31), None, Duration::ZERO, &t);
+        assert_eq!(b.attempts, 2);
+        assert_eq!(b.retry_at.unwrap() - now, Duration::from_secs(41));
+        // A quota problem never shortens a longer wait.
+        b.quota(now, Some(Duration::from_secs(3600)));
+        b.quota(now, None);
+        assert_eq!(b.retry_at.unwrap() - now, Duration::from_secs(3600));
+    }
+
+    #[test]
+    fn long_rate_limits_are_quota_problems_that_wait_for_the_hint() {
+        let (mut w, _rx) = worker(Secrets::memory(), nowhere());
+        signed_in(&mut w, "me@example.com", "rt");
+        let hour = Duration::from_secs(3600);
+        let wait = |w: &Worker| {
+            w.accounts["me@example.com"]
+                .backoff
+                .retry_at
+                .unwrap()
+                .saturating_duration_since(Instant::now())
+        };
+
+        // As `classify` reports it: the Google message and the hint.
+        let e = api::classify(
+            429,
+            Some("3600"),
+            r#"{"error":{"message":"slow"}}"#,
+            Timestamp::now(),
+        );
+        assert!(w.failed("me@example.com", &CallError::Api(e)));
+        assert!(
+            wait(&w) > hour - Duration::from_secs(5),
+            "the hint, not 15 minutes"
+        );
+        assert_eq!(
+            w.problems["me@example.com"],
+            "me@example.com: Gmail limit reached: slow"
+        );
+
+        // A long `RateLimited` from anywhere else gets the same treatment.
+        w.accounts
+            .get_mut("me@example.com")
+            .unwrap()
+            .backoff
+            .reset();
+        w.problems.clear();
+        let e = ApiError::RateLimited {
+            retry_after: Some(QUOTA_WAIT + Duration::from_secs(60)),
+        };
+        assert!(w.failed("me@example.com", &CallError::Api(e)));
+        assert!(wait(&w) > QUOTA_WAIT);
+        assert!(w.problems["me@example.com"].contains("Gmail limit reached"));
+        assert_eq!(w.accounts["me@example.com"].backoff.attempts, 1);
+
+        // A short one is a burst.
+        w.accounts
+            .get_mut("me@example.com")
+            .unwrap()
+            .backoff
+            .reset();
+        let e = ApiError::RateLimited {
+            retry_after: Some(Duration::from_secs(2)),
+        };
+        assert!(w.failed("me@example.com", &CallError::Api(e)));
+        assert!(wait(&w) < Duration::from_secs(3));
+        assert!(w.problems["me@example.com"].contains("slow down"));
+    }
+
+    #[test]
+    fn the_poll_skips_ids_already_queued_or_parked() {
+        let (mut w, _rx) = worker(Secrets::memory(), nowhere());
+        signed_in(&mut w, "me@example.com", "rt");
+        let a = || "me@example.com".to_string();
+        let now = Instant::now();
+        {
+            let account = w.accounts.get_mut("me@example.com").unwrap();
+            account.synced_once = true;
+            account.history_id = Some(1);
+            for id in ["t1", "t2", "t3"] {
+                account.missing.insert(id.into(), 1);
+            }
+            account.defer(Job::FetchMeta(a(), vec!["t1".into()]));
+        }
+        w.queue.push(Job::FetchMeta(a(), vec!["t2".into()]));
+        w.poll(now);
+        let jobs: Vec<Job> = std::iter::from_fn(|| w.queue.pop()).collect();
+        assert_eq!(
+            jobs,
+            [
+                Job::FetchMeta(a(), vec!["t2".into()]),
+                Job::History(a()),
+                Job::FetchMeta(a(), vec!["t3".into()]),
+            ]
+        );
+
+        // A listing takes its ids out of queued chunks and queues them at the front.
+        let mut q = Queue::default();
+        q.push(Job::FetchMeta(a(), vec!["1".into(), "2".into()]));
+        q.push(Job::FetchMeta(a(), vec!["3".into()]));
+        q.push(Job::FetchMeta("other".into(), vec!["3".into()]));
+        q.strip_meta(&a(), &["2".into(), "3".into()]);
+        assert_eq!(
+            std::iter::from_fn(|| q.pop()).collect::<Vec<Job>>(),
+            [
+                Job::FetchMeta(a(), vec!["1".into()]),
+                Job::FetchMeta("other".into(), vec!["3".into()]),
+            ]
+        );
+    }
+
+    #[test]
+    fn refused_threads_wait_for_a_new_history_id() {
+        let listed = |h: u32| format!(r#"{{"threads":[{{"id":"t1","historyId":"{h}"}}]}}"#);
+        let server = FakeServer::start(vec![
+            Reply::json(200, &listed(5)).for_path("/gmail/threads"),
+            Reply::json(403, r#"{"error":{"code":403,"message":"nope"}}"#)
+                .for_path("/gmail/threads/t1"),
+            Reply::json(200, &listed(5)).for_path("/gmail/threads"),
+            Reply::json(200, &listed(6)).for_path("/gmail/threads"),
+        ]);
+        let (mut w, _rx) = worker(Secrets::memory(), fake_endpoints(&server));
+        let access = Access {
+            token: "at".into(),
+            expires: Instant::now() + Duration::from_secs(3600),
+        };
+        w.accounts.insert(
+            "me@example.com".into(),
+            AccountState::new("rt".into(), Some(access)),
+        );
+        let view = ViewKey {
+            account: "me@example.com".into(),
+            kind: ViewKind::AllMail,
+        };
+        let meta = |ids: &[&str]| {
+            Job::FetchMeta(
+                "me@example.com".into(),
+                ids.iter().map(|s| s.to_string()).collect(),
+            )
+        };
+
+        assert!(w.list(&view, false, PageMode::Replace).is_ok());
+        assert_eq!(w.queue.pop(), Some(meta(&["t1"])));
+        w.fetch_meta("me@example.com", vec!["t1".into()]);
+        let account = &w.accounts["me@example.com"];
+        assert!(account.missing.is_empty());
+        assert_eq!(account.refused.get("t1"), Some(&5));
+        assert!(account.deferred.is_empty(), "a refusal is not retried");
+
+        // Neither the poll nor listing the same thread again asks for it.
+        w.accounts.get_mut("me@example.com").unwrap().synced_once = true;
+        w.accounts.get_mut("me@example.com").unwrap().history_id = Some(1);
+        w.poll(Instant::now());
+        assert_eq!(w.queue.pop(), Some(Job::History("me@example.com".into())));
+        assert!(w.queue.is_empty());
+        assert!(w.list(&view, false, PageMode::Refresh).is_ok());
+        assert!(w.queue.is_empty());
+
+        // Once it changes it is fetched again.
+        assert!(w.list(&view, false, PageMode::Refresh).is_ok());
+        assert_eq!(w.queue.pop(), Some(meta(&["t1"])));
+        assert!(w.accounts["me@example.com"].refused.is_empty());
+        server.finish();
+    }
+
+    #[test]
+    fn searches_left_behind_drop_their_page_tokens() {
+        let (mut w, _rx) = worker(Secrets::memory(), nowhere());
+        signed_in(&mut w, "me@example.com", "rt");
+        let view = |kind: ViewKind| ViewKey {
+            account: "me@example.com".into(),
+            kind,
+        };
+        let search = ViewKind::Search("from:a".into());
+        {
+            let pages = &mut w.accounts.get_mut("me@example.com").unwrap().pages;
+            pages.insert(ViewKind::AllMail, Some("p".into()));
+            pages.insert(search.clone(), Some("q".into()));
+            pages.insert(ViewKind::Search("old".into()), None);
+        }
+        w.handle(Command::Want {
+            view: view(search.clone()),
+            more: false,
+        });
+        let pages = &w.accounts["me@example.com"].pages;
+        assert_eq!(pages.len(), 2);
+        assert!(
+            pages.contains_key(&search),
+            "the shown search keeps its token"
+        );
+        // Its next page keeps it too; moving away drops it.
+        w.handle(Command::Want {
+            view: view(search.clone()),
+            more: true,
+        });
+        assert!(w.accounts["me@example.com"].pages.contains_key(&search));
+        w.handle(Command::Want {
+            view: view(ViewKind::AllMail),
+            more: false,
+        });
+        let pages = &w.accounts["me@example.com"].pages;
+        assert_eq!(pages.keys().collect::<Vec<_>>(), [&ViewKind::AllMail]);
     }
 
     #[test]
