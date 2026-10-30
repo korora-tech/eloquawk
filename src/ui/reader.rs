@@ -361,14 +361,13 @@ impl ReaderView {
         }
         match target {
             LinkTarget::Web(_) => {
-                let lower = url.get(..8).unwrap_or(url).to_ascii_lowercase();
                 if dry {
                     let host = url::Url::parse(url)
                         .ok()
                         .and_then(|u| u.host_str().map(str::to_string))
                         .unwrap_or_default();
                     println!("link: would open {host}");
-                } else if lower.starts_with("https://") || lower.starts_with("http://") {
+                } else {
                     spawn_open(url.to_string(), cx);
                 }
             }
@@ -1129,8 +1128,19 @@ fn recipients_line(m: &Message) -> String {
     }
 }
 
-/// Opens an http or https URL in the browser, off the UI thread. The URL is not logged.
+/// Whether `url` is http or https, the only schemes Eloquawk hands to the browser.
+fn is_web_url(url: &str) -> bool {
+    let lower = url.get(..8).unwrap_or(url).to_ascii_lowercase();
+    lower.starts_with("https://") || lower.starts_with("http://")
+}
+
+/// Opens an http or https URL in the browser, off the UI thread, and anything else not at
+/// all: every caller (a click, the link guard's "Open link") goes through this check, so
+/// nothing else can be opened whatever the detector produced. The URL is not logged.
 pub(super) fn spawn_open(url: String, cx: &mut gpui::App) {
+    if !is_web_url(&url) {
+        return;
+    }
     cx.background_spawn(async move {
         if let Err(e) = open::that(&url) {
             eprintln!("eloquawk: could not open the browser: {}", e.kind());
@@ -1236,6 +1246,22 @@ impl Render for ReaderView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_web_urls_are_handed_to_the_browser() {
+        for ok in ["https://a.example/x", "HTTP://a.example", "http://a"] {
+            assert!(is_web_url(ok), "{ok}");
+        }
+        for bad in [
+            "file:///etc/passwd",
+            "javascript:alert(1)",
+            "mailto:a@b",
+            "",
+            "https:/x",
+        ] {
+            assert!(!is_web_url(bad), "{bad}");
+        }
+    }
 
     #[test]
     fn cut_body_respects_char_boundaries() {
