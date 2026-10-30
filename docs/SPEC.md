@@ -2198,7 +2198,19 @@ client and worker`, `feat(ui): show triage banner and list badges`.
 - The worker drains commands between a split check's two requests and skips the second if
   the account or key was revoked meanwhile. The second request is not retried: its failure
   leaves a partial answer (fingerprint `None`), and if the error is one that pauses (401,
-  402) the worker pauses after emitting the partial `Checked`.
+  402) the worker pauses after emitting the partial `Checked`. A second request that is
+  skipped because sending stopped meanwhile (a pause, a rejected key) or because the first
+  request reached the session spend limit also leaves a partial answer.
+- The second request is sized with its real ids (numbered on from the first request's), so
+  it is measured where it will actually be sent.
+- No suggestions are returned while the target's check is in flight, so `1`/`2`/`3` do
+  nothing then, matching the hidden row (16.12.3).
+- A failed labels-only re-ask records no failure (no "Couldn't check" caption over a clean
+  verdict); the labels are asked again on the next open.
+- With background checks on, a background answer without labels for the open thread makes
+  the store send the labels-only ask at once, instead of waiting for a reopen.
+- `ai/cache.rs` needed no change: merging split and labels-only answers was already in place
+  from M16.
 - A labels-only `Checked` carries the merged cache entry, so it includes the cached verdict.
 - `jev::select_suggestions(probs, labels, applied)` takes the labels already on the thread,
   so step 4 runs before the top three are taken. Names are looked up in
