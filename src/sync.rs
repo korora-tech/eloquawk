@@ -81,6 +81,7 @@ const SIGNED_OUT: &str = "This account is not signed in.";
 const MAYBE_SENT: &str = "Couldn't confirm the message was sent. Check Sent before trying again.";
 const ATTACHMENT_TOO_LARGE: &str = "Attachment too large to download";
 const ATTACHMENT_GONE: &str = "The attachment is no longer in Gmail.";
+const ATTACHMENT_UNREADABLE: &str = "Gmail sent the attachment's data in a form it couldn't read.";
 /// More changed threads than this in one round is a burst: only new inbox mail is refetched,
 /// the rest is dropped from the cache and refetched when a listing shows it (SPEC 7.4).
 const BURST: usize = 100;
@@ -2385,10 +2386,10 @@ impl Worker {
     /// in the download folder under a sanitised name. The outcome is a toast.
     fn save(&mut self, d: Download) {
         let name = files::sanitise(&d.attachment.filename);
-        let bytes = match self.attachment_data(&d.account, &d.message_id, &d.attachment.part_id) {
-            Ok(bytes) => {
+        let data = match self.attachment_base64(&d.account, &d.message_id, &d.attachment.part_id) {
+            Ok(data) => {
                 self.succeeded(&d.account);
-                bytes
+                data
             }
             Err(e) => {
                 let message = attachment_message(&e);
@@ -2398,6 +2399,14 @@ impl Worker {
                 )));
                 return;
             }
+        };
+        // Bad data in one attachment is that attachment's problem, not the account's: a
+        // toast, with no backoff or banner.
+        let Ok(bytes) = b64::decode(&data) else {
+            self.emit(SyncEvent::Notice(format!(
+                "Couldn't save {name}: {ATTACHMENT_UNREADABLE}"
+            )));
+            return;
         };
         let saved = match &self.downloads {
             Some(dir) => std::fs::create_dir_all(dir).map(|()| dir.clone()),
@@ -2416,15 +2425,16 @@ impl Worker {
         }
     }
 
-    /// The bytes of part `part_id` of message `message_id`. The message is read first for a
-    /// fresh attachment id, since Gmail's are not stable; a part whose data is inline (no
-    /// attachment id) needs no second call. A part that is gone is `NotFound`.
-    fn attachment_data(
+    /// The base64url data of part `part_id` of message `message_id`, still encoded: decoding
+    /// is the caller's, since bad data is no reason to back the account off. The message is
+    /// read first for a fresh attachment id, since Gmail's are not stable; a part whose data
+    /// is inline (no attachment id) needs no second call. A part that is gone is `NotFound`.
+    fn attachment_base64(
         &mut self,
         email: &str,
         message_id: &str,
         part_id: &str,
-    ) -> Result<Vec<u8>, CallError> {
+    ) -> Result<String, CallError> {
         let message = self.with_token(email, |agent, ep, token| {
             gmail::message_full(agent, ep, token, message_id)
         })?;
@@ -2444,14 +2454,15 @@ impl Worker {
             (None, Some(data)) => data,
             (None, None) => return Err(CallError::Api(ApiError::NotFound)),
         };
-        b64::decode(&data)
-            .map_err(|_| CallError::Api(ApiError::Decode("attachment data is not base64".into())))
+        Ok(data)
     }
 
     fn deliver(&mut self, out: &Outgoing) -> Result<(), SendError> {
         let parts = gather_attachments(out, |message_id, part_id| {
-            self.attachment_data(&out.account, message_id, part_id)
-                .map_err(|e| attachment_message(&e))
+            let data = self
+                .attachment_base64(&out.account, message_id, part_id)
+                .map_err(|e| attachment_message(&e))?;
+            b64::decode(&data).map_err(|_| ATTACHMENT_UNREADABLE.to_string())
         })?;
         let message_id = compose::new_message_id();
         let raw =
@@ -4179,7 +4190,8 @@ mod tests {
             r#"{{"id":"mfull","threadId":"{A}","payload":{{"partId":"","mimeType":"multipart/mixed","parts":[
                 {{"partId":"0","mimeType":"text/plain","body":{{"size":2,"data":"aGk"}}}},
                 {{"partId":"1","mimeType":"text/plain","filename":"notes.txt","body":{{"size":11,"data":"aGVsbG8gd29ybGQ"}}}},
-                {{"partId":"2","mimeType":"application/pdf","filename":"../report.pdf","body":{{"size":{},"attachmentId":"ATT9"}}}}
+                {{"partId":"2","mimeType":"application/pdf","filename":"../report.pdf","body":{{"size":{},"attachmentId":"ATT9"}}}},
+                {{"partId":"3","mimeType":"application/octet-stream","filename":"bad.bin","body":{{"size":3,"data":"!!!"}}}}
             ]}}}}"#,
             pdf.len()
         );
@@ -4452,6 +4464,27 @@ mod tests {
             "{events:?}"
         );
         all.extend(events);
+        // Data that is not base64 is a toast too, without backing the account off: no banner.
+        handle.send(Command::SaveAttachment {
+            account: me(),
+            message_id: "mfull".into(),
+            attachment: part("3", "bad.bin", None),
+        });
+        let events = until(&rx, |e| {
+            matches!(e, SyncEvent::Saved(_) | SyncEvent::Notice(_))
+        });
+        assert!(
+            matches!(events.last(), Some(SyncEvent::Notice(n)) if n == &format!("Couldn't save bad.bin: {ATTACHMENT_UNREADABLE}")),
+            "{events:?}"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, SyncEvent::Problem(Some(_)))),
+            "{events:?}"
+        );
+        assert!(!downloads.join("bad.bin").exists());
+        all.extend(events);
         let _ = std::fs::remove_dir_all(&downloads);
 
         // A forward carrying the original's attachment.
@@ -4569,7 +4602,11 @@ mod tests {
             .iter()
             .filter(|r| r.path() == "/gmail/messages/mfull")
             .collect();
-        assert_eq!(full.len(), 5, "three saves, a missing part and the forward");
+        assert_eq!(
+            full.len(),
+            6,
+            "three saves, a missing part, a bad one and the forward"
+        );
         assert!(full.iter().all(|r| has(&query(r), "format", "full")));
         assert_eq!(
             reqs.iter()

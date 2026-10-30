@@ -1901,6 +1901,9 @@ milestone are welcome. **No trailers.** Push to main after each commit.
     (404, or the part id no longer in the message) or the usual reader message. Network and
     rate-limit failures also go through the 7.6 handling (banner and backoff), as opening a
     thread does. A save for an account that is not signed in is answered at once.
+    Attachment data that is not valid base64 is local to that attachment: the save toasts
+    "Gmail sent the attachment's data in a form it couldn't read." (a forward fails the same
+    way) without the 7.6 backoff or banner, since retrying the account would not help.
   - Forwarded (Gmail-held) attachments are resolved in the order the composer lists them,
     mixed with local ones, against one 25 MB budget; a Gmail part whose declared size alone
     exceeds what is left is refused before it is downloaded. A failed resolution is
@@ -1913,7 +1916,10 @@ milestone are welcome. **No trailers.** Push to main after each commit.
     followed by anything but `/` is rejected.
   - `start_with` takes a download folder override (`None` in production) so the fake-server
     test saves into a temporary folder.
-  - The live save was not performed by the implementing agent; it is left for the user.
+  - Not yet verified, left for the user: the live Google save, the "Open folder" button
+    (`cx.reveal_path`) actually opening the folder, and the real `files::download_dir()`
+    lookup of `$HOME` and `$XDG_CONFIG_HOME` (the tests cover the pure parsing and an
+    override folder, not the environment lookup). Record the result here once done.
 
 ### M13: Notifications and single instance
 - **Files:** `notify.rs` (pure part, markup escaping, and the notify-rust `show` with icon
