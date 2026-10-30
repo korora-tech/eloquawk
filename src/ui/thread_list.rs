@@ -15,7 +15,9 @@ use jiff::Zoned;
 use super::format;
 use super::main_view::MainView;
 use super::theme::{LIST_W, Palette, ROW_H, palette, tabular};
+use super::triage;
 use super::widgets::{checkbox, ghost_button};
+use crate::ai::jev::Verdict;
 use crate::model::{LabelDelta, ThreadSummary, ViewKind};
 use crate::store::{MutationKind, Row, Store};
 
@@ -222,6 +224,7 @@ impl MainView {
                     let state = RowState {
                         cursor: cursor.as_ref() == Some(&s.key),
                         selected: store.selected.contains(&s.key),
+                        verdict: store.ai_badge_verdict(&s.key),
                     };
                     self.thread_row(p, ix, s, label, state, &now, clock, cx)
                 }
@@ -415,6 +418,11 @@ impl MainView {
                                     .line_height(px(20.0))
                                     .child(line2),
                             )
+                            // The AI badge goes before the attachment mark and the star.
+                            .children(state.verdict.and_then(|v| {
+                                let row_bg = if state.cursor { p.selected } else { p.bg };
+                                triage::badge(p, v.level, v.kind, row_bg)
+                            }))
                             .when(s.has_attachments, |d| d.child(attachment_mark(p)))
                             .child(
                                 div()
@@ -440,6 +448,8 @@ impl MainView {
 struct RowState {
     cursor: bool,
     selected: bool,
+    /// The AI verdict behind the row's badge, when it has one.
+    verdict: Option<Verdict>,
 }
 
 /// A paper clip drawn with divs (the UI font has no clip glyph and emoji are not used): the

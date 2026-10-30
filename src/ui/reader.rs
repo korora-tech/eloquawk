@@ -9,7 +9,11 @@
 //! Each expanded message's body is a [`BodyText`] entity (and an unfolded quote a second one),
 //! kept in a map by message id and dropped when the thread closes. Link clicks from a body
 //! come here: http and https open in the browser, mailto goes through the whitelisted parser
-//! of `mail/mailto.rs`, and nothing else is ever opened.
+//! of `mail/mailto.rs`, and nothing else is ever opened. While the link guard is armed for a
+//! message (SPEC 16.12.1), a web link asks first through a toast.
+//!
+//! Child 0 also carries the AI triage (SPEC 16.12): the banner, the local caution and the
+//! failure or pause caption, so card i stays child i + 1.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
@@ -23,7 +27,9 @@ use jiff::Zoned;
 use super::body_text::{BodyEvent, BodyText};
 use super::format;
 use super::theme::{Palette, palette};
+use super::triage::{self, GuardDecision};
 use super::widgets::{ButtonStyle, OnClick, button, caption, ghost_button, label_chip};
+use crate::ai::jev::Level;
 use crate::mail::address::display_name;
 use crate::mail::links::LinkTarget;
 use crate::mail::mailto;
@@ -124,6 +130,8 @@ struct Fingerprint {
     /// A mutation on the open thread is waiting for the worker.
     pending: bool,
     clock_24h: bool,
+    /// The open thread's AI revision and the global one (SPEC 16.10).
+    ai: (u64, u64),
 }
 
 #[derive(Clone, PartialEq)]
@@ -159,7 +167,12 @@ impl Fingerprint {
                     .collect()
             })
             .unwrap_or_default();
+        let ai = (
+            open.as_ref().map_or(0, |k| store.ai_thread_rev(k)),
+            store.ai.ai_rev,
+        );
         Self {
+            ai,
             summary: open.as_ref().and_then(|k| store.threads.get(k).cloned()),
             pending: open.as_ref().is_some_and(|k| store.is_pending(k)),
             open,
@@ -268,10 +281,15 @@ impl ReaderView {
             return body;
         }
         let body = cx.new(|cx| BodyText::new(text, secondary, cx));
-        let subscription = cx.subscribe(&body, |this, body, event: &BodyEvent, cx| match event {
-            BodyEvent::Selecting => this.clear_selections_except(&body, cx),
-            BodyEvent::OpenLink(target) => this.open_link(target, cx),
-        });
+        // The message a click came from, for the link guard: the map key without "#quote".
+        let message_id = key.strip_suffix("#quote").unwrap_or(&key).to_string();
+        let subscription = cx.subscribe(
+            &body,
+            move |this, body, event: &BodyEvent, cx| match event {
+                BodyEvent::Selecting => this.clear_selections_except(&body, cx),
+                BodyEvent::OpenLink(target) => this.open_link(target, &message_id, cx),
+            },
+        );
         self.bodies.insert(key, (body.clone(), subscription));
         body
     }
@@ -296,11 +314,24 @@ impl ReaderView {
         }
     }
 
-    /// Opens a clicked link: http and https in the browser, mailto in the composer. The
-    /// schemes are checked again here, so nothing else can be opened whatever the detector
-    /// produced.
-    fn open_link(&self, target: &LinkTarget, cx: &mut Context<Self>) {
+    /// Opens a clicked link in `message_id`: http and https in the browser, mailto in the
+    /// composer. The schemes are checked again here, so nothing else can be opened whatever
+    /// the detector produced. While the link guard is armed for the message, a web link only
+    /// posts a toast whose "Open link" button opens it (SPEC 16.12.1).
+    fn open_link(&self, target: &LinkTarget, message_id: &str, cx: &mut Context<Self>) {
         let url = target.url();
+        let guarded = self
+            .last
+            .open
+            .as_ref()
+            .is_some_and(|k| self.store.read(cx).link_guard(k, message_id));
+        if let GuardDecision::Notice { text, url } = triage::guard_decision(target, guarded) {
+            self.store.update(cx, |s, cx| {
+                s.ask_open_link(text, url);
+                cx.notify();
+            });
+            return;
+        }
         match target {
             LinkTarget::Web(_) => {
                 let lower = url.get(..8).unwrap_or(url).to_ascii_lowercase();
@@ -591,7 +622,79 @@ impl ReaderView {
             ))
     }
 
-    fn subject_block(&self, p: &Palette, subject: &str, label_ids: &BTreeSet<String>) -> Div {
+    /// Child 0's AI rows (SPEC 16.12.1): the banner, the local caution when no Warning or
+    /// Danger banner shows, and the failure or pause caption. Nothing while a check is in
+    /// flight, and nothing for a clean result.
+    fn triage_rows(&self, p: &Palette, cx: &Context<Self>) -> Vec<Div> {
+        let Some(key) = self.last.open.clone() else {
+            return Vec::new();
+        };
+        let store = self.store.read(cx);
+        let Some(DetailState::Loaded(detail)) = store.details.get(&key) else {
+            return Vec::new();
+        };
+        let target = store.ai_target(detail);
+        let mut rows = Vec::new();
+        let banner = store.ai_banner(&key).copied();
+        if let (Some(v), Some(target)) = (banner, target) {
+            let report = (!store.viewing_label(labels::SPAM)).then(|| {
+                self.click(cx, |this, _, cx| {
+                    let kind = this.store.read(cx).spam_kind();
+                    this.mutate(kind, cx)
+                })
+            });
+            let dismiss = self.click(cx, |this, _, cx| {
+                this.store.update(cx, |s, cx| {
+                    s.dismiss_triage();
+                    cx.notify();
+                })
+            });
+            rows.push(triage::banner(
+                p,
+                &v,
+                &triage::reasons(target),
+                report,
+                dismiss,
+            ));
+        }
+        let strong = banner.is_some_and(|v| v.level >= Level::Warning);
+        if !strong && let Some(reasons) = store.local_caution(&key) {
+            rows.push(triage::caution(p, &reasons));
+        }
+        let opted_in = store.ai_opted_in(&key.account);
+        if banner.is_none() && opted_in && !store.ai_checking(&key) {
+            if let Some(reason) = store.ai.paused.clone() {
+                rows.push(triage::failure_caption(
+                    p,
+                    format!("Paused: {reason}"),
+                    None,
+                ));
+            } else if let Some((_, retryable)) = store.ai_failure(&key) {
+                let retry = retryable.then(|| {
+                    self.click(cx, |this, _, cx| {
+                        this.store.update(cx, |s, cx| {
+                            s.retry_ai();
+                            cx.notify();
+                        })
+                    })
+                });
+                rows.push(triage::failure_caption(
+                    p,
+                    "Couldn't check this message".into(),
+                    retry,
+                ));
+            }
+        }
+        rows
+    }
+
+    fn subject_block(
+        &self,
+        p: &Palette,
+        subject: &str,
+        label_ids: &BTreeSet<String>,
+        triage: Vec<Div>,
+    ) -> Div {
         let chips = self
             .last
             .user_labels
@@ -618,6 +721,7 @@ impl ReaderView {
                     }),
             )
             .child(div().flex().flex_wrap().gap(px(6.0)).children(chips))
+            .children(triage)
     }
 
     fn card(
@@ -993,7 +1097,7 @@ fn recipients_line(m: &Message) -> String {
 }
 
 /// Opens an http or https URL in the browser, off the UI thread. The URL is not logged.
-fn spawn_open(url: String, cx: &mut gpui::App) {
+pub(super) fn spawn_open(url: String, cx: &mut gpui::App) {
     cx.background_spawn(async move {
         if let Err(e) = open::that(&url) {
             eprintln!("eloquawk: could not open the browser: {}", e.kind());
@@ -1054,7 +1158,8 @@ impl Render for ReaderView {
                 let label_ids = summary
                     .as_ref()
                     .map_or_else(|| detail.label_ids.clone(), |s| s.label_ids.clone());
-                scroll = scroll.child(self.subject_block(p, &detail.subject, &label_ids));
+                let triage = self.triage_rows(p, cx);
+                scroll = scroll.child(self.subject_block(p, &detail.subject, &label_ids, triage));
                 let at = CardEnv {
                     now,
                     gmail_url: summary.as_ref().map(gmail_url),
@@ -1069,7 +1174,7 @@ impl Render for ReaderView {
                     .map(|s| (s.subject.clone(), s.label_ids.clone()))
                     .unwrap_or_default();
                 scroll = scroll
-                    .child(self.subject_block(p, &subject, &label_ids))
+                    .child(self.subject_block(p, &subject, &label_ids, Vec::new()))
                     .child(div().px(px(20.0)).child(caption(p, "Loading…")));
             }
             Err(error) => {

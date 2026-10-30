@@ -6,6 +6,12 @@
 //! returns no explanations), and every host is the ASCII/punycode form, so a homograph cannot
 //! pass for the real name.
 
+use gpui::prelude::*;
+use gpui::{App, Context, Div, FontWeight, SharedString, Window, div, px, rgb};
+
+use super::theme::{Palette, tint};
+use super::widgets::{ButtonStyle, OnClick, button};
+use crate::ai::jev::{Kind, Level, Verdict};
 use crate::mail::links::LinkTarget;
 use crate::model::{AuthResult, Message, MessageSignals};
 
@@ -56,7 +62,6 @@ fn domain(email: &str) -> String {
 /// authentication failure, the first mismatched link, a Reply-To in another domain and a
 /// risky attachment type. M16 note: it takes the whole message, because Reply-To and the
 /// attachments are not part of `MessageSignals`.
-#[allow(dead_code)] // consumed in M16 by the reader (banner and link guard)
 pub fn reasons(m: &Message) -> Vec<String> {
     let s = &m.signals;
     let from = domain(&m.from.email);
@@ -92,7 +97,6 @@ pub fn local_caution(s: &MessageSignals) -> Option<Vec<String>> {
 }
 
 /// What a click on a link does under the link guard.
-#[allow(dead_code)] // consumed in M16 by the reader (banner and link guard)
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GuardDecision {
     Open,
@@ -105,7 +109,6 @@ pub enum GuardDecision {
 
 /// Whether a click opens at once or asks first (SPEC 16.12.1). Mailto links always open the
 /// composer; web links ask while `guarded`, naming the punycode host.
-#[allow(dead_code)] // consumed in M16 by the reader (banner and link guard)
 pub fn guard_decision(target: &LinkTarget, guarded: bool) -> GuardDecision {
     match target {
         LinkTarget::Mail(_) => GuardDecision::Open,
@@ -123,11 +126,220 @@ pub fn guard_decision(target: &LinkTarget, guarded: bool) -> GuardDecision {
     }
 }
 
+/// The banner's title (SPEC 16.12.1).
+pub fn title(v: &Verdict) -> &'static str {
+    match (v.level, v.kind) {
+        (Level::Danger, Kind::Scam) => "This looks like a scam",
+        (Level::Danger, _) => "This looks like phishing",
+        (Level::Warning, Kind::Scam) => "This may be a scam",
+        (Level::Warning, _) => "This may be phishing",
+        _ => "This looks like spam",
+    }
+}
+
+/// The banner's right-hand text: qualitative, since the thresholds are not calibrated.
+pub fn strength(v: &Verdict) -> String {
+    let base = match v.level {
+        Level::Danger => "Jev: very likely",
+        Level::Warning => "Jev: possible",
+        _ => "Jev: likely spam",
+    };
+    let also = match v.kind {
+        Kind::Phishing if v.p_scam >= 0.5 => " · also possibly a scam",
+        Kind::Scam if v.p_phishing >= 0.5 => " · also possibly phishing",
+        _ => "",
+    };
+    format!("{base}{also}")
+}
+
+/// The list badge's text (SPEC 16.12.2).
+pub fn badge_text(level: Level, kind: Kind) -> Option<&'static str> {
+    match (level, kind) {
+        (Level::Danger, Kind::Scam) => Some("Scam"),
+        (Level::Danger, _) => Some("Phishing"),
+        (Level::Warning, _) => Some("Suspicious"),
+        (Level::Spam, _) => Some("Spam"),
+        (Level::None, _) => None,
+    }
+}
+
+/// The level's border colour and text token.
+fn colours(p: &Palette, level: Level) -> (u32, u32) {
+    if level == Level::Danger {
+        (p.red, p.red_text)
+    } else {
+        (p.amber, p.amber_text)
+    }
+}
+
+/// A plain text tooltip.
+struct Tip(SharedString);
+
+impl Render for Tip {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = super::theme::palette(cx);
+        div()
+            .rounded(px(6.0))
+            .border_1()
+            .border_color(rgb(p.border))
+            .bg(rgb(p.panel_raised))
+            .px(px(8.0))
+            .py(px(4.0))
+            .text_size(px(11.5))
+            .text_color(rgb(p.text))
+            .child(self.0.clone())
+    }
+}
+
+/// The reader banner (SPEC 16.12.1). `report` is `None` in the Spam view, which hides it.
+pub fn banner(
+    p: &Palette,
+    v: &Verdict,
+    reasons: &[String],
+    report: Option<OnClick>,
+    dismiss: OnClick,
+) -> Div {
+    let (border, _) = colours(p, v.level);
+    let score = match v.kind {
+        Kind::Phishing => v.p_phishing,
+        Kind::Scam => v.p_scam,
+        Kind::Spam => v.p_spam,
+    };
+    let tip: SharedString = format!("Model score {score:.2}, not a probability of harm").into();
+    let reasons = if reasons.is_empty() {
+        "Jev's assessment of the content".to_string()
+    } else {
+        reasons.join(" \u{b7} ")
+    };
+    div()
+        .w_full()
+        .flex()
+        .flex_col()
+        .gap(px(6.0))
+        .rounded(px(8.0))
+        .border_l(px(3.0))
+        .border_color(rgb(border))
+        .bg(rgb(tint(border, p.panel, 0.12)))
+        .px(px(12.0))
+        .py(px(10.0))
+        .child(
+            div()
+                .flex()
+                .items_baseline()
+                .justify_between()
+                .gap(px(10.0))
+                .child(
+                    div()
+                        .text_size(px(14.0))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(rgb(p.text))
+                        .child(title(v)),
+                )
+                .child(
+                    div()
+                        .id("triage-score")
+                        .flex_shrink_0()
+                        .text_size(px(12.0))
+                        .text_color(rgb(p.secondary))
+                        .tooltip(move |_, cx: &mut App| cx.new(|_| Tip(tip.clone())).into())
+                        .child(strength(v)),
+                ),
+        )
+        .child(
+            div()
+                .text_size(px(12.5))
+                .line_height(px(18.0))
+                .text_color(rgb(p.secondary))
+                .child(reasons),
+        )
+        .child(
+            div()
+                .flex()
+                .gap(px(6.0))
+                .when_some(report, |d, on| {
+                    d.child(button(
+                        p,
+                        "triage-report",
+                        "Report spam",
+                        ButtonStyle::Secondary,
+                        Some(on),
+                    ))
+                })
+                .child(button(
+                    p,
+                    "triage-dismiss",
+                    "Dismiss",
+                    ButtonStyle::Secondary,
+                    Some(dismiss),
+                )),
+        )
+}
+
+/// The local caution row (SPEC 16.12.1): amber, no score, no Jev wording, no Dismiss.
+pub fn caution(p: &Palette, reasons: &[String]) -> Div {
+    div()
+        .w_full()
+        .rounded(px(8.0))
+        .border_l(px(3.0))
+        .border_color(rgb(p.amber))
+        .bg(rgb(tint(p.amber, p.panel, 0.12)))
+        .px(px(12.0))
+        .py(px(8.0))
+        .text_size(px(12.5))
+        .line_height(px(18.0))
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(rgb(p.amber_text))
+        .child(format!("Eloquawk noticed: {}", reasons.join(" \u{b7} ")))
+}
+
+/// The muted caption after a failed check, with "Retry" when a retry may help, or the pause.
+pub fn failure_caption(p: &Palette, text: String, retry: Option<OnClick>) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .gap(px(4.0))
+        .text_size(px(12.0))
+        .line_height(px(16.0))
+        .text_color(rgb(p.muted))
+        .child(text)
+        .when_some(retry, |d, on| {
+            d.child("\u{b7}").child(
+                div()
+                    .id("triage-retry")
+                    .text_color(rgb(p.link))
+                    .underline()
+                    .cursor_pointer()
+                    .on_click(on)
+                    .child("Retry"),
+            )
+        })
+}
+
+/// The thread row's pill (SPEC 16.12.2), on `row_bg`.
+pub fn badge(p: &Palette, level: Level, kind: Kind, row_bg: u32) -> Option<Div> {
+    let text = badge_text(level, kind)?;
+    let (colour, text_colour) = colours(p, level);
+    Some(
+        div()
+            .flex_shrink_0()
+            .px(px(6.0))
+            .py(px(1.0))
+            .rounded(px(4.0))
+            .bg(rgb(tint(colour, row_bg, 0.15)))
+            .text_size(px(11.0))
+            .line_height(px(16.0))
+            .font_weight(FontWeight::SEMIBOLD)
+            .text_color(rgb(text_colour))
+            .child(text),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
 
     use super::*;
+    use crate::ai::jev::{THRESHOLDS, verdict_from};
     use crate::model::{Address, Attachment, AuthResults, BodySource, LinkSignal};
 
     fn signals(dmarc: AuthResult, links: Vec<LinkSignal>) -> MessageSignals {
@@ -230,6 +442,28 @@ mod tests {
             ))
             .is_none()
         );
+    }
+
+    #[test]
+    fn titles_strengths_and_badges() {
+        let v = |p, s, sp| verdict_from(p, s, sp, &THRESHOLDS);
+        assert_eq!(title(&v(0.97, 0.0, 0.0)), "This looks like phishing");
+        assert_eq!(title(&v(0.0, 0.91, 0.0)), "This looks like a scam");
+        assert_eq!(title(&v(0.62, 0.0, 0.0)), "This may be phishing");
+        assert_eq!(title(&v(0.0, 0.6, 0.0)), "This may be a scam");
+        assert_eq!(title(&v(0.0, 0.0, 0.9)), "This looks like spam");
+        assert_eq!(strength(&v(0.97, 0.0, 0.0)), "Jev: very likely");
+        assert_eq!(
+            strength(&v(0.97, 0.55, 0.0)),
+            "Jev: very likely · also possibly a scam"
+        );
+        assert_eq!(strength(&v(0.6, 0.0, 0.0)), "Jev: possible");
+        assert_eq!(strength(&v(0.0, 0.0, 0.9)), "Jev: likely spam");
+        assert_eq!(badge_text(Level::Danger, Kind::Scam), Some("Scam"));
+        assert_eq!(badge_text(Level::Danger, Kind::Phishing), Some("Phishing"));
+        assert_eq!(badge_text(Level::Warning, Kind::Scam), Some("Suspicious"));
+        assert_eq!(badge_text(Level::Spam, Kind::Spam), Some("Spam"));
+        assert_eq!(badge_text(Level::None, Kind::Phishing), None);
     }
 
     #[test]

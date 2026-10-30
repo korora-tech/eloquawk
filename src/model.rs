@@ -211,7 +211,6 @@ impl AuthResult {
     }
 
     /// The lowercase name the AI prompt sends (`"softfail"`, `"unknown"`).
-    #[allow(dead_code)] // consumed in M16 by ai/prompt
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Pass => "pass",
@@ -249,7 +248,6 @@ pub struct LinkSignal {
 
 impl LinkSignal {
     /// The text names one host and the link goes to another (a leading `www.` aside).
-    #[allow(dead_code)] // consumed in M16 by ai/prompt and ui/triage
     pub fn mismatched(&self) -> bool {
         let bare = |h: &str| h.strip_prefix("www.").unwrap_or(h).to_string();
         self.text_host

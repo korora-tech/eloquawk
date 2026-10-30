@@ -73,6 +73,8 @@ pub enum NoticeAction {
     Undo,
     /// Shows the folder holding a saved attachment, with the file selected (M12).
     OpenFolder(PathBuf),
+    /// Opens a link the phishing guard held back (SPEC 16.12.1); the URL stays in memory.
+    OpenLink(String),
 }
 
 /// A transient message for the toast.
@@ -698,6 +700,11 @@ impl Store {
     /// Posts a plain toast from the UI, such as a feature that is not available yet.
     pub fn inform(&mut self, text: impl Into<String>) {
         self.post_notice(text.into(), None);
+    }
+
+    /// The link guard's question: a toast whose "Open link" button opens `url`.
+    pub fn ask_open_link(&mut self, text: String, url: String) {
+        self.post_notice(text, Some(NoticeAction::OpenLink(url)));
     }
 
     /// Clears the toast (it expired or was dismissed); its undo goes with it.
@@ -1863,7 +1870,6 @@ impl Store {
     }
 
     /// The reader's "Retry" after a retryable failure: clears it and checks again.
-    #[allow(dead_code)] // consumed in M16 by the reader and list (ui/triage)
     pub fn retry_ai(&mut self) {
         let Some(key) = self.open.clone() else {
             return;
@@ -1876,7 +1882,6 @@ impl Store {
     }
 
     /// Hides the open thread's banner for this session.
-    #[allow(dead_code)] // consumed in M16 by the reader and list (ui/triage)
     pub fn dismiss_triage(&mut self) {
         let Some(key) = self.open.clone() else {
             return;
@@ -1943,7 +1948,6 @@ impl Store {
     }
 
     /// The thread's change counter, for the reader's fingerprint.
-    #[allow(dead_code)] // consumed in M16 by the reader and list (ui/triage)
     pub fn ai_thread_rev(&self, key: &ThreadKey) -> u64 {
         self.ai.rev.get(key).copied().unwrap_or(0)
     }
@@ -1954,21 +1958,25 @@ impl Store {
         Some((id, r))
     }
 
-    /// The list badge's level, for threads checked this session; `Level::Spam` is hidden in
+    /// The list badge's verdict, for threads checked this session; `Level::Spam` is hidden in
     /// the Spam view.
-    #[allow(dead_code)] // consumed in M16 by the reader and list (ui/triage)
-    pub fn ai_badge(&self, key: &ThreadKey) -> Option<Level> {
-        let level = self.result_for(key)?.1.verdict?.level;
-        match level {
+    pub fn ai_badge_verdict(&self, key: &ThreadKey) -> Option<Verdict> {
+        let v = self.result_for(key)?.1.verdict?;
+        match v.level {
             Level::None => None,
             Level::Spam if self.viewing_label(labels::SPAM) => None,
-            l => Some(l),
+            _ => Some(v),
         }
+    }
+
+    /// The list badge's level (SPEC 16.10).
+    #[cfg(test)]
+    pub fn ai_badge(&self, key: &ThreadKey) -> Option<Level> {
+        self.ai_badge_verdict(key).map(|v| v.level)
     }
 
     /// The reader banner's verdict: the open target's, unless dismissed, clean, or spam in
     /// the Spam view.
-    #[allow(dead_code)] // consumed in M16 by the reader and list (ui/triage)
     pub fn ai_banner(&self, key: &ThreadKey) -> Option<&Verdict> {
         let id = self.target_id(key)?;
         let mk = (key.account.clone(), id);
@@ -1984,14 +1992,12 @@ impl Store {
     }
 
     /// Whether the open target's check is in flight.
-    #[allow(dead_code)] // consumed in M16 by the reader and list (ui/triage)
     pub fn ai_checking(&self, key: &ThreadKey) -> bool {
         self.target_id(key)
             .is_some_and(|id| self.ai.checking.contains(&(key.account.clone(), id)))
     }
 
     /// The open target's failure, when its check failed.
-    #[allow(dead_code)] // consumed in M16 by the reader and list (ui/triage)
     pub fn ai_failure(&self, key: &ThreadKey) -> Option<&(String, bool)> {
         let id = self.target_id(key)?;
         self.ai.failed.get(&(key.account.clone(), id))
@@ -1999,7 +2005,6 @@ impl Store {
 
     /// The local caution's reasons for a loaded thread's target (SPEC 16.12.1): any account,
     /// no key, no request.
-    #[allow(dead_code)] // consumed in M16 by the reader and list (ui/triage)
     pub fn local_caution(&self, key: &ThreadKey) -> Option<Vec<String>> {
         let target = self.ai_target(self.loaded(key)?)?;
         crate::ui::triage::local_caution(&target.signals)
@@ -2007,7 +2012,6 @@ impl Store {
 
     /// Whether a click on a web link in `message_id` must ask first: the message is the
     /// target and Jev called it dangerous, or the local caution applies (SPEC 16.12.1).
-    #[allow(dead_code)] // consumed in M16 by the reader and list (ui/triage)
     pub fn link_guard(&self, key: &ThreadKey, message_id: &str) -> bool {
         let Some(detail) = self.loaded(key) else {
             return false;

@@ -25,11 +25,12 @@ use super::text_input::{Submit, TextInput};
 use super::theme::{self, CONTROL_H, HEADER_H, ICON_SLOT, LIST_W, SIDEBAR_W, palette, tint};
 use super::widgets::{ButtonStyle, button, ghost_button};
 use super::{
-    Archive, BackToList, CancelSearch, CloseSearch, CloseWindow, CollapseAll, Compose, ExpandAll,
-    FocusSearch, Forward, GoAllMail, GoDrafts, GoInbox, GoSent, GoStarred, MarkRead, MarkUnread,
-    NextAccount, NextMessage, NextThread, OpenLabelPicker, OpenSettings, OpenThread, PrevAccount,
-    PrevMessage, PrevThread, Quit, Refresh, Reply, ReplyAll, ReportSpam, ScrollReaderDown,
-    ScrollReaderUp, ToggleHelp, ToggleSelect, ToggleStar, Trash, Undo,
+    Archive, BackToList, CancelSearch, CloseSearch, CloseWindow, CollapseAll, Compose,
+    DismissTriage, ExpandAll, FocusSearch, Forward, GoAllMail, GoDrafts, GoInbox, GoSent,
+    GoStarred, MarkRead, MarkUnread, NextAccount, NextMessage, NextThread, OpenLabelPicker,
+    OpenSettings, OpenThread, PrevAccount, PrevMessage, PrevThread, Quit, Refresh, Reply, ReplyAll,
+    ReportSpam, ScrollReaderDown, ScrollReaderUp, ToggleHelp, ToggleSelect, ToggleStar, Trash,
+    Undo,
 };
 use crate::branding;
 use crate::demo_script::{Cond, FocusTarget};
@@ -962,6 +963,19 @@ impl MainView {
                     });
                 }))),
             )),
+            Some(NoticeAction::OpenLink(url)) => {
+                let url = url.clone();
+                Some(button(
+                    p,
+                    "toast-open-link",
+                    "Open link",
+                    ButtonStyle::Secondary,
+                    // The same opener as an unguarded click; the URL is never logged.
+                    Some(Box::new(move |_: &ClickEvent, _, cx: &mut App| {
+                        super::reader::spawn_open(url.clone(), cx)
+                    })),
+                ))
+            }
             Some(NoticeAction::OpenFolder(path)) => {
                 let path = path.clone();
                 Some(button(
@@ -1147,6 +1161,14 @@ impl Render for MainView {
                             .on_action(cx.listener(unless_help(Self::mark_read)))
                             .on_action(cx.listener(unless_help(Self::mark_unread)))
                             .on_action(cx.listener(unless_help(Self::report_spam)))
+                            .on_action(cx.listener(unless_help(
+                                |this, _: &DismissTriage, _, cx| {
+                                    this.store.update(cx, |s, cx| {
+                                        s.dismiss_triage();
+                                        cx.notify();
+                                    })
+                                },
+                            )))
                             .on_action(cx.listener(unless_help(Self::undo)))
                             .on_action(cx.listener(unless_help(Self::expand_all)))
                             .on_action(cx.listener(unless_help(Self::collapse_all)))

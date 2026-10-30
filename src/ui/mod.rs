@@ -61,6 +61,8 @@ actions!(
         MarkUnread,
         /// Reports spam (Not spam in the Spam view).
         ReportSpam,
+        /// Hides the open thread's AI banner for the session (not bound to a key).
+        DismissTriage,
         OpenLabelPicker,
         Reply,
         ReplyAll,

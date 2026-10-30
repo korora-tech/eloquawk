@@ -30,6 +30,9 @@ pub struct Palette {
     pub green: u32,
     pub red: u32,
     pub amber: u32,
+    /// Text drawn in a triage colour; `red` and `amber` stay the borders and tints (SPEC 16.12).
+    pub red_text: u32,
+    pub amber_text: u32,
     pub selected: u32,
     pub selected_border: u32,
     pub hover: u32,
@@ -58,6 +61,8 @@ pub static DARK: Palette = Palette {
     green: 0x68d9aa,
     red: 0xff6b7a,
     amber: 0xffc36a,
+    red_text: 0xff8a96,
+    amber_text: 0xffc36a,
     selected: 0x2a263c,
     selected_border: 0x5c4e85,
     hover: 0x292d3b,
@@ -85,6 +90,8 @@ pub static LIGHT: Palette = Palette {
     green: 0x1f8a5c,
     red: 0xc8323f,
     amber: 0xb7791f,
+    red_text: 0x9a2530,
+    amber_text: 0x7a4f0f,
     selected: 0xebe7fd,
     selected_border: 0xb9acf3,
     hover: 0xeceef4,
@@ -277,6 +284,35 @@ mod tests {
             }
             // Selected text stays readable over its highlight.
             assert!(contrast(p.text, p.selection) >= 4.5, "{name} selection");
+        }
+    }
+
+    /// The triage badge, caution and banner text (SPEC 16.12): every pairing is at least 4.5.
+    #[test]
+    fn triage_text_meets_contrast() {
+        for (name, p) in [("dark", &DARK), ("light", &LIGHT)] {
+            for (sn, s) in [
+                ("bg", p.bg),
+                ("panel", p.panel),
+                ("selected", p.selected),
+                ("hover", p.hover),
+            ] {
+                for a in [0.12, 0.15] {
+                    for (tn, text, colour) in [
+                        ("red_text", p.red_text, p.red),
+                        ("amber_text", p.amber_text, p.amber),
+                    ] {
+                        let r = contrast(text, tint(colour, s, a));
+                        assert!(r >= 4.5, "{name}: {tn} on its {a} tint over {sn} is {r:.2}");
+                    }
+                }
+            }
+            for (cn, colour) in [("red", p.red), ("amber", p.amber)] {
+                for (tn, text) in [("text", p.text), ("secondary", p.secondary)] {
+                    let r = contrast(text, tint(colour, p.panel, 0.12));
+                    assert!(r >= 4.5, "{name}: {tn} on {cn} 0.12 over panel is {r:.2}");
+                }
+            }
         }
     }
 
