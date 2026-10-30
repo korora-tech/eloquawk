@@ -421,6 +421,24 @@ fn run_step(step: &Step, store: &Entity<Store>, cx: &mut App) {
                 "ELOQUAWK_EXPECT fail step attach:{path} (no compose window)"
             )),
         },
+        Step::Settings(card) => {
+            match main.update(cx, |view, window, cx| {
+                view.open_settings_at(card, window, cx)
+            }) {
+                Ok(Ok(())) => {}
+                Ok(Err(why)) => {
+                    report(format!("ELOQUAWK_EXPECT fail step settings:{card} ({why})"))
+                }
+                Err(_) => report(format!(
+                    "ELOQUAWK_EXPECT fail step settings:{card} (no window)"
+                )),
+            }
+        }
+        Step::Link(n) => match main.update(cx, |view, _, cx| view.follow_link(*n, cx)) {
+            Ok(Ok(())) => {}
+            Ok(Err(why)) => report(format!("ELOQUAWK_EXPECT fail step link:{n} ({why})")),
+            Err(_) => report(format!("ELOQUAWK_EXPECT fail step link:{n} (no window)")),
+        },
         Step::Save(n) => match main.read_with(cx, |view, cx| view.save_attachment(*n, cx)) {
             Ok(Ok(())) => {}
             Ok(Err(why)) => report(format!("ELOQUAWK_EXPECT fail step save:{n} ({why})")),

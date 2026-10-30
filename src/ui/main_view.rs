@@ -32,6 +32,7 @@ use super::{
     ReportSpam, ScrollReaderDown, ScrollReaderUp, ToggleHelp, ToggleSelect, ToggleStar, Trash,
     Undo,
 };
+use crate::ai::jev::{Kind, Level};
 use crate::branding;
 use crate::demo_script::{Cond, FocusTarget};
 use crate::model::{ComposeKind, LabelDelta, ThreadKey, ViewKind, labels};
@@ -595,6 +596,32 @@ impl MainView {
             .update(cx, |reader, cx| reader.select_all_in_card(n, window, cx))
     }
 
+    /// The demo script's `settings:<card>`: opens Settings and scrolls it to the card.
+    pub fn open_settings_at(
+        &mut self,
+        card: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        self.open_settings(window, cx);
+        let view = self
+            .settings
+            .as_ref()
+            .map(|(v, _)| v.clone())
+            .ok_or("no settings")?;
+        if view.update(cx, |v, cx| v.scroll_to_card(card, cx)) {
+            Ok(())
+        } else {
+            Err(format!("no card {card}"))
+        }
+    }
+
+    /// The demo script's `link:N`: follows the open target's n-th web link, guard and all.
+    pub fn follow_link(&mut self, n: usize, cx: &mut Context<Self>) -> Result<(), String> {
+        self.reader
+            .update(cx, |reader, cx| reader.follow_nth_link(n, cx))
+    }
+
     /// Saves the open thread's attachment `n` (the demo's `save:N` step).
     pub fn save_attachment(&self, n: usize, cx: &gpui::App) -> Result<(), String> {
         self.reader.read(cx).save_attachment(n, cx)
@@ -794,6 +821,23 @@ impl MainView {
             Cond::Composers(want) => {
                 let n = compose::open_count(cx);
                 (n == *want, n.to_string())
+            }
+            Cond::Ai(want) => {
+                let actual = store.open.as_ref().map_or("none", |key| {
+                    let banner = store.ai_banner(key).map(|v| (v.level, v.kind));
+                    match banner {
+                        Some((Level::Danger, Kind::Scam)) => "danger-scam",
+                        Some((Level::Danger, _)) => "danger-phishing",
+                        Some((Level::Warning, _)) => "warning",
+                        _ if store.local_caution(key).is_some() => "caution",
+                        Some((Level::Spam, _)) => "spam",
+                        _ if store.ai.paused.is_some() => "paused",
+                        _ if store.ai_checking(key) => "checking",
+                        _ if store.ai_failure(key).is_some() => "failed",
+                        _ => "none",
+                    }
+                });
+                (want == actual, actual.to_string())
             }
             Cond::Screen(want) => {
                 let actual = match self.current_screen(cx) {

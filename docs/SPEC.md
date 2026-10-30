@@ -3413,7 +3413,8 @@ Settings binds only escape, so a script cannot reach it with keys. A new demo st
 `settings:<card>` (16.13) opens Settings like `ctrl-comma` and calls
 `SettingsView::scroll_to_card(card)`, which scrolls the Settings scroll handle so the named
 card's top is in view; `ai` is the only card name for now, and anything else is `Unknown`. The
-`settings-ai` shot uses it; `scripts/screenshot.sh` needs no change.
+`settings-ai` shot uses it. **M16 note:** `scripts/screenshot.sh` now waits up to 60 s for
+`ELOQUAWK_READY` instead of 20 s, because the `new-mail-checked` shot waits 22 s first.
 
 ### 16.13 Demo mode
 
@@ -3647,11 +3648,16 @@ applies its events with `apply_ai`, and gains these steps:
   most, 16.13). The 20 s simulated arrival is covered separately by `new-mail-checked`:
   `wait:22000,search:from:priya subject:call,o,wait:600,expect:ai=none,shot`, which opens the
   arrived thread rather than the cursor row, since background checks are on in demo.
-- `link-guard`: `search:subject:suspended,o,wait:800,link:0,wait:200,expect:notice=This message looks like phishing. Open paypa1-verify.example?,shot`.
+- `link-guard`: `search:subject:suspended,o,wait:800,link:1,wait:200,expect:notice=This message looks like phishing. Open paypa1-verify.example?,shot`.
+  **M16 note:** link 0 of the converted body is the visible `https://www.paypal.com/signin`
+  text (itself a link to paypal.com, so its notice names `www.paypal.com`); the `<href>`
+  decoration to `paypa1-verify.example` is link 1.
 - `ai-failed`: `search:subject:quarterly,o,wait:1500,expect:ai=failed,shot`, with the muted
   "Couldn't check this message · Retry" caption.
-- `ai-paused`: `search:subject:statement,o,wait:800,expect:ai=paused,shot`, then
+- `ai-paused`: `search:subject:jev-pause,o,wait:800,expect:ai=paused,shot`, then
   `settings:ai,wait:300,shot` as `ai-paused-settings` with the paused banner and **Try again**.
+  **M16 note:** `subject:statement` also matches a newer generated "Your monthly statement is
+  ready" thread, which `o` would open instead.
 - `suggest` (M17): `search:subject:4471,o,wait:800,expect:suggest=Receipts,shot`, then
   `1,wait:400,expect:label=Receipts:yes,expect:suggest=,shot` as `suggest-applied`.
 - `settings-ai`: `settings:ai,wait:300,shot`, in both themes.

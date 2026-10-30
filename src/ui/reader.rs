@@ -319,6 +319,33 @@ impl ReaderView {
     /// the detector produced. While the link guard is armed for the message, a web link only
     /// posts a toast whose "Open link" button opens it (SPEC 16.12.1).
     fn open_link(&self, target: &LinkTarget, message_id: &str, cx: &mut Context<Self>) {
+        self.follow(target, message_id, false, cx);
+    }
+
+    /// The demo script's `link:N`: the n-th http(s) link of the open thread's target body goes
+    /// through the same guard as a click. Unguarded, it prints `link: would open <host>`
+    /// instead of opening a browser.
+    pub fn follow_nth_link(&mut self, n: usize, cx: &mut Context<Self>) -> Result<(), String> {
+        let key = self.last.open.clone().ok_or("no open thread")?;
+        let (message_id, body) = {
+            let store = self.store.read(cx);
+            let Some(DetailState::Loaded(detail)) = store.details.get(&key) else {
+                return Err("the thread is not loaded".into());
+            };
+            let target = store.ai_target(detail).ok_or("no target message")?;
+            (target.id.clone(), BodyParts::of(target).main)
+        };
+        let link = crate::mail::links::find_links(&body)
+            .into_iter()
+            .map(|(_, t)| t)
+            .filter(|t| matches!(t, LinkTarget::Web(_)))
+            .nth(n)
+            .ok_or_else(|| format!("no link {n}"))?;
+        self.follow(&link, &message_id, true, cx);
+        Ok(())
+    }
+
+    fn follow(&self, target: &LinkTarget, message_id: &str, dry: bool, cx: &mut Context<Self>) {
         let url = target.url();
         let guarded = self
             .last
@@ -335,7 +362,13 @@ impl ReaderView {
         match target {
             LinkTarget::Web(_) => {
                 let lower = url.get(..8).unwrap_or(url).to_ascii_lowercase();
-                if lower.starts_with("https://") || lower.starts_with("http://") {
+                if dry {
+                    let host = url::Url::parse(url)
+                        .ok()
+                        .and_then(|u| u.host_str().map(str::to_string))
+                        .unwrap_or_default();
+                    println!("link: would open {host}");
+                } else if lower.starts_with("https://") || lower.starts_with("http://") {
                     spawn_open(url.to_string(), cx);
                 }
             }

@@ -121,7 +121,23 @@ pub enum Cond {
     Messages(usize),
     /// The main window's screen (`screen=mail|settings|auth`). M9.
     Screen(String),
+    /// The open thread's triage state (`ai=danger-phishing|danger-scam|warning|spam|caution|
+    /// none|checking|failed|paused`). M16.
+    Ai(String),
 }
+
+/// The values `expect:ai=` accepts.
+pub const AI_STATES: [&str; 9] = [
+    "danger-phishing",
+    "danger-scam",
+    "warning",
+    "spam",
+    "caution",
+    "none",
+    "checking",
+    "failed",
+    "paused",
+];
 
 /// One script step.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -145,6 +161,10 @@ pub enum Step {
     Attach(String),
     /// Press Save on the open thread's attachment N, counted across its messages. M12.
     Save(usize),
+    /// Open Settings and scroll it to the named card (only `ai`). M16.
+    Settings(String),
+    /// Follow the n-th web link of the open thread's target body, as a click would. M16.
+    Link(usize),
     /// Dispatch the named action (see [`demo_action`]).
     Act(String),
     /// Send each character as a keystroke.
@@ -317,6 +337,7 @@ fn parse_cond(value: &str) -> Option<Cond> {
         "composers" => Cond::Composers(arg.parse().ok()?),
         "messages" => Cond::Messages(arg.parse().ok()?),
         "screen" if matches!(arg, "mail" | "settings" | "auth") => Cond::Screen(arg.to_string()),
+        "ai" if AI_STATES.contains(&arg) => Cond::Ai(arg.to_string()),
         _ => return None,
     };
     Some(cond)
@@ -348,6 +369,8 @@ fn parse_step(step: &str) -> Step {
             "search" => Step::Search(value.to_string()),
             "attach" if !value.is_empty() => Step::Attach(value.to_string()),
             "save" => value.parse().map(Step::Save).unwrap_or_else(|_| unknown()),
+            "settings" if value == "ai" => Step::Settings(value.to_string()),
+            "link" => value.parse().map(Step::Link).unwrap_or_else(|_| unknown()),
             "act" if demo_action(value).is_some() => Step::Act(value.to_string()),
             "type" if !value.is_empty() => Step::Type(value.to_string()),
             "expect" => match parse_cond(value) {
@@ -390,6 +413,7 @@ pub const DEMO_ACTIONS: &[&str] = &[
     "MarkRead",
     "MarkUnread",
     "ReportSpam",
+    "DismissTriage",
     "OpenLabelPicker",
     "Reply",
     "ReplyAll",
@@ -435,6 +459,7 @@ pub fn demo_action(name: &str) -> Option<Box<dyn Action>> {
         "MarkRead" => Box::new(ui::MarkRead),
         "MarkUnread" => Box::new(ui::MarkUnread),
         "ReportSpam" => Box::new(ui::ReportSpam),
+        "DismissTriage" => Box::new(ui::DismissTriage),
         "OpenLabelPicker" => Box::new(ui::OpenLabelPicker),
         "Reply" => Box::new(ui::Reply),
         "ReplyAll" => Box::new(ui::ReplyAll),
@@ -605,6 +630,10 @@ mod tests {
             Some(Cond::Screen("settings".into()))
         );
         assert_eq!(cond("screen=elsewhere"), None);
+        for state in AI_STATES {
+            assert_eq!(cond(&format!("ai={state}")), Some(Cond::Ai(state.into())));
+        }
+        assert_eq!(cond("ai=maybe"), None);
         assert_eq!(cond("compose=from"), None);
         assert_eq!(cond("discard=maybe"), None);
         assert_eq!(cond("picker=ajar"), None);
@@ -617,6 +646,20 @@ mod tests {
         assert_eq!(cond("focus=nowhere"), None);
         assert_eq!(cond("cursor=x"), None);
         assert_eq!(cond("colour=red"), None);
+    }
+
+    #[test]
+    fn triage_steps_parse() {
+        assert_eq!(
+            parse_steps("settings:ai,link:0,settings:prefs,link:x,act:DismissTriage"),
+            vec![
+                Step::Settings("ai".into()),
+                Step::Link(0),
+                Step::Unknown("settings:prefs".into()),
+                Step::Unknown("link:x".into()),
+                Step::Act("DismissTriage".into()),
+            ]
+        );
     }
 
     #[test]

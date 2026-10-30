@@ -292,6 +292,19 @@ impl SettingsView {
         });
     }
 
+    /// Scrolls so the named card's top is in view; `ai` is the only name (the demo script's
+    /// `settings:` step). False for an unknown name.
+    pub fn scroll_to_card(&mut self, card: &str, cx: &mut Context<Self>) -> bool {
+        // Children: the title row, then the client, accounts, preferences and AI cards.
+        let ix = match card {
+            "ai" => 4,
+            _ => return false,
+        };
+        self.scroll.scroll_to_top_of_item(ix);
+        cx.notify();
+        true
+    }
+
     /// Settings is closing: drop the typed key.
     pub fn closing(&mut self, cx: &mut Context<Self>) {
         self.clear_key_field(cx);
@@ -1062,41 +1075,39 @@ impl Render for SettingsView {
             .size_full()
             .overflow_y_scroll()
             .track_scroll(&self.scroll)
+            // Each card is a direct child, so `scroll_to_card` can bring one to the top.
             .flex()
-            .justify_center()
-            .child(
-                div()
-                    .w_full()
-                    .max_w(px(720.0))
-                    .flex()
-                    .flex_col()
-                    .gap_4()
-                    .p_6()
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .child(
-                                div()
-                                    .text_size(px(18.0))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(rgb(p.text))
-                                    .child("Settings"),
-                            )
-                            .child(ghost_button(
-                                p,
-                                "close-settings",
-                                "✕",
-                                Some(Box::new(cx.listener(|_, _: &ClickEvent, _, cx| {
-                                    cx.emit(SettingsEvent::Close)
-                                }))),
-                            )),
-                    )
-                    .child(client)
-                    .child(accounts)
-                    .child(prefs)
-                    .child(ai),
+            .flex_col()
+            .items_center()
+            .gap_4()
+            .p_6()
+            .children(
+                [
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .child(
+                            div()
+                                .text_size(px(18.0))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(rgb(p.text))
+                                .child("Settings"),
+                        )
+                        .child(ghost_button(
+                            p,
+                            "close-settings",
+                            "✕",
+                            Some(Box::new(cx.listener(|_, _: &ClickEvent, _, cx| {
+                                cx.emit(SettingsEvent::Close)
+                            }))),
+                        )),
+                    client,
+                    accounts,
+                    prefs,
+                    ai,
+                ]
+                .map(|d| d.w_full().max_w(px(720.0)).flex_shrink_0()),
             )
     }
 }

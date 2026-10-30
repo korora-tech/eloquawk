@@ -72,7 +72,8 @@ cleanup() {
 trap cleanup EXIT
 
 title=""
-for _ in $(seq 1 200); do
+# Up to 60 s: a shot may wait for the demo's 20-second simulated new mail first.
+for _ in $(seq 1 600); do
     if line=$(grep -m1 '^ELOQUAWK_READY ' "$log"); then
         title=${line#ELOQUAWK_READY }
         break
