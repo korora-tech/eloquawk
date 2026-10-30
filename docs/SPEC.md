@@ -2136,6 +2136,24 @@ client and worker`, `feat(ui): show triage banner and list badges`.
   - Section 15 items 16, 17, 18, 20, 21 and 25 are re-checked against the docs before work
     starts; the live check is done if a key is available, otherwise reported as not performed.
 
+**M16 implementation notes** (deviations from section 16, kept small):
+- `AiCommand::Check` carries a `Box<CheckRequest>` (clippy's large-variant lint).
+- `triage::reasons` takes the whole `&Message`, because Reply-To and the attachments are not
+  part of `MessageSignals`.
+- `prompt::fit` is triage-only in M16 (steps 3, 4 and 6 of 16.6.6) and returns the fitted
+  `AiInput`; M17 adds the label questions, the second request and `Plan`.
+- Redaction first separates an `http(s)://` glued to the word before it (`Clickhttps://…`),
+  which `find_links` would skip, so its path cannot escape.
+- `Store::ai_badge_verdict` gives the list the badge's kind as well as its level;
+  `Store::ai_badge` keeps the spec's signature for tests.
+- `fake_openrouter_event_invariant` drives the real worker loop with a scripted in-process
+  `Decider` rather than the loopback server, so slot replacement, FIFO overflow, background
+  exhaustion, a pause, `ForgetAccount` and `ClearKey` all happen in one deterministic run.
+- `ai/fixtures/response_live.json` follows the live response recorded on 2026-10-30; the
+  tutorial's response was not available verbatim.
+- The demo count, the screenshot script's timeout and two shot scripts are corrected in 16.13
+  and 16.15.
+
 ### M17: Label suggestions as next actions
 - **Files:**
   - `ai/prompt.rs` (`label_candidates`, `label_questions`, `fit` with labels)
@@ -2251,14 +2269,28 @@ views.
     `Nearest`; the list uses `Nearest`.
 14. The response shape of `messages.send` with `uploadType=multipart`.
 
-**AI triage (section 16).** The docs were re-read on 2026-10-30; no live call has been made.
+**AI triage (section 16).** The docs were re-read on 2026-10-30. **M16 note:** the
+orchestrator made live Decisions calls on 2026-10-30 (Eloquawk itself has not, and no key was
+available to the M16 build). Verified live: `POST https://openrouter.ai/api/alpha/decisions`
+with a bearer key; a 200 body is `{"model":"typesafe/jev-1.13-20260917","answers":{"<id>":
+{"type":"noul","noul":0.97}},"usage":{"input_tokens":448,"output_tokens":55,"cost":0.000018816},
+"id":"gen-dec-…","provider":"TypeSafe"}`; question types are exactly `noul`, `choice`, `score`
+and `box`; a `choice` requires `"criteria": {"<option>": "<description>"}` (an `options` list
+is refused with 400) and answers `{"type":"choice","choice":…,"probabilities":{…},
+"confidence":…}`; `provider: {"zdr": true, "data_collection": "deny"}` is accepted; errors
+are `{"error":{"message":"…","code":401}}` with a **numeric** code (a bad key says
+"User not found."), and a 400 validation error carries a JSON-array string in `message` plus a
+top-level `user_id`; latency 0.2–0.65 s; about $0.00002 per call of three to five questions.
+`openrouter::classify` accepts a numeric or string `code` and never logs `message`. Items
+below are marked with what this settles.
 15. **Thresholds.** The values in 16.7 and `SUGGEST_MIN` are initial. Calibrate them on a
     labelled sample. With the user's consent, use their own Spam folder and a set of known-good
     mail **that includes legitimate security notices** (new sign-in, password changed, 2FA
     enrolment), which ask the user to sign in and are the likeliest false positives. Record the
     sample size and the chosen cut-offs in `docs/ai-triage.md`. Re-calibrate before any move
     from `jev-1.13`. Only after this may the banner show a percentage (16.12.1).
-16. **`provider` on `/api/alpha/decisions`.** **Docs confirmed:** `DecisionsRequest` takes
+16. **`provider` on `/api/alpha/decisions`.** **Live (2026-10-30):** `zdr: true` with
+    `data_collection: "deny"` is accepted. Still open: `max_price`. **Docs confirmed:** `DecisionsRequest` takes
     `provider: ProviderPreferences` with `zdr`, `data_collection` and `max_price`. Not
     confirmed: whether routing honours `max_price` on this endpoint, and its value type (the
     API reference types its fields as strings, the routing guide's examples use numbers in
@@ -2278,7 +2310,9 @@ views.
 20. **The ~32,000-byte long-context threshold.** **Docs confirmed** the figure ("more than
     about 32,000 bytes of text"). Not confirmed: whether it counts `state` only or the whole
     request. `REQUEST_BUDGET` assumes the whole body, which is the conservative choice.
-21. **Questions per request and required criteria.** No maximum is documented. Check that 103
+21. **Questions per request and required criteria.** **Live (2026-10-30):** a `choice`
+    without `criteria` is refused with 400; whether a `noul` without them is refused is still
+    open, and Eloquawk always sends them. No maximum is documented. Check that 103
     questions are accepted; if not, lower `MAX_LABELS` per request, let `fit`'s split carry the
     rest, and record the limit. The reference makes `criteria` (`"true"` and `"false"`)
     required for `noul`; check whether a `noul` without them is refused, and keep the short
@@ -2293,13 +2327,15 @@ views.
     behind a mutex. Still to confirm: the sync worker and `eloquawk-ai` each doing zbus Secret
     Service I/O from their own thread neither deadlocks nor raises a second unlock prompt (with
     the wait-for-`Reload` rule of 16.4), on a locked and an unlocked collection.
-24. **Pricing.** **Docs confirmed** $0.000000042 per prompt token ($0.042 per million) and free
+24. **Pricing.** **Live (2026-10-30):** about $0.00002 per three-to-five-question call, in line
+    with the table. **Docs confirmed** $0.000000042 per prompt token ($0.042 per million) and free
     completion for `typesafe/jev-1.13`. Re-read the live price before M16 and adjust the 16.11
     table and `max_price` (kept at 10× the live input price).
 25. **Errors not in the reference.** Pass-through of TypeSafe's 422 and 415, and the exact body
     of a "no endpoint matches the provider constraints" error (the `Unavailable` row of 16.14).
     The reference lists 400, 401, 402, 403, 404, 413, 429, 500, 502, 503, 524 and 529 only.
-26. **Model version.** The docs now call `typesafe/jev-1.14` current and say 1.13 is "still
+26. **Model version.** **M16:** pinned `typesafe/jev-1.13`, which the live call served as the
+    snapshot `typesafe/jev-1.13-20260917`. The docs now call `typesafe/jev-1.14` current and say 1.13 is "still
     available" (it rejects Box questions, which Eloquawk does not use). Before M16, decide
     whether to pin 1.13 (as specified, with a price confirmed above) or 1.14 (price not yet
     checked); either way item 15 calibrates the chosen one. The alpha endpoint may also change:
@@ -2314,11 +2350,14 @@ views.
     request fails with `Unavailable` and the user must decide.
 29. **`GET /api/v1/key` live shape.** **Docs confirmed** `data.limit_remaining` (number or
     `null`). Confirm the live response matches, so the credit line parses.
-30. **`usage.cost` presence.** **Docs confirmed** it is optional in the schema and present in
+30. **`usage.cost` presence.** **Live (2026-10-30):** present (`0.000018816`). **Docs confirmed** it is optional in the schema and present in
     the tutorial's response. Confirm it is reported on live Decisions calls, since the spend
     limit (decision 3) relies on it and counts a missing cost as the worst case.
-31. **`max_redirects(0)` and the body limit** with ureq 3.5's agent config (as item 12 for
-    timeouts): confirm the builder calls exist under those names.
+31. ~~`max_redirects(0)` and the body limit~~ **Resolved at M16:** ureq 3.5 has
+    `ConfigBuilder::max_redirects(u32)` (0 returns the 3xx as is) and
+    `body_mut().with_config().limit(u64).read_to_vec()`; a test reads
+    `agent.config().max_redirects() == 0`, and `fake_openrouter_no_redirect` shows a 302 is
+    not followed.
 
 ---
 

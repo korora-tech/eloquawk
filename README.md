@@ -23,9 +23,28 @@ A native Gmail client for Linux, built with Rust and [GPUI](https://www.gpui.rs/
 - **Attachments:** save them to your download directory with one click.
 - **New-mail notifications:** for unread mail that lands in the inbox, skipping Gmail's Promotions, Social, Updates and Forums categories.
 - **Mail handler:** registers for `mailto:` links and hands them to the running window.
+- **Message checks (optional, off by default):** with your own OpenRouter key, Jev flags likely phishing, scams and spam in the accounts you turn on. See [Message checks](#message-checks).
 - **Local credential storage:** refresh tokens stay in your system keyring; mail stays in memory and is never written to disk. No analytics or telemetry.
 
-**Current limits:** Eloquawk does not render HTML mail, edit or sync drafts (Drafts are listed read-only), use send-as aliases or signatures, snooze, schedule sends, manage filters or labels, or delete permanently. There is no offline cache, so mail is fetched again at startup, and no tray icon: closing the last window quits. AI triage is planned ([#1](https://github.com/korora-tech/eloquawk/issues/1)) and is not part of this version.
+**Current limits:** Eloquawk does not render HTML mail, edit or sync drafts (Drafts are listed read-only), use send-as aliases or signatures, snooze, schedule sends, manage filters or labels, or delete permanently. There is no offline cache, so mail is fetched again at startup, and no tray icon: closing the last window quits.
+
+## Message checks
+
+Eloquawk can ask Jev, TypeSafe's decision model, through [OpenRouter](https://openrouter.ai)
+whether a message looks like phishing, a scam or spam. It is off until you save an OpenRouter
+key in Settings and turn it on for an account, after a disclosure of exactly what is sent. A
+redacted extract of the one message you open goes to OpenRouter: links are cut to their
+website name, your and the recipients' addresses and recognised one-time codes are replaced,
+and attachments, the recipient list and the rest of the thread are never sent. Requests ask
+for zero data retention; your OpenRouter account's own logging and Broadcast settings still
+apply, so use a dedicated key with those off. Each check costs a fraction of a cent, and a
+per-session spend limit (default $1.00) stops them.
+
+Results are advisory: a banner and a list badge, never an automatic move. Independently of
+Jev and for every account, a message that fails DMARC and has a link whose text names another
+site shows "Eloquawk noticed: …", and its web links ask before opening. That guard is best
+effort. Details, costs and limits: [docs/ai-triage.md](docs/ai-triage.md). Demo mode uses an
+offline checker and sends nothing.
 
 ## Try it without a Google account
 
