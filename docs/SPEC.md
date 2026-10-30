@@ -3592,6 +3592,10 @@ published reference; they are section 15 items 17 and 25.
 **Pauses:**
 - A pause is sticky for the session. It clears on `SaveKey`, `ResumePaused` or a successful
   `TestKey(None)` (the saved key). A successful test of a typed, unsaved key does not clear it.
+- A 401 pause is stricter (the table's "until the key is saved again"): `ResumePaused` leaves
+  it in place, and `can_send` also refuses while the key is rejected, so the refused key is
+  never sent again. Only `SaveKey` or a successful `TestKey(None)` clears it. (Settled after
+  the M16 review, where the two wordings disagreed.)
 - Entering a pause emits `Dropped` for every queued, slotted and backing-off check. While
   paused, `Check` commands are answered with `Dropped`, and the Store does not send them.
 

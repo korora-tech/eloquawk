@@ -245,7 +245,7 @@ impl Worker {
     }
 
     fn can_send(&self) -> bool {
-        self.paused.is_none() && (self.demo() || self.key.is_some())
+        self.paused.is_none() && !self.rejected && (self.demo() || self.key.is_some())
     }
 
     fn wait(&self) -> Duration {
@@ -397,7 +397,12 @@ impl Worker {
         }
     }
 
+    /// Settings "Try again". A rejected key stays paused until a key is saved or the saved
+    /// one passes a test (SPEC 16.14): retrying it as it is would only be refused again.
     fn resume(&mut self) {
+        if self.rejected {
+            return;
+        }
         self.clear_pause();
     }
 
@@ -1171,6 +1176,12 @@ mod tests {
             h.send(check("a@x", s, Priority::Interactive));
             wait_for(&rx, |e| is_dropped(e, s));
         }
+        // Try again does not lift a rejection: only saving a key (or a passing test of the
+        // saved one) does, so the rejected key is never sent again.
+        h.send(AiCommand::ResumePaused);
+        h.send(check("a@x", "four", Priority::Interactive));
+        let evs = wait_for(&rx, |e| is_dropped(e, "four"));
+        assert!(!evs.iter().any(|e| matches!(e, AiEvent::Paused(None))));
         assert_eq!(server.requests().len(), 1);
         h.send(AiCommand::Shutdown);
 

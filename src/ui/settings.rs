@@ -950,6 +950,8 @@ impl SettingsView {
         }
         c = c.child(body_text(p, usage));
         if let Some(reason) = store.ai.paused.clone() {
+            // A rejected key is resumed by saving a key, not by trying again (SPEC 16.14).
+            let rejected = matches!(store.ai.key, KeyState::Rejected { .. });
             c = c.child(
                 div()
                     .flex()
@@ -968,15 +970,17 @@ impl SettingsView {
                             .text_color(rgb(p.text))
                             .child(format!("Checks are paused: {reason}")),
                     )
-                    .child(button(
-                        p,
-                        "ai-resume",
-                        "Try again",
-                        ButtonStyle::Secondary,
-                        Some(self.click(cx, |this, _, cx| {
-                            this.store.read(cx).send_ai(AiCommand::ResumePaused)
-                        })),
-                    )),
+                    .when(!rejected, |d| {
+                        d.child(button(
+                            p,
+                            "ai-resume",
+                            "Try again",
+                            ButtonStyle::Secondary,
+                            Some(self.click(cx, |this, _, cx| {
+                                this.store.read(cx).send_ai(AiCommand::ResumePaused)
+                            })),
+                        ))
+                    }),
             );
         }
         c
