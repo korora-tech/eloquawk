@@ -1930,7 +1930,6 @@ impl Store {
     /// a dismissed row, or for risky mail (a Warning or Danger verdict, or a local caution),
     /// so one key press cannot file a scam among real mail. Labels already on the thread are
     /// left out, so an applied chip disappears without a new request.
-    #[allow(dead_code)] // consumed by the reader's suggestion row (M17)
     pub fn suggestions(&self, key: &ThreadKey) -> Vec<Suggestion> {
         self.suggestions_inner(key).unwrap_or_default()
     }
@@ -1968,7 +1967,6 @@ impl Store {
 
     /// Applies the open thread's `n`th suggestion (0-based) to that thread only, through the
     /// label picker's undoable path. Nothing when there is no such suggestion.
-    #[allow(dead_code)] // consumed by the reader's suggestion row (M17)
     pub fn apply_suggestion(&mut self, n: usize) -> Option<OpId> {
         let key = self.open.clone()?;
         let s = self.suggestions(&key).into_iter().nth(n)?;
@@ -1978,7 +1976,6 @@ impl Store {
     }
 
     /// Hides the open thread's suggestion row for this session.
-    #[allow(dead_code)] // consumed by the reader's suggestion row (M17)
     pub fn dismiss_suggestions(&mut self) {
         let Some(key) = self.open.clone() else {
             return;

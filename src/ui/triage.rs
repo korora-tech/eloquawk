@@ -1,6 +1,6 @@
 //! AI triage in the reader and the list (SPEC 16.12): the pure reasons, local caution and link
-//! guard decision, and the render helpers for the banner, the caution row, the failure caption
-//! and the list badge.
+//! guard decision, and the render helpers for the banner, the caution row, the failure caption,
+//! the suggested labels row (M17) and the list badge.
 //!
 //! The reasons are Eloquawk's own observations from what the client measured, never Jev's (it
 //! returns no explanations), and every host is the ASCII/punycode form, so a homograph cannot
@@ -9,7 +9,7 @@
 use gpui::prelude::*;
 use gpui::{App, Context, Div, FontWeight, SharedString, Window, div, px, rgb};
 
-use super::theme::{Palette, tint};
+use super::theme::{Palette, tabular, tint};
 use super::widgets::{ButtonStyle, OnClick, button};
 use crate::ai::jev::{Kind, Level, Verdict};
 use crate::mail::links::LinkTarget;
@@ -315,6 +315,74 @@ pub fn failure_caption(p: &Palette, text: String, retry: Option<OnClick>) -> Div
         })
 }
 
+/// A label name as the suggestion chips show it: nesting with " › ".
+pub fn display_name(name: &str) -> String {
+    name.split('/').collect::<Vec<_>>().join(" \u{203a} ")
+}
+
+/// One suggestion chip: the label's name, its colour (text, background) and the click.
+pub type Chip = (String, Option<(u32, u32)>, OnClick);
+
+/// The suggested labels row (SPEC 16.12.3): a muted caption, one outlined chip per suggestion
+/// with its key hint (`1` to `3`), the label's colour dot and its name, and ✕ to hide the row.
+/// `chips` holds each chip's name, colour and click handler.
+pub fn suggestion_row(p: &Palette, chips: Vec<Chip>, dismiss: OnClick) -> Div {
+    let mut row = div().flex().flex_wrap().items_center().gap(px(6.0)).child(
+        div()
+            .mr(px(4.0))
+            .text_size(px(12.0))
+            .text_color(rgb(p.muted))
+            .child("Suggested labels"),
+    );
+    for (i, (name, colour, on_click)) in chips.into_iter().enumerate() {
+        row = row.child(
+            div()
+                .id(SharedString::from(format!("suggestion-{}", i + 1)))
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .px(px(8.0))
+                .py(px(2.0))
+                .rounded(px(6.0))
+                .border_1()
+                .border_color(rgb(p.border))
+                .bg(rgb(p.panel))
+                .hover(|d| d.bg(rgb(p.hover)))
+                .cursor_pointer()
+                .text_size(px(12.0))
+                .line_height(px(18.0))
+                .on_click(on_click)
+                .child(
+                    div()
+                        .font_features(tabular())
+                        .text_color(rgb(p.muted))
+                        .child((i + 1).to_string()),
+                )
+                .when_some(colour, |d, (_, bg)| {
+                    d.child(div().size(px(8.0)).rounded_full().bg(rgb(bg)))
+                })
+                .child(
+                    div()
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(rgb(p.text))
+                        .child(display_name(&name)),
+                ),
+        );
+    }
+    row.child(
+        div()
+            .id("suggestion-dismiss")
+            .px(px(6.0))
+            .rounded(px(4.0))
+            .text_size(px(12.0))
+            .text_color(rgb(p.muted))
+            .hover(|d| d.bg(rgb(p.hover)).text_color(rgb(p.text)))
+            .cursor_pointer()
+            .on_click(dismiss)
+            .child("\u{2715}"),
+    )
+}
+
 /// The thread row's pill (SPEC 16.12.2), on `row_bg`.
 pub fn badge(p: &Palette, level: Level, kind: Kind, row_bg: u32) -> Option<Div> {
     let text = badge_text(level, kind)?;
@@ -487,5 +555,14 @@ mod tests {
         );
         let mail = LinkTarget::Mail("mailto:help@paypa1-support.example".into());
         assert_eq!(guard_decision(&mail, true), GuardDecision::Open);
+    }
+
+    #[test]
+    fn nested_names_show_with_a_chevron() {
+        assert_eq!(
+            display_name("Projects/Eloquawk"),
+            "Projects \u{203a} Eloquawk"
+        );
+        assert_eq!(display_name("Receipts"), "Receipts");
     }
 }

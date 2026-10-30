@@ -717,6 +717,36 @@ impl ReaderView {
                 ));
             }
         }
+        // Suggested labels (M17): none while checking, for risky mail or when turned off.
+        let suggestions = store.suggestions(&key);
+        if !suggestions.is_empty() && !store.ai_checking(&key) {
+            let chips = suggestions
+                .into_iter()
+                .enumerate()
+                .map(|(i, s)| {
+                    let colour = self
+                        .last
+                        .user_labels
+                        .iter()
+                        .find(|(id, _, _)| *id == s.id)
+                        .and_then(|(_, _, c)| *c);
+                    let on_click = self.click(cx, move |this, _, cx| {
+                        this.store.update(cx, |s, cx| {
+                            s.apply_suggestion(i);
+                            cx.notify();
+                        })
+                    });
+                    (s.name, colour, on_click)
+                })
+                .collect();
+            let dismiss = self.click(cx, |this, _, cx| {
+                this.store.update(cx, |s, cx| {
+                    s.dismiss_suggestions();
+                    cx.notify();
+                })
+            });
+            rows.push(triage::suggestion_row(p, chips, dismiss));
+        }
         rows
     }
 
