@@ -159,7 +159,12 @@ mod tests {
         let detail = m.threads.into_iter().find(|t| t.0.key.id == id).unwrap().1;
         let own = vec![PERSONAL.to_string(), WORK.to_string()];
         let msg = target(&detail, &own).unwrap();
-        let input = fit(AiInput::from_message(msg, &Redact::for_message(msg, &own)));
+        let input = fit(
+            AiInput::from_message(msg, &Redact::for_message(msg, &own)),
+            true,
+            &[],
+        )
+        .input;
         let fake = FakeDecider {
             delay: Duration::ZERO,
         };

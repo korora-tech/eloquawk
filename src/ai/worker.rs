@@ -541,7 +541,7 @@ impl Worker {
                 None => return,
             },
         };
-        let input = fit(job.req.input.clone());
+        let input = fit(job.req.input.clone(), true, &[]).input;
         let input = if job.shrunk { shrink(input) } else { input };
         let req = triage_request(&input);
         self.in_flight = Some(job.id());

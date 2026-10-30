@@ -10,14 +10,16 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::hash::{DefaultHasher, Hash, Hasher};
 
 use serde_json::json;
 
+use super::LabelCandidate;
 use super::jev::{DecisionsRequest, Question};
 use crate::mail::files::is_invisible;
 use crate::mail::links::{LinkTarget, find_links};
 use crate::mail::quote::split_quote;
-use crate::model::{AuthResults, Message, ThreadDetail, labels};
+use crate::model::{AuthResults, Label, LabelKind, Message, ThreadDetail, labels};
 
 /// The body sent, in characters, before `fit` lowers it.
 pub const BODY_CHARS: usize = 6000;
@@ -38,6 +40,20 @@ const ADDRESS_CHARS: usize = 254;
 const MAX_REPLY_TO: usize = 5;
 const MAX_ATTACHMENTS: usize = 10;
 const MAX_DKIM_DOMAINS: usize = 5;
+/// The most labels a check asks about (SPEC 16.8).
+#[allow(dead_code)] // consumed by the store's label suggestions (M17)
+pub const MAX_LABELS: usize = 100;
+/// A label name is cut to this many characters.
+#[allow(dead_code)] // consumed by the store's label suggestions (M17)
+const LABEL_NAME_CHARS: usize = 100;
+/// At most this many requests per check: the triage one and one more for labels.
+#[allow(dead_code)] // consumed by the worker's label questions (M17)
+pub const MAX_REQUESTS_PER_CHECK: usize = 2;
+/// Even the worst-case message still asks about this many labels in total.
+#[cfg(test)]
+pub const LABEL_FLOOR: usize = 30;
+/// The `state` key that explains label nesting, present only when labels are asked.
+pub const LABEL_NOTE: &str = "Label names use \"/\" for nesting: \"A/B\" is label B inside A.";
 
 /// The shared end of every triage question's instructions.
 pub const PROVENANCE: &str = " Only sender_authentication, links and attachment_types were \
@@ -557,15 +573,178 @@ pub fn state_json(i: &AiInput) -> serde_json::Value {
 
 /// The triage request for an input.
 pub fn triage_request(input: &AiInput) -> DecisionsRequest {
-    DecisionsRequest::new(state_json(input), triage_questions())
+    request(input, true, &[], 0)
 }
 
-/// Shrinks a triage-only input until its request fits [`REQUEST_BUDGET`] (SPEC 16.6.6 steps 3,
-/// 4 and 6): links to [`LINKS_CUT`], then the body in 500-character steps down to
-/// [`BODY_MIN`]. M17 adds the label questions and the second request.
-pub fn fit(mut input: AiInput) -> AiInput {
-    let size = |i: &AiInput| triage_request(i).to_bytes().len();
-    while size(&input) > REQUEST_BUDGET {
+// ----- labels (SPEC 16.8) ------------------------------------------------------------------
+
+/// Whether a label may be offered to Jev: a visible user label with a name.
+#[allow(dead_code)] // consumed by the store's label suggestions (M17)
+fn is_candidate(l: &Label) -> bool {
+    l.kind == LabelKind::User
+        && !l.hidden
+        && !l.id.starts_with("CATEGORY_")
+        && l.id != "CHAT"
+        && !l.name.trim().is_empty()
+}
+
+/// A label's name as sent: stripped like the message text, trimmed and cut to 100 chars.
+#[allow(dead_code)] // consumed by the store's label suggestions (M17)
+fn candidate_name(name: &str) -> String {
+    cut_chars(strip_controls(name).trim(), LABEL_NAME_CHARS).0
+}
+
+/// The labels a check asks about (SPEC 16.8): the account's visible user labels, by thread
+/// count then name, at most [`MAX_LABELS`]. It does not look at the thread, so labels already
+/// on it are asked about too and filtered out when the suggestions are shown.
+#[allow(dead_code)] // consumed by the store's label suggestions (M17)
+pub fn label_candidates(account_labels: &[Label]) -> Vec<LabelCandidate> {
+    let mut ls: Vec<&Label> = account_labels.iter().filter(|l| is_candidate(l)).collect();
+    ls.sort_by(|a, b| {
+        b.threads_total
+            .cmp(&a.threads_total)
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    ls.into_iter()
+        .take(MAX_LABELS)
+        .map(|l| LabelCandidate {
+            id: l.id.clone(),
+            name: candidate_name(&l.name),
+        })
+        .filter(|c| !c.name.is_empty())
+        .collect()
+}
+
+/// A hash of every candidate label's `(id, name)`, uncapped and by id (SPEC 16.8). Counts and
+/// the cap's order do not enter it, so only a rename, a new or deleted label or hiding one
+/// re-asks labels. In memory only; it need not be stable across builds.
+#[allow(dead_code)] // consumed by the store's label suggestions (M17)
+pub fn label_fingerprint(account_labels: &[Label]) -> u64 {
+    let mut ls: Vec<(&str, &str)> = account_labels
+        .iter()
+        .filter(|l| is_candidate(l))
+        .map(|l| (l.id.as_str(), l.name.as_str()))
+        .collect();
+    ls.sort_unstable();
+    let mut h = DefaultHasher::new();
+    ls.hash(&mut h);
+    h.finish()
+}
+
+/// The question id of the label at `index` in the check's candidate list.
+pub fn label_question_id(index: usize) -> String {
+    format!("l{index}")
+}
+
+/// One `noul` per label, `l<index>` from `start`, with the shortest criteria (SPEC 16.8).
+pub fn label_questions(labels: &[LabelCandidate], start: usize) -> BTreeMap<String, Question> {
+    labels
+        .iter()
+        .enumerate()
+        .map(|(i, l)| {
+            (
+                label_question_id(start + i),
+                Question::noul(
+                    format!(
+                        "Would the recipient file this email under their label \"{}\"?",
+                        l.name
+                    ),
+                    "It belongs there.",
+                    "It does not.",
+                ),
+            )
+        })
+        .collect()
+}
+
+/// One request of a check: the triage questions when `triage`, and the label questions of
+/// `labels`, numbered from `start`. The state gains the nesting note when labels are asked.
+pub fn request(
+    input: &AiInput,
+    triage: bool,
+    labels: &[LabelCandidate],
+    start: usize,
+) -> DecisionsRequest {
+    let mut state = state_json(input);
+    let mut questions = if triage {
+        triage_questions()
+    } else {
+        BTreeMap::new()
+    };
+    if !labels.is_empty() {
+        state["label_names_note"] = json!(LABEL_NOTE);
+        questions.extend(label_questions(labels, start));
+    }
+    DecisionsRequest::new(state, questions)
+}
+
+/// What a check sends (SPEC 16.6.6): the fitted input, the labels asked in the first request
+/// (beside the triage questions, when asked) and those moved to a second request.
+#[derive(Clone)]
+#[allow(dead_code)] // consumed by the worker's label questions (M17)
+pub struct Plan {
+    pub input: AiInput,
+    pub first: Vec<LabelCandidate>,
+    pub second: Vec<LabelCandidate>,
+}
+
+#[allow(dead_code)] // consumed by the worker's label questions (M17)
+impl Plan {
+    /// The first request.
+    pub fn first_request(&self, triage: bool) -> DecisionsRequest {
+        request(&self.input, triage, &self.first, 0)
+    }
+
+    /// The second request, labels only, when there is one.
+    pub fn second_request(&self) -> Option<DecisionsRequest> {
+        (!self.second.is_empty())
+            .then(|| request(&self.input, false, &self.second, self.first.len()))
+    }
+
+    /// The label id of question `l<index>`.
+    pub fn label_id(&self, index: usize) -> Option<&str> {
+        self.first
+            .iter()
+            .chain(&self.second)
+            .nth(index)
+            .map(|c| c.id.as_str())
+    }
+
+    /// How many labels are asked in all.
+    pub fn labels_asked(&self) -> usize {
+        self.first.len() + self.second.len()
+    }
+}
+
+/// Fits a check into at most two requests of at most [`REQUEST_BUDGET`] bytes (SPEC 16.6.6).
+/// The triage input is never cut to make room for labels, and labels move to a second request
+/// before any are dropped:
+///
+/// 1. everything in one request;
+/// 2. labels move from the tail into a second request until the first fits;
+/// 3. links are cut to [`LINKS_CUT`] while either is over;
+/// 4. then the body, in 500-character steps down to [`BODY_MIN`];
+/// 5. labels move back into the first request while it has room (the state shrank), and
+///    the second drops labels from its tail until it fits.
+///
+/// A labels-only check (`triage` false) keeps at least one label in the first request.
+pub fn fit(mut input: AiInput, triage: bool, labels: &[LabelCandidate]) -> Plan {
+    let mut first: Vec<LabelCandidate> = labels.to_vec();
+    let mut second: Vec<LabelCandidate> = Vec::new();
+    let size = |i: &AiInput, ls: &[LabelCandidate], t: bool| request(i, t, ls, 0).to_bytes().len();
+    let keep = usize::from(!triage);
+    // 2. Move labels into the second request.
+    while first.len() > keep && size(&input, &first, triage) > REQUEST_BUDGET {
+        if let Some(l) = first.pop() {
+            second.insert(0, l);
+        }
+    }
+    let over = |i: &AiInput, first: &[LabelCandidate], second: &[LabelCandidate]| {
+        size(i, first, triage) > REQUEST_BUDGET
+            || (!second.is_empty() && size(i, second, false) > REQUEST_BUDGET)
+    };
+    // 3. and 4. Shrink the shared state.
+    while over(&input, &first, &second) {
         let chars = input.body.chars().count();
         if input.links.len() > LINKS_CUT {
             input.links.truncate(LINKS_CUT);
@@ -576,11 +755,31 @@ pub fn fit(mut input: AiInput) -> AiInput {
             break;
         }
     }
+    // 5. Refill the first request, then trim the second.
+    while let Some(next) = second.first() {
+        let mut more = first.clone();
+        more.push(next.clone());
+        if size(&input, &more, triage) > REQUEST_BUDGET {
+            break;
+        }
+        first = more;
+        second.remove(0);
+    }
+    while !second.is_empty() && size(&input, &second, false) > REQUEST_BUDGET {
+        second.pop();
+    }
+    while first.len() > keep && size(&input, &first, triage) > REQUEST_BUDGET {
+        first.pop();
+    }
     debug_assert!(
-        size(&input) <= REQUEST_BUDGET,
-        "a triage-only request always fits"
+        size(&input, &first, triage) <= REQUEST_BUDGET,
+        "the first request always fits"
     );
-    input
+    Plan {
+        input,
+        first,
+        second,
+    }
 }
 
 /// Cuts the body to [`BODY_MIN`]: the retry after a 413.
@@ -614,7 +813,7 @@ mod tests {
 
     pub(crate) fn request_for(m: &Message) -> DecisionsRequest {
         let input = AiInput::from_message(m, &Redact::for_message(m, &own()));
-        triage_request(&fit(input))
+        triage_request(&fit(input, true, &[]).input)
     }
 
     #[test]
@@ -853,7 +1052,7 @@ mod tests {
                 text_host: None,
             })
             .collect();
-        let input = fit(AiInput::from_message(&m, &Redact::default()));
+        let input = fit(AiInput::from_message(&m, &Redact::default()), true, &[]).input;
         let size = triage_request(&input).to_bytes().len();
         assert!(size <= REQUEST_BUDGET, "{size}");
         assert!(input.body.chars().count() >= BODY_MIN);
@@ -867,7 +1066,7 @@ mod tests {
     #[test]
     fn triage_only_fit_typical_keeps_the_body() {
         let m = message(&"word ".repeat(1200), BodySource::Plain);
-        let input = fit(AiInput::from_message(&m, &Redact::default()));
+        let input = fit(AiInput::from_message(&m, &Redact::default()), true, &[]).input;
         assert_eq!(input.body.chars().count(), BODY_CHARS);
         assert!(!input.body_truncated);
         assert!(triage_request(&input).to_bytes().len() < REQUEST_BUDGET);
@@ -910,5 +1109,229 @@ mod tests {
         let input = AiInput::from_message(&m, &Redact::for_message(&m, &own()));
         let s = format!("{input:?}");
         assert!(!s.contains("paypa") && !s.contains("suspended"), "{s}");
+    }
+
+    fn user_label(id: &str, name: &str, total: u32) -> Label {
+        Label {
+            account: PERSONAL.into(),
+            id: id.into(),
+            name: name.into(),
+            kind: LabelKind::User,
+            color: None,
+            threads_unread: 0,
+            threads_total: total,
+            messages_total: total,
+            hidden: false,
+        }
+    }
+
+    fn ascii_labels(n: usize) -> Vec<LabelCandidate> {
+        (0..n)
+            .map(|i| LabelCandidate {
+                id: format!("Label_{i}"),
+                name: format!("Label name {i:09}"),
+            })
+            .collect()
+    }
+
+    fn ids_of(req: &DecisionsRequest) -> Vec<String> {
+        req.questions.keys().cloned().collect()
+    }
+
+    #[test]
+    fn label_candidates_filter_order_and_cap() {
+        let mut ls = vec![
+            user_label("L1", "Receipts", 5),
+            user_label("L2", "Travel", 9),
+            user_label("L3", "Projects/Eloquawk\u{202e}", 5),
+            user_label("L4", "   ", 50),
+            user_label("L5", "Hidden", 50),
+            user_label("CATEGORY_UPDATES", "Updates", 50),
+            user_label("INBOX", "INBOX", 50),
+        ];
+        ls[4].hidden = true;
+        ls[6].kind = LabelKind::System;
+        let c = label_candidates(&ls);
+        let names: Vec<&str> = c.iter().map(|c| c.name.as_str()).collect();
+        // By count, then name; system, category, hidden and blank labels never.
+        assert_eq!(names, ["Travel", "Projects/Eloquawk", "Receipts"]);
+        let many: Vec<Label> = (0..150)
+            .map(|i| user_label(&format!("L{i}"), &format!("N{i:03}"), i))
+            .collect();
+        let c = label_candidates(&many);
+        assert_eq!(c.len(), MAX_LABELS);
+        assert_eq!(c[0].name, "N149");
+        let long = user_label("L", &"x".repeat(300), 1);
+        assert_eq!(label_candidates(&[long])[0].name.chars().count(), 100);
+    }
+
+    #[test]
+    fn label_questions_are_short_and_the_note_comes_with_them() {
+        let m = message("hi", BodySource::Plain);
+        let input = AiInput::from_message(&m, &Redact::default());
+        let labels = vec![LabelCandidate {
+            id: "Label_7".into(),
+            name: "Projects/Eloquawk".into(),
+        }];
+        let req = request(&input, true, &labels, 0);
+        let v: serde_json::Value = serde_json::from_slice(&req.to_bytes()).unwrap();
+        assert_eq!(
+            v["questions"]["l0"],
+            json!({"type": "noul",
+                "instructions": "Would the recipient file this email under their label \"Projects/Eloquawk\"?",
+                "criteria": {"true": "It belongs there.", "false": "It does not."}})
+        );
+        assert_eq!(v["state"]["label_names_note"], LABEL_NOTE);
+        // Label ids never reach the model.
+        assert!(
+            !String::from_utf8(req.to_bytes())
+                .unwrap()
+                .contains("Label_7")
+        );
+        let plain = triage_request(&input);
+        assert!(plain.state.get("label_names_note").is_none());
+        let only = request(&input, false, &labels, 4);
+        assert_eq!(ids_of(&only), ["l4"]);
+    }
+
+    #[test]
+    fn label_fingerprint_follows_names_not_counts() {
+        let ls: Vec<Label> = (0..150)
+            .map(|i| user_label(&format!("L{i}"), &format!("Name {i}"), 0))
+            .collect();
+        let fp = label_fingerprint(&ls);
+        // Counts arrive and change: the capped membership moves, the fingerprint does not.
+        let mut counted = ls.clone();
+        for (i, l) in counted.iter_mut().enumerate() {
+            l.threads_total = (i as u32 * 7919) % 151;
+        }
+        assert!(label_candidates(&ls) != label_candidates(&counted));
+        assert_eq!(label_fingerprint(&counted), fp);
+        let mut reordered = ls.clone();
+        reordered.reverse();
+        assert_eq!(label_fingerprint(&reordered), fp);
+        // A rename, a new label or hiding one changes it.
+        let mut renamed = ls.clone();
+        renamed[3].name = "Renamed".into();
+        assert_ne!(label_fingerprint(&renamed), fp);
+        let mut added = ls.clone();
+        added.push(user_label("New", "New", 0));
+        assert_ne!(label_fingerprint(&added), fp);
+        let mut hidden = ls.clone();
+        hidden[0].hidden = true;
+        assert_ne!(label_fingerprint(&hidden), fp);
+        // A thread's own labels are not an input at all, so applying one changes nothing.
+        let mut sys = ls.clone();
+        sys.push(Label {
+            kind: LabelKind::System,
+            ..user_label("STARRED", "STARRED", 3)
+        });
+        assert_eq!(label_fingerprint(&sys), fp);
+    }
+
+    /// A typical message: a 6,000-character ASCII body, a subject, a sender name and ten
+    /// links, as a newsletter or a notification has.
+    fn typical() -> AiInput {
+        let mut m = message(&"word ".repeat(1200), BodySource::Plain);
+        m.subject = "Your weekly summary of activity across your projects".into();
+        m.signals.links = (0..10)
+            .map(|i| LinkSignal {
+                text: format!("Read more about item {i}"),
+                host: "news.example".into(),
+                text_host: None,
+            })
+            .collect();
+        AiInput::from_message(&m, &Redact::default())
+    }
+
+    #[test]
+    fn fit_typical_sixty_labels_take_one_request() {
+        let plan = fit(typical(), true, &ascii_labels(60));
+        assert_eq!(plan.first.len(), 60);
+        assert!(plan.second.is_empty());
+        assert_eq!(plan.input.body.chars().count(), BODY_CHARS);
+        assert!(!plan.input.body_truncated);
+        assert!(plan.first_request(true).to_bytes().len() <= REQUEST_BUDGET);
+    }
+
+    #[test]
+    fn fit_typical_hundred_labels_take_two_requests() {
+        let labels = ascii_labels(100);
+        let plan = fit(typical(), true, &labels);
+        assert!(!plan.second.is_empty());
+        assert_eq!(plan.labels_asked(), 100);
+        assert_eq!(plan.input.body.chars().count(), BODY_CHARS);
+        let first = plan.first_request(true);
+        let second = plan.second_request().unwrap();
+        assert!(first.to_bytes().len() <= REQUEST_BUDGET);
+        assert!(second.to_bytes().len() <= REQUEST_BUDGET);
+        assert!(first.questions.contains_key("phishing"));
+        assert!(!second.questions.contains_key("phishing"));
+        assert_eq!(first.state, second.state);
+        // The ids continue across the two requests and map back to the candidates.
+        let n = plan.first.len();
+        assert!(second.questions.contains_key(&format!("l{n}")));
+        assert_eq!(plan.label_id(n), Some(labels[n].id.as_str()));
+        assert_eq!(plan.label_id(99), Some("Label_99"));
+        assert_eq!(plan.label_id(100), None);
+    }
+
+    #[test]
+    fn fit_worst_case_with_labels() {
+        let four = |n: usize| "𝔸".repeat(n);
+        let host = format!("{}.example", "h".repeat(245));
+        let mut m = message(&four(6000), BodySource::Plain);
+        m.subject = four(300);
+        m.from.name = Some(four(100));
+        m.signals.links = (0..40)
+            .map(|_| LinkSignal {
+                text: four(80),
+                host: host.clone(),
+                text_host: None,
+            })
+            .collect();
+        let labels: Vec<LabelCandidate> = (0..100)
+            .map(|i| LabelCandidate {
+                id: format!("Label_{i}"),
+                name: four(100),
+            })
+            .collect();
+        let plan = fit(AiInput::from_message(&m, &Redact::default()), true, &labels);
+        let first = plan.first_request(true);
+        assert!(first.to_bytes().len() <= REQUEST_BUDGET);
+        assert!(
+            TRIAGE_IDS
+                .iter()
+                .all(|id| first.questions.contains_key(*id))
+        );
+        let requests = 1 + usize::from(plan.second_request().is_some());
+        assert!(requests <= MAX_REQUESTS_PER_CHECK);
+        if let Some(second) = plan.second_request() {
+            assert!(second.to_bytes().len() <= REQUEST_BUDGET);
+            assert!(
+                TRIAGE_IDS
+                    .iter()
+                    .all(|id| !second.questions.contains_key(*id))
+            );
+        }
+        assert!(plan.input.body.chars().count() >= BODY_MIN);
+        assert!(
+            plan.labels_asked() >= LABEL_FLOOR,
+            "{} labels",
+            plan.labels_asked()
+        );
+        // Labels moved before the state shrank, links before the body.
+        assert_eq!(plan.input.links.len(), LINKS_CUT);
+        assert!(plan.input.body_truncated);
+    }
+
+    #[test]
+    fn fit_labels_only_keeps_a_label_in_the_first_request() {
+        let plan = fit(typical(), false, &ascii_labels(120));
+        assert!(!plan.first.is_empty());
+        let first = plan.first_request(false);
+        assert!(!first.questions.contains_key("phishing"));
+        assert!(first.to_bytes().len() <= REQUEST_BUDGET);
+        assert_eq!(plan.labels_asked(), 120);
     }
 }

@@ -6,13 +6,13 @@
 //! "usage":{"input_tokens","output_tokens","cost"},"id","provider"}`, and question types are
 //! `noul`, `choice`, `score` and `box`. Eloquawk asks only `noul` questions.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde::{Deserialize, Serialize};
 
-use super::JEV_MODEL;
 use super::openrouter::AiError;
+use super::{JEV_MODEL, LabelCandidate};
 
 /// `provider.max_price.prompt`: ten times the live input price, in dollars per million tokens.
 pub const MAX_PROMPT_PRICE: f64 = 0.42;
@@ -240,6 +240,63 @@ pub fn verdict_from(p_phishing: f32, p_scam: f32, p_spam: f32, t: &Thresholds) -
     }
 }
 
+/// A label is suggested from this probability up (SPEC 16.8).
+#[allow(dead_code)] // consumed by the store's label suggestions (M17)
+pub const SUGGEST_MIN: f32 = 0.70;
+/// At most this many suggestions are shown.
+#[allow(dead_code)] // consumed by the store's label suggestions (M17)
+pub const SUGGEST_MAX: usize = 3;
+
+/// One suggested label for the open thread.
+#[derive(Clone, Debug, PartialEq)]
+#[allow(dead_code)] // consumed by the store's label suggestions (M17)
+pub struct Suggestion {
+    pub id: String,
+    pub name: String,
+    pub p: f32,
+}
+
+/// Whether `ancestor` is a parent of `name` by `/` nesting ("A" of "A/B").
+#[allow(dead_code)] // consumed by the store's label suggestions (M17)
+fn is_ancestor(ancestor: &str, name: &str) -> bool {
+    name.len() > ancestor.len() + 1
+        && name.starts_with(ancestor)
+        && name.as_bytes()[ancestor.len()] == b'/'
+}
+
+/// The suggestions from a message's label probabilities (SPEC 16.8): labels at
+/// [`SUGGEST_MIN`] or more that still exist (named as they are now, from `labels`), an
+/// ancestor dropped when one of its descendants qualifies, labels in `applied` (already on
+/// the thread) left out, then by probability and name, at most [`SUGGEST_MAX`].
+#[allow(dead_code)] // consumed by the store's label suggestions (M17)
+pub fn select_suggestions(
+    probs: &[(String, f32)],
+    labels: &[LabelCandidate],
+    applied: &BTreeSet<String>,
+) -> Vec<Suggestion> {
+    let qualified: Vec<Suggestion> = probs
+        .iter()
+        .filter(|(_, p)| p.is_finite() && *p >= SUGGEST_MIN)
+        .filter_map(|(id, p)| {
+            let l = labels.iter().find(|l| &l.id == id)?;
+            Some(Suggestion {
+                id: id.clone(),
+                name: l.name.clone(),
+                p: *p,
+            })
+        })
+        .collect();
+    let mut out: Vec<Suggestion> = qualified
+        .iter()
+        .filter(|s| !qualified.iter().any(|d| is_ancestor(&s.name, &d.name)))
+        .filter(|s| !applied.contains(&s.id))
+        .cloned()
+        .collect();
+    out.sort_by(|a, b| b.p.total_cmp(&a.p).then_with(|| a.name.cmp(&b.name)));
+    out.truncate(SUGGEST_MAX);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -352,5 +409,64 @@ mod tests {
         for absent in ["user", "session_id", "trace", "assets"] {
             assert!(v.get(absent).is_none(), "{absent}");
         }
+    }
+
+    fn cand(id: &str, name: &str) -> LabelCandidate {
+        LabelCandidate {
+            id: id.into(),
+            name: name.into(),
+        }
+    }
+
+    fn names(s: &[Suggestion]) -> Vec<&str> {
+        s.iter().map(|s| s.name.as_str()).collect()
+    }
+
+    #[test]
+    fn suggestions_threshold_top_three_and_ties() {
+        let labels = vec![
+            cand("a", "Alpha"),
+            cand("b", "Beta"),
+            cand("c", "Gamma"),
+            cand("d", "Delta"),
+            cand("e", "Epsilon"),
+        ];
+        let probs = vec![
+            ("a".to_string(), 0.69),
+            ("b".to_string(), 0.70),
+            ("c".to_string(), 0.95),
+            ("d".to_string(), 0.80),
+            ("e".to_string(), 0.80),
+            ("gone".to_string(), 0.99),
+        ];
+        let none = BTreeSet::new();
+        let s = select_suggestions(&probs, &labels, &none);
+        // 0.69 is under the bar, a deleted label is skipped, ties go by name.
+        assert_eq!(names(&s), ["Gamma", "Delta", "Epsilon"]);
+        // An applied label does not take one of the three places.
+        let applied: BTreeSet<String> = ["c".to_string()].into();
+        let s = select_suggestions(&probs, &labels, &applied);
+        assert_eq!(names(&s), ["Delta", "Epsilon", "Beta"]);
+    }
+
+    #[test]
+    fn suggestions_drop_an_ancestor_when_a_descendant_qualifies() {
+        let labels = vec![
+            cand("p", "Projects"),
+            cand("pe", "Projects/Eloquawk"),
+            cand("pr", "Projectsx"),
+            cand("w", "Work"),
+        ];
+        let probs = vec![
+            ("p".to_string(), 0.95),
+            ("pe".to_string(), 0.75),
+            ("pr".to_string(), 0.9),
+            ("w".to_string(), 0.9),
+        ];
+        let s = select_suggestions(&probs, &labels, &BTreeSet::new());
+        assert_eq!(names(&s), ["Projectsx", "Work", "Projects/Eloquawk"]);
+        // Without the descendant, the ancestor stays.
+        let s = select_suggestions(&probs[..1], &labels, &BTreeSet::new());
+        assert_eq!(names(&s), ["Projects"]);
     }
 }
