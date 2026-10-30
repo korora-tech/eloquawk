@@ -1747,14 +1747,9 @@ milestone are welcome. **No trailers.** Push to main after each commit.
     the `.ics` → `text/calendar` attachment MIME type in `mail/compose.rs`, which is mail, not
     antarctical residue, and stays.
 - **M9 notes:**
-  - The built-in client (section 1) holds the user's Desktop client id. Its secret could not
-    be written by the implementing agent (its tool permissions refused to read the client
-    JSON's secret), so `BUILTIN_CLIENT_SECRET` in `google/oauth.rs` is empty for now and a
-    default build behaves as having no built-in client (the needs-client card) until the
-    secret is pasted into that constant. The follow-up fix pass hit the same refusal (writing
-    the secret into the source was blocked as credential leakage), so this stays open for the
-    user. The sign-in card was checked visually with a throwaway
-    `ELOQUAWK_GOOGLE_CLIENT_SECRET` override at build time instead.
+  - The built-in client (section 1) is the user's Desktop client for the `eloquawk` Google
+    Cloud project, id and secret both compiled in, as antarctical does. A desktop client's
+    secret is public by nature; PKCE protects the sign-in.
   - Refresh failures other than invalid grant, invalid client and network (say a 400
     `invalid_request`) go into the banner for that account. An unreadable stored client is
     removed, together with its tokens, and the banner points to Settings instead of the

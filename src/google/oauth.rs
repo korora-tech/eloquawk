@@ -29,9 +29,9 @@ pub const SCOPES: &[&str] = &[GMAIL_MODIFY];
 /// Eloquawk's own Desktop client, used unless a build or Settings substitutes another.
 const BUILTIN_CLIENT_ID: &str =
     "399765172362-7rbgg9gperlq92l3d5qqlpqveqbs00fp.apps.googleusercontent.com";
-/// The built-in client's secret. While it is empty there is no built-in client and the app
-/// asks for one (SPEC 6.3, M9 note).
-const BUILTIN_CLIENT_SECRET: &str = "";
+/// The built-in client's secret. A desktop client's secret ships in every binary and is public
+/// by nature (Google says as much); PKCE protects the sign-in.
+const BUILTIN_CLIENT_SECRET: &str = "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";
 
 /// Whether a token response grants the Gmail scope. With granular consent the user can untick
 /// it; OAuth omits `scope` only when the grant is exactly what was requested.
