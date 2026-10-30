@@ -72,6 +72,10 @@ const BACKGROUND_CAPTION: &str = concat!(
     "arrives, including ones you never open, and uses credit for each. Warnings then show in ",
     "the list before you open a message.",
 );
+const SUGGEST_CAPTION: &str = concat!(
+    "Your label names are sent with each check of a message you open while this is on. Up to ",
+    "100 labels are considered (fewer for very long messages).",
+);
 const SPEND_ERROR: &str = "Enter an amount from $0.10 to $100";
 const STALE_CONSENT: &str = "What Eloquawk sends has changed. Review and turn on again.";
 /// The disclosure shown before an account is turned on (SPEC 16.2, `DISCLOSURE_VERSION` 2:
@@ -899,9 +903,22 @@ impl SettingsView {
             }
         }
         c = c.child(accounts);
-        // Background checks and the spend limit.
+        // Label suggestions, background checks and the spend limit.
         let prefs = &store.prefs.ai;
         c = c
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .child(checkbox_row(
+                        p,
+                        "ai-suggest",
+                        "Suggest labels when I open a message",
+                        prefs.suggest_labels,
+                        self.pref(cx, |p| p.ai.suggest_labels = !p.ai.suggest_labels),
+                    ))
+                    .child(div().pl(px(30.0)).child(caption(p, SUGGEST_CAPTION))),
+            )
             .child(
                 div()
                     .flex()
