@@ -733,6 +733,10 @@ pub fn fit(mut input: AiInput, triage: bool, labels: &[LabelCandidate]) -> Plan 
     let mut first: Vec<LabelCandidate> = labels.to_vec();
     let mut second: Vec<LabelCandidate> = Vec::new();
     let size = |i: &AiInput, ls: &[LabelCandidate], t: bool| request(i, t, ls, 0).to_bytes().len();
+    // The second request numbers its labels on from the first's, so its ids are sized there.
+    let size2 = |i: &AiInput, first: &[LabelCandidate], second: &[LabelCandidate]| {
+        request(i, false, second, first.len()).to_bytes().len()
+    };
     let keep = usize::from(!triage);
     // 2. Move labels into the second request.
     while first.len() > keep && size(&input, &first, triage) > REQUEST_BUDGET {
@@ -742,7 +746,7 @@ pub fn fit(mut input: AiInput, triage: bool, labels: &[LabelCandidate]) -> Plan 
     }
     let over = |i: &AiInput, first: &[LabelCandidate], second: &[LabelCandidate]| {
         size(i, first, triage) > REQUEST_BUDGET
-            || (!second.is_empty() && size(i, second, false) > REQUEST_BUDGET)
+            || (!second.is_empty() && size2(i, first, second) > REQUEST_BUDGET)
     };
     // 3. and 4. Shrink the shared state.
     while over(&input, &first, &second) {
@@ -766,7 +770,7 @@ pub fn fit(mut input: AiInput, triage: bool, labels: &[LabelCandidate]) -> Plan 
         first = more;
         second.remove(0);
     }
-    while !second.is_empty() && size(&input, &second, false) > REQUEST_BUDGET {
+    while !second.is_empty() && size2(&input, &first, &second) > REQUEST_BUDGET {
         second.pop();
     }
     while first.len() > keep && size(&input, &first, triage) > REQUEST_BUDGET {
@@ -1326,6 +1330,27 @@ mod tests {
         // Labels moved before the state shrank, links before the body.
         assert_eq!(plan.input.links.len(), LINKS_CUT);
         assert!(plan.input.body_truncated);
+    }
+
+    #[test]
+    fn fit_second_request_fits_with_its_real_ids() {
+        // Enough labels that the second request is trimmed to the budget's edge, where its
+        // longer ids (l60 rather than l0) decide whether it fits.
+        for len in 2..=4 {
+            let labels: Vec<LabelCandidate> = (0..400)
+                .map(|i| LabelCandidate {
+                    id: format!("Label_{i}"),
+                    name: format!("{i:03}{}", "n".repeat(len)),
+                })
+                .collect();
+            for triage in [true, false] {
+                let plan = fit(typical(), triage, &labels);
+                let first = plan.first_request(triage).to_bytes().len();
+                assert!(first <= REQUEST_BUDGET, "first {first} at {len}");
+                let second = plan.second_request().unwrap().to_bytes().len();
+                assert!(second <= REQUEST_BUDGET, "second {second} at {len}");
+            }
+        }
     }
 
     #[test]
