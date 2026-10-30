@@ -2798,7 +2798,10 @@ redacting `Debug` (counts only).
   every link `shown_text` and `body_text`:
   1. Every http(s) URL and bare `www.`/domain-shaped link that `find_links` finds, including the
      `<href>` decorations `mail/html.rs` writes into converted HTML, becomes `[link: <host>]`,
-     using the ASCII (punycode) host. A URL that fails to parse becomes `[link]`.
+     using the ASCII (punycode) host. A URL that fails to parse becomes `[link]`. A scheme-less
+     `host.tld/path` (or `?query`, `#fragment`) token that `find_links` misses, such as
+     `paypa1-verify.example/reset?token=…`, becomes `[link: <host>]` too (the last label must be
+     letters; added after the M16 review so the disclosure's "no full link addresses" holds).
   2. Every email address (`find_links`' mail detection, and `mailto:` URLs) is matched
      case-insensitively: one in `own` becomes `[your address]`, one in `recipients` becomes
      `[recipient]`, any other becomes `[email: <domain>]`. The sender's own address appears

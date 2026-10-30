@@ -276,7 +276,55 @@ pub fn redact(text: &str, r: &Redact) -> String {
         at = end;
     }
     out.push_str(&text[at..]);
-    redact_codes(&out)
+    redact_codes(&redact_bare_links(&out))
+}
+
+/// The host of a scheme-less `host.tld/path` (or `?query`, `#fragment`) token, which
+/// `find_links` does not detect: the labels are letters, digits and hyphens, the last one
+/// letters only, and something follows the separator.
+fn bare_link_host(token: &str) -> Option<String> {
+    let cut = token.find(['/', '?', '#'])?;
+    let (host, rest) = token.split_at(cut);
+    let labels: Vec<&str> = host.split('.').collect();
+    let tld = labels.last()?;
+    if labels.len() < 2
+        || rest.len() < 2
+        || tld.len() < 2
+        || !tld.chars().all(char::is_alphabetic)
+        || labels.iter().any(|l| {
+            l.is_empty()
+                || l.starts_with('-')
+                || !l.chars().all(|c| c.is_alphanumeric() || c == '-')
+        })
+    {
+        return None;
+    }
+    web_host(&format!("http://{host}/"))
+}
+
+/// Replaces the scheme-less links that `find_links` misses, such as
+/// `paypa1-verify.example/reset?token=…`, with `[link: <host>]`, so a path or token never
+/// leaves with the prompt. Trailing sentence punctuation stays as it was.
+fn redact_bare_links(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut at = 0;
+    for (start, word) in text
+        .split_whitespace()
+        .map(|w| (w.as_ptr() as usize - text.as_ptr() as usize, w))
+    {
+        let lead = word.len() - word.trim_start_matches(['(', '"', '\'', '<', '[']).len();
+        let token =
+            word[lead..].trim_end_matches(['.', ',', ';', ':', '!', '?', ')', '"', '\'', '>', ']']);
+        let Some(host) = bare_link_host(token) else {
+            continue;
+        };
+        let begin = start + lead;
+        out.push_str(&text[at..begin]);
+        out.push_str(&format!("[link: {host}]"));
+        at = begin + token.len();
+    }
+    out.push_str(&text[at..]);
+    out
 }
 
 fn is_word_char(c: char) -> bool {
@@ -689,6 +737,33 @@ mod tests {
             s.contains("1Z999AA10123456784"),
             "tracking numbers are not codes"
         );
+    }
+
+    #[test]
+    fn scheme_less_links_lose_their_path() {
+        let r = Redact::default();
+        assert_eq!(
+            redact("Go to paypa1-verify.example/reset?token=ABC123 today.", &r),
+            "Go to [link: paypa1-verify.example] today."
+        );
+        assert_eq!(
+            redact("(see Bank.Example?id=9&k=SECRET).", &r),
+            "(see [link: bank.example]).",
+        );
+        assert_eq!(
+            redact("x.example#frag and sub.x.example/a/b", &r),
+            "[link: x.example] and [link: sub.x.example]"
+        );
+        // Not links: no path, a numeric last label, a lone separator, plain paths.
+        for keep in [
+            "Is notes.md? Yes.",
+            "v1.2/3 of the plan",
+            "example.com/ is it",
+            "and/or src/main",
+            "[link: a.example] stays",
+        ] {
+            assert_eq!(redact(keep, &r), keep);
+        }
     }
 
     #[test]
