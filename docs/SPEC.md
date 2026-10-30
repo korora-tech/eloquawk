@@ -3578,7 +3578,10 @@ published reference; they are section 15 items 17 and 25.
 
 **Retry:**
 - The delay is `Retry-After` (delta-seconds or HTTP-date, `google::api::parse_retry_after`)
-  when present, otherwise `min(1 s · 2^attempt, 30 s) + jitter(0..1000 ms)` from getrandom.
+  when present, capped at 5 minutes, otherwise `min(1 s · 2^attempt, 30 s) + jitter(0..1000 ms)`
+  from getrandom. The cap (`RETRY_AFTER_CAP`, added after the M16 review) keeps an absurd hint
+  from overflowing `Instant` arithmetic and killing the worker thread, and a far-off date from
+  holding every check.
 - The AI worker's `Backoff` is pure, with an injectable `now` (as sync.rs's is).
 - **Interactive:** at most 2 retries, and only while the slot still holds the same check. A
   newer open replaces it, and the stale check is dropped with `Dropped` (16.5). After the last

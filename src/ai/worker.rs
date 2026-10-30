@@ -18,7 +18,7 @@ use super::fake::FakeDecider;
 use super::jev::{
     DecisionsRequest, DecisionsResponse, Question, THRESHOLDS, validate, verdict_from,
 };
-use super::openrouter::{self, AiEndpoints, AiError, ApiKey, Backoff};
+use super::openrouter::{self, AiEndpoints, AiError, ApiKey, BACKOFF_CAP, Backoff};
 use super::prompt::{TRIAGE_IDS, fit, shrink, triage_request};
 use super::{AiCommand, AiEvent, AiHandle, CheckRequest, KeyState, Outcome, Priority};
 use crate::config::Prefs;
@@ -634,7 +634,8 @@ impl Worker {
                     _ => None,
                 };
                 let delay = Backoff::delay(job.attempts - 1, retry_after, Backoff::jitter());
-                self.retry_at = Some(Instant::now() + delay);
+                let now = Instant::now();
+                self.retry_at = Some(now.checked_add(delay).unwrap_or(now + BACKOFF_CAP));
                 self.requeue(job, interactive);
             } else if interactive {
                 fail(self, &job, true);

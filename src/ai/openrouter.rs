@@ -405,18 +405,23 @@ pub fn get_key(
     Ok(info.data.limit_remaining)
 }
 
-/// Retry timing (SPEC 16.14), pure: `Retry-After` when given, otherwise
-/// `min(1 s · 2^attempt, 30 s)` plus up to a second of jitter.
+/// Retry timing (SPEC 16.14), pure: `Retry-After` when given (at most
+/// [`RETRY_AFTER_CAP`]), otherwise `min(1 s · 2^attempt, 30 s)` plus up to a second of
+/// jitter.
 pub struct Backoff;
 
 /// The longest computed backoff, before jitter.
 pub const BACKOFF_CAP: Duration = Duration::from_secs(30);
 
+/// The longest `Retry-After` honoured: a larger hint (or a date days away) would hold every
+/// check, and an absurd one would overflow `Instant` arithmetic.
+pub const RETRY_AFTER_CAP: Duration = Duration::from_secs(300);
+
 impl Backoff {
     /// The delay before attempt `attempt + 1`, with `jitter_ms` in `0..1000`.
     pub fn delay(attempt: u32, retry_after: Option<Duration>, jitter_ms: u64) -> Duration {
         if let Some(d) = retry_after {
-            return d;
+            return d.min(RETRY_AFTER_CAP);
         }
         let base = Duration::from_secs(1u64 << attempt.min(5)).min(BACKOFF_CAP);
         base + Duration::from_millis(jitter_ms % 1000)
@@ -578,6 +583,16 @@ mod tests {
             Backoff::delay(3, Some(Duration::from_secs(7)), 500),
             Duration::from_secs(7)
         );
+        // A huge or far-off hint is capped, so the worker's `Instant` sum cannot overflow.
+        assert_eq!(
+            Backoff::delay(0, Some(Duration::from_secs(u64::MAX)), 0),
+            RETRY_AFTER_CAP
+        );
+        let huge = classify(429, Some("18446744073709551615"), "", Timestamp::now());
+        let AiError::Busy { retry_after } = huge else {
+            panic!("{huge:?}");
+        };
+        assert_eq!(Backoff::delay(1, retry_after, 0), RETRY_AFTER_CAP);
         for _ in 0..50 {
             assert!(Backoff::jitter() < 1000);
         }
