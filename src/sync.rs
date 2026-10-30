@@ -1611,7 +1611,8 @@ impl Worker {
 
     /// SPEC 7.3: the history cursor first, then the labels (counts follow in chunks), then
     /// page 1 of the inbox and of the shown view. The first sync never reports new mail. A
-    /// repeat (Refresh, a retried poll) keeps the cursor it already has.
+    /// repeat after a completed sync (Refresh) keeps the cursor it already has;
+    /// a retried first sync takes the new one.
     fn initial_sync(&mut self, email: &str) {
         let profile = match self.with_token(email, gmail::profile) {
             Ok(p) => p,
@@ -1624,11 +1625,14 @@ impl Worker {
         self.succeeded(email);
         let synced_before = match self.accounts.get_mut(email) {
             Some(account) => {
-                // A repeat keeps the cursor it has: moving it here would skip the changes
-                // since then outside page 1, which the next history round still covers.
-                account
-                    .history_id
-                    .get_or_insert(parse::parse_u64(&profile.history_id));
+                // A repeat after a completed sync keeps the cursor it has: moving it here
+                // would skip the changes since then outside page 1, which the next history
+                // round still covers. A first sync (or a retried one) takes the profile's, so
+                // mail from before it completes is never reported as new.
+                let fresh = parse::parse_u64(&profile.history_id);
+                if !account.synced_once || account.history_id.is_none() {
+                    account.history_id = Some(fresh);
+                }
                 account.synced_once
             }
             None => return,
@@ -2180,6 +2184,9 @@ impl Worker {
                         gmail::untrash(agent, ep, token, id)
                     })
                     .and_then(|_| {
+                        // Out of Trash already: a failed restore below still needs the
+                        // refetch to show the thread as Gmail now has it.
+                        touched = true;
                         if restore.is_empty() {
                             return Ok(());
                         }
@@ -2232,7 +2239,15 @@ impl Worker {
                     gmail::thread_meta(agent, ep, token, id)
                 })?;
                 self.remember(email, &dto);
-                star_target(&dto).ok_or(CallError::Api(ApiError::NotFound))?
+                match star_target(&dto) {
+                    Some(target) => target,
+                    // Only drafts: star the thread, so the change still lands.
+                    None => {
+                        return self.with_token(email, |agent, ep, token| {
+                            gmail::modify_thread(agent, ep, token, id, &LabelDelta::star())
+                        });
+                    }
+                }
             }
         };
         self.with_token(email, |agent, ep, token| {
@@ -3784,6 +3799,106 @@ mod tests {
         assert_eq!(w.accounts.len(), 1, "the account stays");
         assert_eq!(problem(&drain(&rx)).as_deref(), Some(NETWORK_PROBLEM));
         assert_eq!(server.finish().len(), 1);
+    }
+
+    #[test]
+    fn a_failed_restore_after_untrash_still_refetches_the_thread() {
+        let server = FakeServer::start(vec![
+            Reply::json(200, TOKEN).for_path("/token"),
+            Reply::json(200, r#"{"id":"t1"}"#).for_path("/gmail/threads/t1/untrash"),
+            Reply::json(500, r#"{"error":{"code":500,"message":"Backend Error"}}"#)
+                .for_path("/gmail/threads/t1/modify"),
+        ]);
+        let (mut w, rx) = worker(Secrets::memory(), fake_endpoints(&server));
+        signed_in(&mut w, "me@example.com", "rt");
+        w.mutate(Mutation {
+            op: 9,
+            account: "me@example.com".into(),
+            thread_ids: vec!["t1".into(), "t2".into()],
+            change: Change::Untrash(LabelDelta::archive().inverse()),
+        });
+        let failed = drain(&rx).into_iter().any(|e| {
+            matches!(
+                e,
+                SyncEvent::MutationFinished {
+                    op: 9,
+                    error: Some(_)
+                }
+            )
+        });
+        assert!(failed, "the store rolls the change back");
+        let jobs: Vec<Job> = std::iter::from_fn(|| w.queue.pop()).collect();
+        assert!(
+            jobs.iter().any(|j| matches!(
+                j,
+                Job::FetchMeta(a, ids) if a == "me@example.com" && ids.iter().any(|i| i == "t1")
+            )),
+            "the half-applied untrash is corrected by a refetch: {jobs:?}"
+        );
+        let reqs = server.finish();
+        assert!(
+            reqs.iter().all(|r| !r.path().contains("/t2/")),
+            "stops at the failure"
+        );
+    }
+
+    #[test]
+    fn starring_a_thread_of_drafts_stars_the_thread() {
+        let drafts = r#"{"id":"td","historyId":"5","messages":[
+            {"id":"d1","threadId":"td","labelIds":["DRAFT"],"historyId":"5","internalDate":"1700000000000"}
+        ]}"#;
+        let server = FakeServer::start(vec![
+            Reply::json(200, TOKEN).for_path("/token"),
+            Reply::json(200, drafts).for_path("/gmail/threads/td"),
+            Reply::json(200, "{}").for_path("/gmail/threads/td/modify"),
+        ]);
+        let (mut w, rx) = worker(Secrets::memory(), fake_endpoints(&server));
+        signed_in(&mut w, "me@example.com", "rt");
+        w.mutate(Mutation {
+            op: 3,
+            account: "me@example.com".into(),
+            thread_ids: vec!["td".into()],
+            change: Change::Modify(LabelDelta::star()),
+        });
+        let ok = drain(&rx)
+            .into_iter()
+            .any(|e| matches!(e, SyncEvent::MutationFinished { op: 3, error: None }));
+        assert!(ok, "no misleading 'no longer in Gmail'");
+        let reqs = server.finish();
+        let modify = reqs
+            .iter()
+            .find(|r| r.method == "POST" && r.path() == "/gmail/threads/td/modify")
+            .expect("the thread is starred");
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&modify.body).unwrap(),
+            serde_json::json!({"addLabelIds": ["STARRED"]})
+        );
+    }
+
+    #[test]
+    fn a_retried_first_sync_takes_the_new_cursor() {
+        for (synced_once, expected) in [(false, 123456), (true, 7)] {
+            let server = FakeServer::start(vec![
+                Reply::json(200, TOKEN).for_path("/token"),
+                Reply::json(200, fixtures::PROFILE).for_path("/gmail/profile"),
+                Reply::json(500, r#"{"error":{"code":500,"message":"Backend Error"}}"#)
+                    .for_path("/gmail/labels"),
+            ]);
+            let (mut w, _rx) = worker(Secrets::memory(), fake_endpoints(&server));
+            signed_in(&mut w, "me@example.com", "rt");
+            {
+                let a = w.accounts.get_mut("me@example.com").unwrap();
+                a.history_id = Some(7);
+                a.synced_once = synced_once;
+            }
+            w.initial_sync("me@example.com");
+            assert_eq!(
+                w.accounts["me@example.com"].history_id,
+                Some(expected),
+                "synced_once = {synced_once}"
+            );
+            server.finish();
+        }
     }
 
     /// Waits until an event in `all` (old or newly received) matches `done`.

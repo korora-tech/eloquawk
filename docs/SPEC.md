@@ -487,7 +487,8 @@ Rules:
 
 `messages/batchModify` is not used. The worker keeps each thread's message ids (from the
 metadata fetch) only to pick the star target: the last message that is not a draft. If the
-thread is not in `known`, star first calls `thread_meta`.
+thread is not in `known`, star first calls `thread_meta`. A thread that holds only drafts has
+no such message, so it is starred with `modify_thread` adding STARRED instead.
 
 The Gmail JSON fixtures used in tests live in `src/google/fixtures/*.json`, loaded with
 `include_str!`. Write them by hand from the documented shapes, and mark any that are unverified.
@@ -1852,12 +1853,15 @@ milestone are welcome. **No trailers.** Push to main after each commit.
   - Step 7's `NewMail` is emitted even when step 5's re-list fails (the candidates are
     cleared at that point, so they would otherwise be lost); `Synced` is emitted only when
     the re-list worked.
-  - A repeat initial sync (Refresh, a retried poll) keeps an existing history cursor instead
-    of moving it to `profile.historyId` (7.3 step 1), because moving it would skip changes
-    outside page 1. `Refresh` queues `History` after `InitialSync` for accounts that have
+  - A repeat initial sync after one has completed (Refresh)
+    keeps an existing history cursor instead of moving it to `profile.historyId` (7.3 step 1),
+    because moving it would skip changes outside page 1. A retried first sync (`synced_once`
+    still false) takes the new `profile.historyId`, so mail that arrived before the first
+    sync completed is never reported as new (7.3 step 4). `Refresh` queues `History` after `InitialSync` for accounts that have
     synced, so a manual refresh also catches up on changes.
   - Mutations and sends for an account that is not signed in are answered at once with an
-    error. A mutation that changed at least one thread queues `FetchMeta` for all of its
+    error. A mutation that changed at least one thread (an untrash counts once the untrash
+    call succeeds, even if the restore after it fails) queues `FetchMeta` for all of its
     threads at the front of the background lane (the authoritative refetch) and the count
     refresh. Send failures go to the composer only, not the banner.
   - `send` failure mapping also counts an unreadable success answer (`Decode`, `TooLarge`)
