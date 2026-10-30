@@ -2016,7 +2016,10 @@ milestone are welcome. **No trailers.** Push to main after each commit.
   `help::tests::readme_lists_every_shortcut` fails when the two drift. `GUIDE_URL`
   (`ui/settings.rs`) points at `docs/google-gmail.md` on `main`, and a test checks that file
   exists. Both tests read the checkout, so they skip their file check in the Nix package's
-  check phase, whose source holds no docs; CI's `cargo test` runs them in full. The
+  check phase, whose source holds no docs; CI's `cargo test` runs them in full. The README
+  test compares every row of the section's table except the header and separator (a row
+  without backticked keys still counts), and fails rather than skips when `docs/` exists
+  but the README cannot be read. The
   needs-client card no longer prints the guide's path in its wrapped copy (it broke as
   "docs /google-gmail.md") and gains a "Setup guide" button that opens `GUIDE_URL`. The
   committed shots are `demo-inbox`, `demo-newsletter-light`, `demo-reply`, `demo-search` and

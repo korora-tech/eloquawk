@@ -409,19 +409,27 @@ mod tests {
     }
 
     /// The README's table is a copy of [`SHORTCUTS`], row for row. The Nix package's source
-    /// holds no README, so its check phase skips this; CI's `cargo test` runs in the checkout.
+    /// holds no README or docs, so its check phase skips this; in a checkout (which has
+    /// `docs/`) a missing README fails, and CI's `cargo test` runs it in full.
     #[test]
     fn readme_lists_every_shortcut() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("README.md");
-        let Ok(readme) = std::fs::read_to_string(&path) else {
-            return;
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let readme = match std::fs::read_to_string(root.join("README.md")) {
+            Ok(readme) => readme,
+            Err(e) => {
+                assert!(!root.join("docs").is_dir(), "README.md is unreadable: {e}");
+                return;
+            }
         };
+        // Every table row except the header and the separator, so a row written without
+        // backticks is compared too rather than skipped.
         let listed: Vec<&str> = readme
             .lines()
             .skip_while(|l| *l != "## Keyboard shortcuts")
             .skip(1)
             .take_while(|l| !l.starts_with("## "))
-            .filter(|l| l.starts_with("| `"))
+            .filter(|l| l.starts_with('|'))
+            .filter(|l| !l.starts_with("| Keys") && !l.starts_with("| ---"))
             .collect();
         let expected: Vec<String> = SHORTCUTS.iter().map(readme_row).collect();
         assert_eq!(
