@@ -25,12 +25,12 @@ use super::text_input::{Submit, TextInput};
 use super::theme::{self, CONTROL_H, HEADER_H, ICON_SLOT, LIST_W, SIDEBAR_W, palette, tint};
 use super::widgets::{ButtonStyle, button, ghost_button};
 use super::{
-    Archive, BackToList, CancelSearch, CloseSearch, CloseWindow, CollapseAll, Compose,
-    DismissTriage, ExpandAll, FocusSearch, Forward, GoAllMail, GoDrafts, GoInbox, GoSent,
-    GoStarred, MarkRead, MarkUnread, NextAccount, NextMessage, NextThread, OpenLabelPicker,
-    OpenSettings, OpenThread, PrevAccount, PrevMessage, PrevThread, Quit, Refresh, Reply, ReplyAll,
-    ReportSpam, ScrollReaderDown, ScrollReaderUp, ToggleHelp, ToggleSelect, ToggleStar, Trash,
-    Undo,
+    ApplySuggestion1, ApplySuggestion2, ApplySuggestion3, Archive, BackToList, CancelSearch,
+    CloseSearch, CloseWindow, CollapseAll, Compose, DismissTriage, ExpandAll, FocusSearch, Forward,
+    GoAllMail, GoDrafts, GoInbox, GoSent, GoStarred, MarkRead, MarkUnread, NextAccount,
+    NextMessage, NextThread, OpenLabelPicker, OpenSettings, OpenThread, PrevAccount, PrevMessage,
+    PrevThread, Quit, Refresh, Reply, ReplyAll, ReportSpam, ScrollReaderDown, ScrollReaderUp,
+    ToggleHelp, ToggleSelect, ToggleStar, Trash, Undo,
 };
 use crate::ai::jev::{Kind, Level};
 use crate::branding;
@@ -430,6 +430,16 @@ impl MainView {
 
     fn trash(&mut self, _: &Trash, _: &mut Window, cx: &mut Context<Self>) {
         self.mutate(Store::trash_kind, cx);
+    }
+
+    /// `1`/`2`/`3`: the open thread's nth suggested label, on that thread only. Nothing (and
+    /// no notice) when there is no such suggestion or the reader is closed (SPEC 16.12.3).
+    fn apply_suggestion(&mut self, n: usize, cx: &mut Context<Self>) {
+        self.store.update(cx, |s, cx| {
+            if s.apply_suggestion(n).is_some() {
+                cx.notify();
+            }
+        });
     }
 
     fn report_spam(&mut self, _: &ReportSpam, _: &mut Window, cx: &mut Context<Self>) {
@@ -1213,6 +1223,15 @@ impl Render for MainView {
                                         cx.notify();
                                     })
                                 },
+                            )))
+                            .on_action(cx.listener(unless_help(
+                                |this, _: &ApplySuggestion1, _, cx| this.apply_suggestion(0, cx),
+                            )))
+                            .on_action(cx.listener(unless_help(
+                                |this, _: &ApplySuggestion2, _, cx| this.apply_suggestion(1, cx),
+                            )))
+                            .on_action(cx.listener(unless_help(
+                                |this, _: &ApplySuggestion3, _, cx| this.apply_suggestion(2, cx),
                             )))
                             .on_action(cx.listener(unless_help(Self::undo)))
                             .on_action(cx.listener(unless_help(Self::expand_all)))

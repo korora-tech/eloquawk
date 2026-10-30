@@ -63,6 +63,12 @@ actions!(
         ReportSpam,
         /// Hides the open thread's AI banner for the session (not bound to a key).
         DismissTriage,
+        /// Applies the open thread's first suggested label (M17).
+        ApplySuggestion1,
+        /// Applies the open thread's second suggested label.
+        ApplySuggestion2,
+        /// Applies the open thread's third suggested label.
+        ApplySuggestion3,
         OpenLabelPicker,
         Reply,
         ReplyAll,
@@ -154,6 +160,9 @@ pub fn bindings() -> Vec<KeyBinding> {
         KeyBinding::new("g n", NextAccount, mail),
         KeyBinding::new("g p", PrevAccount, mail),
         KeyBinding::new("?", ToggleHelp, mail),
+        KeyBinding::new("1", ApplySuggestion1, mail),
+        KeyBinding::new("2", ApplySuggestion2, mail),
+        KeyBinding::new("3", ApplySuggestion3, mail),
         KeyBinding::new("escape", ClosePicker, Some("LabelPicker")),
         KeyBinding::new("up", PickerUp, Some("LabelPicker")),
         KeyBinding::new("down", PickerDown, Some("LabelPicker")),

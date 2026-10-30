@@ -86,6 +86,24 @@ pub const SHORTCUTS: &[Shortcut] = &[
     row(&["g n"], "NextAccount", "Mail", "Next account"),
     row(&["g p"], "PrevAccount", "Mail", "Previous account"),
     row(&["?"], "ToggleHelp", "Mail", "Keyboard shortcuts"),
+    row(
+        &["1"],
+        "ApplySuggestion1",
+        "Mail",
+        "Apply suggested label 1",
+    ),
+    row(
+        &["2"],
+        "ApplySuggestion2",
+        "Mail",
+        "Apply suggested label 2",
+    ),
+    row(
+        &["3"],
+        "ApplySuggestion3",
+        "Mail",
+        "Apply suggested label 3",
+    ),
     row(&["ctrl-c"], "Copy", "ReadOnlyText", "Copy the selection"),
     row(
         &["ctrl-a"],

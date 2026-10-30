@@ -126,6 +126,9 @@ These are the keys the `?` overlay shows. Mail keys do nothing while a text fiel
 | `g then n` | Next account | Mail |
 | `g then p` | Previous account | Mail |
 | `?` | Keyboard shortcuts | Mail |
+| `1` | Apply suggested label 1 | Mail |
+| `2` | Apply suggested label 2 | Mail |
+| `3` | Apply suggested label 3 | Mail |
 | `Ctrl c` | Copy the selection | Message text |
 | `Ctrl a` | Select the whole message | Message text |
 | `Esc` | Close the picker | Label picker |
