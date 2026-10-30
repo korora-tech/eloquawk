@@ -1,0 +1,211 @@
+:root {
+  color-scheme: light dark;
+
+  --bg: #f6f5f1;
+  --bg-raised: #ffffff;
+  --bg-sunken: #ecebe5;
+  --fg: #141821;
+  --fg-muted: #4f5666;
+  --fg-faint: #7a8090;
+  --border: #dcdad2;
+  --border-strong: #c6c3b8;
+  --accent: #5b3fc4;
+  --accent-strong: #6d4fd8;
+  --accent-ink: #ffffff;
+  --danger: #c4372e;
+  --select: #6d4fd81f;
+
+  --radius: 14px;
+  --radius-sm: 8px;
+  --shadow: 0 1px 2px #1418210f, 0 12px 40px -12px #14182133;
+  --page: 1120px;
+  --gutter: clamp(16px, 4vw, 32px);
+
+  font-family: var(--font-sans);
+  font-size: 16px;
+  line-height: 1.6;
+  background: var(--bg);
+  color: var(--fg);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0b0f17;
+    --bg-raised: #121826;
+    --bg-sunken: #080b11;
+    --fg: #e9e7e1;
+    --fg-muted: #a3a8b5;
+    --fg-faint: #6f7585;
+    --border: #1f2737;
+    --border-strong: #2c3548;
+    --accent: #b6a1ff;
+    --accent-strong: #a78bfa;
+    --accent-ink: #141821;
+    --danger: #ff6b61;
+    --select: #a78bfa24;
+    --shadow: 0 1px 2px #0006, 0 24px 60px -20px #000c;
+  }
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+}
+
+main {
+  flex: 1;
+}
+
+img,
+svg {
+  display: block;
+  max-width: 100%;
+}
+
+a {
+  color: inherit;
+  text-decoration-color: var(--border-strong);
+  text-underline-offset: 3px;
+}
+
+a:hover {
+  text-decoration-color: var(--accent);
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+h1,
+h2,
+h3 {
+  line-height: 1.15;
+  letter-spacing: -0.02em;
+  text-wrap: balance;
+}
+
+p {
+  text-wrap: pretty;
+}
+
+code,
+kbd,
+pre {
+  font-family: var(--font-mono);
+  font-size: 0.9em;
+}
+
+:not(pre) > code {
+  padding: 0.1em 0.35em;
+  border-radius: 5px;
+  background: var(--bg-sunken);
+  border: 1px solid var(--border);
+  font-size: 0.85em;
+}
+
+kbd {
+  display: inline-block;
+  min-width: 1.6em;
+  padding: 0.05em 0.4em;
+  border: 1px solid var(--border-strong);
+  border-bottom-width: 2px;
+  border-radius: 6px;
+  background: var(--bg-raised);
+  font-size: 0.8em;
+  text-align: center;
+  white-space: nowrap;
+}
+
+pre {
+  margin: 0;
+  padding: 16px 18px;
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-raised);
+  line-height: 1.55;
+  font-size: 0.84rem;
+}
+
+/* Shiki emits both themes as CSS variables; pick one per colour scheme. */
+.astro-code,
+.astro-code span {
+  color: var(--shiki-light);
+}
+
+@media (prefers-color-scheme: dark) {
+  .astro-code,
+  .astro-code span {
+    color: var(--shiki-dark);
+  }
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.92rem;
+}
+
+th,
+td {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  vertical-align: top;
+}
+
+th {
+  font-weight: 600;
+  color: var(--fg-muted);
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.wrap {
+  width: 100%;
+  max-width: var(--page);
+  margin-inline: auto;
+  padding-inline: var(--gutter);
+}
+
+.eyebrow {
+  margin: 0 0 12px;
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
