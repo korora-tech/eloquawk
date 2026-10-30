@@ -53,6 +53,10 @@ pub enum Command {
         more: bool,
     },
     OpenThread(ThreadKey),
+    /// Fetches a new thread's full detail in the background for an AI check (SPEC 16.11):
+    /// background lane, never marks it read, and a failure emits nothing. M16 addition.
+    #[allow(dead_code)] // consumed in M16 by the store's background checks
+    Prefetch(ThreadKey),
     Modify {
         op: OpId,
         account: AccountId,

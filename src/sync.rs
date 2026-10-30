@@ -320,6 +320,8 @@ enum Job {
     History(AccountId),
     /// The next chunk of a history round's changed threads (SPEC 7.4 step 4).
     Refetch(AccountId),
+    /// A new thread's full detail for a background AI check (SPEC 16.11).
+    Prefetch(ThreadKey),
 }
 
 impl Job {
@@ -332,7 +334,7 @@ impl Job {
 
     fn account(&self) -> &str {
         match self {
-            Job::OpenThread(key) => &key.account,
+            Job::OpenThread(key) | Job::Prefetch(key) => &key.account,
             Job::ListView(view, _) => &view.account,
             Job::Mutate(m) => &m.account,
             Job::Send(s) => &s.outgoing.account,
@@ -1021,7 +1023,8 @@ impl Worker {
             self.emit(SyncEvent::Busy(true));
         }
         match job {
-            Job::OpenThread(key) => self.open_thread(key),
+            Job::OpenThread(key) => self.open_thread(key, false),
+            Job::Prefetch(key) => self.open_thread(key, true),
             Job::ListView(view, more) => self.list_view(view, more),
             Job::Mutate(m) => self.mutate(m),
             Job::Send(s) => self.send(s.op, s.outgoing),
@@ -1109,6 +1112,11 @@ impl Worker {
                 }
             }
             Command::OpenThread(key) => self.queue.push(Job::OpenThread(key)),
+            Command::Prefetch(key) => {
+                if self.accounts.contains_key(&key.account) {
+                    self.queue.push(Job::Prefetch(key));
+                }
+            }
             Command::Modify {
                 op,
                 account,
@@ -2029,8 +2037,9 @@ impl Worker {
 
     /// SPEC 7.5 `OpenThread`: the full thread for the reader. It never marks the thread
     /// read; the store decides that. The fresh summary (attachments are certain here) goes
-    /// to the list too when it changed.
-    fn open_thread(&mut self, key: ThreadKey) {
+    /// to the list too when it changed. A `prefetch` (SPEC 16.11) does the same from the
+    /// background lane, but a failure emits nothing, so the reader is unaffected.
+    fn open_thread(&mut self, key: ThreadKey, prefetch: bool) {
         let email = key.account.clone();
         match self.with_token(&email, |agent, ep, token| {
             gmail::thread_full(agent, ep, token, &key.id)
@@ -2054,7 +2063,9 @@ impl Worker {
             Err(e) => {
                 let error = e.reader_message();
                 self.failed(&email, &e);
-                self.emit(SyncEvent::ThreadFailed { key, error });
+                if !prefetch {
+                    self.emit(SyncEvent::ThreadFailed { key, error });
+                }
             }
         }
     }
@@ -2660,6 +2671,18 @@ mod tests {
     }
 
     #[test]
+    fn prefetch_queues_a_background_job_for_known_accounts() {
+        let (mut w, _rx) = worker(Secrets::memory(), nowhere());
+        signed_in(&mut w, "me@example.com", "rt");
+        w.queue = Queue::default();
+        let key = ThreadKey::new("me@example.com", "t");
+        w.handle(Command::Prefetch(key.clone()));
+        w.handle(Command::Prefetch(ThreadKey::new("gone@example.com", "t")));
+        assert!(w.queue.interactive.is_empty());
+        assert_eq!(w.queue.background, [Job::Prefetch(key)]);
+    }
+
+    #[test]
     fn reads_and_changes_queue_interactive_jobs() {
         let (mut w, rx) = worker(Secrets::memory(), nowhere());
         signed_in(&mut w, "me@example.com", "rt");
@@ -2863,6 +2886,14 @@ mod tests {
                 Job::History("other@example.com".into()),
             ]
         );
+
+        // A prefetch waits in the background lane, coalesced, behind an open.
+        q.push(Job::Prefetch(key.clone()));
+        q.push(Job::Prefetch(key.clone()));
+        q.push(Job::OpenThread(key.clone()));
+        assert_eq!(q.pop(), Some(Job::OpenThread(key.clone())));
+        assert_eq!(q.pop(), Some(Job::Prefetch(key.clone())));
+        assert!(q.is_empty());
 
         q.push(Job::OpenThread(key));
         q.push(Job::InitialSync(a()));

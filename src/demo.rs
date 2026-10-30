@@ -173,6 +173,12 @@ impl Demo {
                     error: "Conversation not found".into(),
                 }),
             },
+            // A background AI check's fetch (SPEC 16.11): the detail, or nothing.
+            Command::Prefetch(key) => {
+                if let Some((_, detail)) = self.threads.get(&key) {
+                    self.emit(SyncEvent::ThreadDetail(detail.clone()));
+                }
+            }
             Command::Modify {
                 op,
                 account,
