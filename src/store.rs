@@ -3928,6 +3928,30 @@ mod tests {
             assert!(!arx.try_iter().any(|c| matches!(c, AiCommand::Check(_))));
         }
 
+        /// Upgrading from M16: a consent given to the version 1 text no longer counts, the
+        /// worker forgets the account, and turning it on again stores the current version.
+        #[test]
+        fn m16_consent_needs_the_label_disclosure() {
+            let mut p = prefs(&[], false);
+            p.ai.accounts.insert(PERSONAL.into(), 1);
+            let mut r = rig(Mode::Google, p);
+            r.s.apply_ai(AiEvent::Key(KeyState::Saved { hint: "h".into() }));
+            assert!(!r.s.ai_opted_in(PERSONAL));
+            assert_eq!(
+                r.s.prefs.ai.accounts.get(PERSONAL),
+                Some(&1),
+                "shown as changed"
+            );
+            r.open("p-ai-phish");
+            assert!(r.checks().is_empty());
+            r.s.set_ai_consent(PERSONAL, true);
+            assert_eq!(
+                r.s.prefs.ai.accounts.get(PERSONAL),
+                Some(&DISCLOSURE_VERSION)
+            );
+            assert!(r.s.ai_opted_in(PERSONAL));
+        }
+
         #[test]
         fn ai_never_checks_self_sent_or_draft() {
             let mut r = ready(&[PERSONAL], false);

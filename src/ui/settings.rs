@@ -61,7 +61,8 @@ const KEYS_URL: &str = "https://openrouter.ai/settings/keys";
 const OPENROUTER_PRIVACY: &str = "https://openrouter.ai/privacy";
 const TYPESAFE_PRIVACY: &str = "https://typesafe.ai/legal/privacy-policy";
 const AI_INTRO: &str = concat!(
-    "Uses TypeSafe's Jev model through OpenRouter to flag phishing, scams and spam. Off until ",
+    "Uses TypeSafe's Jev model through OpenRouter to flag phishing, scams and spam, and to ",
+    "suggest labels. Off until ",
     "you add a key and turn it on for an account. Your OpenRouter account's logging and ",
     "Broadcast settings apply to these requests, so a dedicated key with those off is best.",
 );
@@ -73,19 +74,21 @@ const BACKGROUND_CAPTION: &str = concat!(
 );
 const SPEND_ERROR: &str = "Enter an amount from $0.10 to $100";
 const STALE_CONSENT: &str = "What Eloquawk sends has changed. Review and turn on again.";
-/// The disclosure shown before an account is turned on (SPEC 16.2, `DISCLOSURE_VERSION` 1).
+/// The disclosure shown before an account is turned on (SPEC 16.2, `DISCLOSURE_VERSION` 2:
+/// version 1 did not mention label names).
 const DISCLOSURE: [&str; 4] = [
     concat!(
         "When you open a message in this account, Eloquawk sends part of it to OpenRouter, ",
-        "which passes it to TypeSafe's Jev model to check for phishing, scams and spam. If you ",
-        "also turn on background checks, new inbox mail in this account is sent as it arrives, ",
-        "including messages you never open.",
+        "which passes it to TypeSafe's Jev model to check for phishing, scams and spam and to ",
+        "suggest labels. If you also turn on background checks, new inbox mail in this account ",
+        "is sent as it arrives, including messages you never open.",
     ),
     concat!(
         "It sends: the sender's name and address, Reply-To and Return-Path, the subject, the ",
         "sender-authentication results, the website names that links point to, the types of ",
-        "any attachments, and the first 6,000 characters of the message without quoted ",
-        "replies. Before sending, Eloquawk replaces web links with just their website name, ",
+        "any attachments, the first 6,000 characters of the message without quoted replies, ",
+        "and, while label suggestions are on, the names of your labels (up to 100) with each ",
+        "check of a message you open. Before sending, Eloquawk replaces web links with just their website name, ",
         "your address and the other recipients' addresses with placeholders, and one-time ",
         "codes it recognises (English wording only) with \"[code]\". Names, phone numbers and ",
         "anything else in the text are sent as written.",
@@ -1145,6 +1148,20 @@ mod tests {
             assert_eq!(parse_dollars(s), None, "{s}");
         }
         assert_eq!(dollars(250), "2.50");
+    }
+
+    /// Version 2 names what M17 sends: label names, with checks of opened messages only.
+    #[test]
+    fn disclosure_names_the_labels_sent() {
+        assert_eq!(DISCLOSURE_VERSION, 2);
+        let text = DISCLOSURE.concat();
+        assert!(text.contains("to check for phishing, scams and spam and to suggest labels"));
+        assert!(text.contains(
+            "while label suggestions are on, the names of your labels (up to 100) with each \
+             check of a message you open"
+        ));
+        assert!(!text.contains("with every check"));
+        assert!(AI_INTRO.contains("phishing, scams and spam, and to suggest labels"));
     }
 
     #[test]

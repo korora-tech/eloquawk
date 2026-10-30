@@ -28,8 +28,9 @@ use prompt::AiInput;
 /// The pinned model; its thresholds are tuned for this version (SPEC 16.1).
 pub const JEV_MODEL: &str = "typesafe/jev-1.13";
 /// The disclosure text's version. Any change to what is sent bumps it, which turns every
-/// account off until the user accepts again (SPEC 16.2).
-pub const DISCLOSURE_VERSION: u32 = 1;
+/// account off until the user accepts again (SPEC 16.2). Version 2 (M17) adds the label
+/// names sent with each check of a message you open.
+pub const DISCLOSURE_VERSION: u32 = 2;
 
 /// Which lane a check runs in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
