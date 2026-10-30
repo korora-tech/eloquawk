@@ -9,6 +9,8 @@
 pub mod cache;
 pub mod fake;
 pub mod jev;
+#[cfg(test)]
+mod live;
 pub mod openrouter;
 pub mod prompt;
 pub mod worker;
