@@ -849,6 +849,14 @@ impl MainView {
                 });
                 (want == actual, actual.to_string())
             }
+            Cond::Suggest(want) => {
+                let actual: Vec<String> = store
+                    .open
+                    .as_ref()
+                    .map(|key| store.suggestions(key).into_iter().map(|s| s.name).collect())
+                    .unwrap_or_default();
+                (*want == actual, actual.join(";"))
+            }
             Cond::Screen(want) => {
                 let actual = match self.current_screen(cx) {
                     Screen::Mail => "mail",

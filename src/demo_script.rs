@@ -124,6 +124,9 @@ pub enum Cond {
     /// The open thread's triage state (`ai=danger-phishing|danger-scam|warning|spam|caution|
     /// none|checking|failed|paused`). M16.
     Ai(String),
+    /// The open thread's suggested labels, in order (`suggest=Receipts;Travel`; empty for
+    /// none). M17.
+    Suggest(Vec<String>),
 }
 
 /// The values `expect:ai=` accepts.
@@ -338,6 +341,12 @@ fn parse_cond(value: &str) -> Option<Cond> {
         "messages" => Cond::Messages(arg.parse().ok()?),
         "screen" if matches!(arg, "mail" | "settings" | "auth") => Cond::Screen(arg.to_string()),
         "ai" if AI_STATES.contains(&arg) => Cond::Ai(arg.to_string()),
+        "suggest" => Cond::Suggest(
+            arg.split(';')
+                .filter(|n| !n.is_empty())
+                .map(str::to_string)
+                .collect(),
+        ),
         _ => return None,
     };
     Some(cond)
@@ -414,6 +423,9 @@ pub const DEMO_ACTIONS: &[&str] = &[
     "MarkUnread",
     "ReportSpam",
     "DismissTriage",
+    "ApplySuggestion1",
+    "ApplySuggestion2",
+    "ApplySuggestion3",
     "OpenLabelPicker",
     "Reply",
     "ReplyAll",
@@ -460,6 +472,9 @@ pub fn demo_action(name: &str) -> Option<Box<dyn Action>> {
         "MarkUnread" => Box::new(ui::MarkUnread),
         "ReportSpam" => Box::new(ui::ReportSpam),
         "DismissTriage" => Box::new(ui::DismissTriage),
+        "ApplySuggestion1" => Box::new(ui::ApplySuggestion1),
+        "ApplySuggestion2" => Box::new(ui::ApplySuggestion2),
+        "ApplySuggestion3" => Box::new(ui::ApplySuggestion3),
         "OpenLabelPicker" => Box::new(ui::OpenLabelPicker),
         "Reply" => Box::new(ui::Reply),
         "ReplyAll" => Box::new(ui::ReplyAll),
@@ -634,6 +649,14 @@ mod tests {
             assert_eq!(cond(&format!("ai={state}")), Some(Cond::Ai(state.into())));
         }
         assert_eq!(cond("ai=maybe"), None);
+        assert_eq!(cond("suggest="), Some(Cond::Suggest(vec![])));
+        assert_eq!(
+            cond("suggest=Receipts;Projects/Eloquawk"),
+            Some(Cond::Suggest(vec![
+                "Receipts".into(),
+                "Projects/Eloquawk".into()
+            ]))
+        );
         assert_eq!(cond("compose=from"), None);
         assert_eq!(cond("discard=maybe"), None);
         assert_eq!(cond("picker=ajar"), None);
