@@ -1,0 +1,44 @@
+---
+import { SITE } from "../lib/site";
+---
+
+<footer>
+  <div class="wrap row">
+    <p>
+      Eloquawk is free software under the{" "}
+      <a href={`${SITE.repo}/blob/main/LICENSE`}>Apache-2.0 licence</a>.
+    </p>
+    <p>
+      <a href={SITE.repo}>Source</a>
+      <span aria-hidden="true">·</span>
+      <a href={`${SITE.repo}/issues`}>Issues</a>
+      <span aria-hidden="true">·</span>
+      <a href="https://github.com/korora-tech">Korora</a>
+    </p>
+  </div>
+</footer>
+
+<style>
+  footer {
+    margin-top: 96px;
+    border-top: 1px solid var(--border);
+    color: var(--fg-faint);
+    font-size: 0.88rem;
+  }
+
+  .row {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    gap: 8px 24px;
+    padding-block: 28px;
+  }
+
+  p {
+    margin: 0;
+  }
+
+  span {
+    margin-inline: 6px;
+  }
+</style>

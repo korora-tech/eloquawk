@@ -1,0 +1,27 @@
+---
+import Base from "../layouts/Base.astro";
+---
+
+<Base title="Not found">
+  <section class="wrap">
+    <p class="eyebrow">404</p>
+    <h1>Nothing in this folder</h1>
+    <p>No page lives at that address. Try the <a href="/">home page</a> or the <a href="/docs">docs</a>.</p>
+  </section>
+</Base>
+
+<style>
+  section {
+    padding-block: clamp(64px, 14vw, 160px);
+    text-align: center;
+  }
+
+  h1 {
+    margin: 0 0 16px;
+    font-size: clamp(2rem, 6vw, 3.2rem);
+  }
+
+  p:last-child {
+    color: var(--fg-muted);
+  }
+</style>
