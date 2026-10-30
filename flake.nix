@@ -121,7 +121,8 @@
         default = self.homeModules.eloquawk;
         eloquawk = import ./nix/hm-module.nix self;
       };
-      # The older output name some Home Manager setups still look for.
+      # The older output name some Home Manager setups still look for. `nix flake check` warns
+      # that it is an unknown output; the warning is expected and harmless.
       homeManagerModules = self.homeModules;
 
       # Evaluates the Home Manager module against stub options, and checks the package's
