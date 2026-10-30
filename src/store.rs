@@ -2190,7 +2190,11 @@ impl Store {
             } => {
                 let id = (thread.account.clone(), message_id);
                 self.ai.checking.remove(&id);
-                self.ai.failed.insert(id, (error, retryable));
+                // A failed labels-only re-ask leaves the stored verdict standing: no failure
+                // caption, and the labels are asked again on the next open.
+                if !self.ai.results.contains_key(&id) {
+                    self.ai.failed.insert(id, (error, retryable));
+                }
                 self.ai.bump(&thread);
             }
             AiEvent::Dropped { thread, message_id } => {
@@ -3843,6 +3847,24 @@ mod tests {
             assert!(names(&r.s, &d.key).is_empty());
             assert!(r.s.apply_suggestion(0).is_none());
             assert!(!r.s.threads[&d.key].label_ids.contains(demo_data::RECEIPTS));
+            // A failed labels-only re-ask shows no failure and asks again on the next open.
+            r.s.apply_ai(AiEvent::Failed {
+                thread: d.key.clone(),
+                message_id: target.clone(),
+                error: "busy".into(),
+                retryable: false,
+            });
+            assert!(r.s.ai_failure(&d.key).is_none());
+            r.s.close_thread();
+            r.s.open_thread(d.key.clone());
+            let again = r.checks();
+            assert_eq!(again.len(), 1);
+            assert!(!again[0].verdict, "labels only, again");
+            let ask = again[0].labels.as_ref().unwrap();
+            r.s.apply_ai(AiEvent::Checking {
+                thread: d.key.clone(),
+                message_id: target.clone(),
+            });
             // The labels-only answer keeps the stored verdict.
             r.s.apply_ai(AiEvent::Checked {
                 thread: d.key.clone(),

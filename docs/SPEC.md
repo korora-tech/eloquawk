@@ -3357,7 +3357,9 @@ that never send anything to OpenRouter.
 - While a check is in flight, child 0 shows nothing extra, to avoid flicker on fast j/k.
 - After a failure, the subject row shows a muted caption, "Couldn't check this message", plus
   " · Retry" as a link when the failure is retryable. Retry clears `failed` and re-sends.
-  "Paused: <reason>" is shown instead when the worker is paused.
+  "Paused: <reason>" is shown instead when the worker is paused. A failed labels-only re-ask
+  (the target already has a result) records no failure: the stored verdict stands, no caption
+  shows, and the labels are asked again on the next open (M17 review note).
 
 **Phishing link guard (M16; every account, decision 5):**
 - Link clicks already reach the reader: `BodyText` emits `BodyEvent::OpenLink(LinkTarget)` and
