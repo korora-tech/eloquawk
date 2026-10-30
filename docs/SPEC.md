@@ -2011,6 +2011,17 @@ milestone are welcome. **No trailers.** Push to main after each commit.
   - `docs/desktop-integration.md`: mailto handler (whitelisted fields), notifications, single
     instance, HM module
   - `docs/screenshots/*.webp` from demo mode only, converted with `cwebp`
+- **As built (M15):** the README's shortcut table has a row per `SHORTCUTS` entry (keys as
+  `help::key_label` shows them, the description, and the context's heading), and
+  `help::tests::readme_lists_every_shortcut` fails when the two drift. `GUIDE_URL`
+  (`ui/settings.rs`) points at `docs/google-gmail.md` on `main`, and a test checks that file
+  exists. Both tests read the checkout, so they skip their file check in the Nix package's
+  check phase, whose source holds no docs; CI's `cargo test` runs them in full. The
+  needs-client card no longer prints the guide's path in its wrapped copy (it broke as
+  "docs /google-gmail.md") and gains a "Setup guide" button that opens `GUIDE_URL`. The
+  committed shots are `demo-inbox`, `demo-newsletter-light`, `demo-reply`, `demo-search` and
+  `demo-shortcuts`, scaled to half the 2x capture with `cwebp -q 82 -resize 1693 0`. AI
+  triage is not part of v1 (korora-tech/eloquawk#1); the README lists it as planned.
 - **Acceptance:**
   - Every README shortcut matches `ui/help.rs`.
   - `rg -n 'allow\(dead_code\)' src` is empty, or each remaining hit is justified.

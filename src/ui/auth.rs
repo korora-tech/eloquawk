@@ -5,6 +5,7 @@ use gpui::prelude::*;
 use gpui::{AnyElement, ClickEvent, ClipboardItem, Context, Div, div, px};
 
 use super::main_view::MainView;
+use super::settings::GUIDE_URL;
 use super::theme::{Palette, palette};
 use super::widgets::{ButtonStyle, OnClick, body_text, button, card};
 use crate::branding;
@@ -25,7 +26,7 @@ const KEYRING_STARTING_INFO: &str = concat!(
 const NEEDS_CLIENT_INFO: &str = concat!(
     "This build of Eloquawk has no OAuth client of its own, so it needs one you create in the ",
     "Google Cloud console. Enable the Gmail API, create a Desktop client, then paste its ID ",
-    "and secret in Settings. docs/google-gmail.md walks through it.",
+    "and secret in Settings. The setup guide walks through it.",
 );
 const SIGN_IN_INFO: &str = concat!(
     "Your browser will open Google's consent page, which asks to let Eloquawk read, ",
@@ -80,15 +81,27 @@ impl MainView {
             AuthState::Demo => card(p, "Loading the demo mailbox…"),
             AuthState::NeedsClient => card(p, "Set up a Google client")
                 .child(body_text(p, NEEDS_CLIENT_INFO))
-                .child(div().flex().child(button(
-                    p,
-                    "open-settings",
-                    "Open Settings",
-                    ButtonStyle::Primary,
-                    Some(Box::new(cx.listener(|this, _: &ClickEvent, window, cx| {
-                        this.open_settings(window, cx)
-                    }))),
-                ))),
+                .child(
+                    div()
+                        .flex()
+                        .gap_2()
+                        .child(button(
+                            p,
+                            "open-settings",
+                            "Open Settings",
+                            ButtonStyle::Primary,
+                            Some(Box::new(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                this.open_settings(window, cx)
+                            }))),
+                        ))
+                        .child(button(
+                            p,
+                            "open-guide",
+                            "Setup guide",
+                            ButtonStyle::Secondary,
+                            Some(Box::new(|_, _, cx| cx.open_url(GUIDE_URL))),
+                        )),
+                ),
             AuthState::Ready => match store.signing_in.clone() {
                 None => card(p, "Sign in to Google")
                     .child(body_text(p, SIGN_IN_INFO))

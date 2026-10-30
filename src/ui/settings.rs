@@ -25,8 +25,9 @@ use crate::store::{Mode, Store};
 
 /// Enabling the Gmail API in the user's Google Cloud project.
 const GMAIL_API_URL: &str = "https://console.cloud.google.com/apis/library/gmail.googleapis.com";
-/// The setup guide (SPEC 13, M15).
-const GUIDE_URL: &str = "https://github.com/korora-tech/eloquawk/blob/main/docs/google-gmail.md";
+/// The Gmail setup guide, `docs/google-gmail.md` on GitHub (SPEC 13, M15).
+pub(super) const GUIDE_URL: &str =
+    "https://github.com/korora-tech/eloquawk/blob/main/docs/google-gmail.md";
 
 const CLIENT_INTRO_BUILTIN: &str = concat!(
     "Eloquawk signs in with its own OAuth client, so there is nothing to set up. To use a ",
@@ -539,5 +540,25 @@ impl Render for SettingsView {
                     .child(accounts)
                     .child(prefs),
             )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The guide the Settings card and the needs-client card open is the committed one. The
+    /// Nix package's source holds no docs, so its check phase skips the file check; CI's
+    /// `cargo test` runs in the checkout and makes it.
+    #[test]
+    fn guide_url_names_the_committed_guide() {
+        let path = GUIDE_URL
+            .strip_prefix("https://github.com/korora-tech/eloquawk/blob/main/")
+            .expect("the guide lives on the main branch on GitHub");
+        assert_eq!(path, "docs/google-gmail.md");
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        if root.join("docs").is_dir() {
+            assert!(root.join(path).is_file(), "{path} is missing");
+        }
     }
 }
