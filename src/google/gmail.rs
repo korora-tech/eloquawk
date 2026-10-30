@@ -1,7 +1,8 @@
 //! Gmail API DTOs (serde) and the pure query builders for its list endpoints (SPEC 6.2).
 //!
 //! The read endpoints ([`profile`], [`labels`], [`label`], [`threads`], [`thread_meta`],
-//! [`thread_full`]) serve the sync worker since M10; the write endpoints arrive in M11. Every
+//! [`thread_full`]) serve the sync worker since M10; [`history`] and the write endpoints
+//! ([`modify_thread`], [`modify_message`], [`trash`], [`untrash`], [`send`]) since M11. Every
 //! endpoint takes the [`Endpoints`] so tests can redirect it. Ids,
 //! `historyId` and `internalDate` are JSON strings; `mail::parse` turns them into numbers and
 //! `model` types. Every array is `#[serde(default)]` because Gmail omits empty ones.
@@ -15,7 +16,7 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 use super::api::{self, ApiError, Endpoints, Limits};
-use crate::model::ViewKind;
+use crate::model::{LabelDelta, ViewKind};
 
 /// `GET /profile`.
 #[derive(Clone, Debug, Deserialize)]
@@ -151,7 +152,6 @@ pub struct BodyDto {
 }
 
 /// `GET /history`.
-#[allow(dead_code)] // consumed in M11
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HistoryList {
@@ -163,11 +163,9 @@ pub struct HistoryList {
     pub history_id: String,
 }
 
-#[allow(dead_code)] // consumed in M11
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HistoryRecord {
-    pub id: String,
     #[serde(default)]
     pub messages: Vec<MessageRef>,
     #[serde(default)]
@@ -180,24 +178,20 @@ pub struct HistoryRecord {
     pub labels_removed: Vec<HistoryLabels>,
 }
 
-#[allow(dead_code)] // consumed in M11
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MessageRef {
-    pub id: String,
     #[serde(default)]
     pub thread_id: String,
     #[serde(default)]
     pub label_ids: Vec<String>,
 }
 
-#[allow(dead_code)] // consumed in M11
 #[derive(Clone, Debug, Deserialize)]
 pub struct HistoryMessage {
     pub message: MessageRef,
 }
 
-#[allow(dead_code)] // consumed in M11
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HistoryLabels {
@@ -218,7 +212,6 @@ pub struct AttachmentBody {
 }
 
 /// Body of `threads/{id}/modify` and `messages/{id}/modify`.
-#[allow(dead_code)] // consumed in M11
 #[derive(Clone, Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModifyRequest {
@@ -229,7 +222,6 @@ pub struct ModifyRequest {
 }
 
 /// JSON part of the multipart `messages/send` upload.
-#[allow(dead_code)] // consumed in M11
 #[derive(Clone, Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SendMetadata {
@@ -237,16 +229,13 @@ pub struct SendMetadata {
     pub thread_id: Option<String>,
 }
 
-/// Response of `messages/send` (a `Message` resource with only ids and labels).
-#[allow(dead_code)] // consumed in M11
+/// Response of `messages/send` (a `Message` resource with only ids and labels; only the
+/// thread id is read, and the shape is unverified, SPEC 15 item 14).
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SendResponse {
-    pub id: String,
     #[serde(default)]
     pub thread_id: String,
-    #[serde(default)]
-    pub label_ids: Vec<String>,
 }
 
 impl fmt::Debug for ThreadRef {
@@ -424,6 +413,123 @@ pub fn thread_full(
     )
 }
 
+/// `GET /history?startHistoryId=..`: one page of changes since `start` (2 units). Gmail
+/// answers 404 when `start` is too old; the worker treats that `NotFound` as an expired
+/// history (SPEC 7.4 step 8).
+pub fn history(
+    agent: &ureq::Agent,
+    ep: &Endpoints,
+    token: &str,
+    start: u64,
+    page_token: Option<&str>,
+) -> Result<HistoryList, ApiError> {
+    api::get(
+        agent,
+        token,
+        &format!("{}/history", ep.base),
+        &history_query(start, page_token),
+        Limits::default(),
+    )
+}
+
+/// The JSON body of a modify call.
+fn modify_request(delta: &LabelDelta) -> ModifyRequest {
+    ModifyRequest {
+        add_label_ids: delta.add.clone(),
+        remove_label_ids: delta.remove.clone(),
+    }
+}
+
+/// `POST /threads/{id}/modify` (10 units): applies to every message of the thread, including
+/// ones that arrived after the last fetch.
+pub fn modify_thread(
+    agent: &ureq::Agent,
+    ep: &Endpoints,
+    token: &str,
+    id: &str,
+    delta: &LabelDelta,
+) -> Result<(), ApiError> {
+    api::post_json_no_content(
+        agent,
+        token,
+        &format!("{}/threads/{}/modify", ep.base, segment(id)),
+        &modify_request(delta),
+    )
+}
+
+/// `POST /messages/{id}/modify` (5 units). Used only to star one message, as Gmail web does.
+pub fn modify_message(
+    agent: &ureq::Agent,
+    ep: &Endpoints,
+    token: &str,
+    id: &str,
+    delta: &LabelDelta,
+) -> Result<MessageRef, ApiError> {
+    api::post_json(
+        agent,
+        token,
+        &format!("{}/messages/{}/modify", ep.base, segment(id)),
+        &modify_request(delta),
+        Limits::default(),
+    )
+}
+
+/// `POST /threads/{id}/trash` with an empty body (10 units).
+pub fn trash(
+    agent: &ureq::Agent,
+    ep: &Endpoints,
+    token: &str,
+    id: &str,
+) -> Result<ThreadRef, ApiError> {
+    api::post_empty(
+        agent,
+        token,
+        &format!("{}/threads/{}/trash", ep.base, segment(id)),
+    )
+}
+
+/// `POST /threads/{id}/untrash` with an empty body (10 units).
+pub fn untrash(
+    agent: &ureq::Agent,
+    ep: &Endpoints,
+    token: &str,
+    id: &str,
+) -> Result<ThreadRef, ApiError> {
+    api::post_empty(
+        agent,
+        token,
+        &format!("{}/threads/{}/untrash", ep.base, segment(id)),
+    )
+}
+
+/// `POST UPLOAD/messages/send?uploadType=multipart` (100 units): a `multipart/related` body
+/// whose JSON part carries `threadId` (or `{}`) and whose `message/rfc822` part is the raw
+/// message, so a reply threads at any size. The timeout scales with the message size.
+pub fn send(
+    agent: &ureq::Agent,
+    ep: &Endpoints,
+    token: &str,
+    raw: &[u8],
+    thread_id: Option<&str>,
+) -> Result<String, ApiError> {
+    let meta = SendMetadata {
+        thread_id: thread_id.map(str::to_string),
+    };
+    let json = serde_json::to_vec(&meta).map_err(|e| ApiError::Decode(e.to_string()))?;
+    api::post_multipart(
+        agent,
+        token,
+        &format!("{}/messages/send", ep.upload),
+        &[("uploadType", "multipart".to_string())],
+        &[
+            ("application/json; charset=UTF-8", &json),
+            ("message/rfc822", raw),
+        ],
+        Limits::large(raw.len() as u64),
+    )
+    .map(|r: SendResponse| r.thread_id)
+}
+
 /// Query parameters for `GET /threads`. `Label(id)` sets `labelIds` (plus
 /// `includeSpamTrash=true` for TRASH and SPAM), `AllMail` sets neither, `Search(q)` sets `q`.
 pub fn threads_query(
@@ -459,7 +565,6 @@ pub fn thread_meta_query() -> Vec<(&'static str, String)> {
 }
 
 /// Query parameters for `GET /history`, with the repeated `historyTypes`.
-#[allow(dead_code)] // consumed in M11
 pub fn history_query(start: u64, page_token: Option<&str>) -> Vec<(&'static str, String)> {
     let mut q = vec![("startHistoryId", start.to_string())];
     for t in [
@@ -586,7 +691,6 @@ mod tests {
         assert_eq!(crate::mail::b64::decode(&a.data).unwrap(), b"hello world");
         let s: SendResponse = serde_json::from_str(SEND).unwrap();
         assert_eq!(s.thread_id, "18c0a1b2c3d4e5f6");
-        assert_eq!(s.label_ids, vec!["SENT"]);
     }
 
     #[test]

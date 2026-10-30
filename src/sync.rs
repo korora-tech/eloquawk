@@ -13,14 +13,18 @@
 //! account that hit a rate limit or a network failure parks its background jobs until its
 //! backoff passes; they are never dropped.
 //!
-//! M10 is the read path: initial sync, listing and paging views, metadata chunks with
-//! skeleton rows, label counts and opening a thread. Until M11 brings the history sync, a
-//! poll round checks `profile`'s history id and, when it moved, re-lists page 1 of the inbox
-//! and the shown view. Changing and sending mail arrive in M11 and M12; until then those
-//! commands are answered with a "not available yet" error, so the UI never waits for an
-//! answer that will not come.
+//! The read path (M10) is the initial sync, listing and paging views, metadata chunks with
+//! skeleton rows, label counts and opening a thread. M11 adds the incremental sync (SPEC
+//! 7.4): a poll round reads Gmail's history since the stored cursor, commits the cursor
+//! together with the thread ids it implies (so a failure can never lose a change), refetches
+//! those threads in chunks, re-lists page 1 of the inbox and the shown view, and reports new
+//! inbox mail. M11 also changes mail (per-thread modify, star on the last message, trash and
+//! untrash with label restore) and sends it with a multipart upload that is never retried.
+//! Saving attachments, and forwarding Gmail-held ones, arrive in M12; until then those are
+//! answered with a "not available yet" message, so the UI never waits for an answer that
+//! will not come.
 
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
@@ -32,11 +36,12 @@ use crate::config::Prefs;
 use crate::google::api::{self, ApiError, Endpoints};
 use crate::google::gmail;
 use crate::google::oauth::{self, AuthError, ClientCredentials, TokenResponse};
-use crate::mail::parse;
+use crate::mail::{compose, parse};
 use crate::model::{
-    AccountId, Label, LabelKind, ThreadKey, ThreadSummary, ViewKey, ViewKind, labels,
+    AccountId, AttachmentSource, Label, LabelDelta, LabelKind, MAX_OUTGOING_ATTACHMENTS, Outgoing,
+    OutgoingAttachment, ThreadKey, ThreadSummary, ViewKey, ViewKind, labels,
 };
-use crate::protocol::{AuthState, Command, PageMode, SendError, SyncEvent, SyncHandle};
+use crate::protocol::{AuthState, Command, OpId, PageMode, SendError, SyncEvent, SyncHandle};
 use crate::secrets::{SecretError, Secrets};
 
 /// How long a browser sign-in may take before it is abandoned.
@@ -69,8 +74,29 @@ const NO_REFRESH_TOKEN: &str = concat!(
     "Google did not return a refresh token. Remove Eloquawk's access at ",
     "myaccount.google.com/permissions and sign in again.",
 );
-const CHANGE_NOT_YET: &str = "Changing Gmail isn't available in this build yet.";
-const SEND_NOT_YET: &str = "Sending isn't available in this build yet.";
+const SIGNED_OUT: &str = "This account is not signed in.";
+const MAYBE_SENT: &str = "Couldn't confirm the message was sent. Check Sent before trying again.";
+const FORWARD_NOT_YET: &str = "Forwarding attachments isn't available yet.";
+/// More changed threads than this in one round is a burst: only new inbox mail is refetched,
+/// the rest is dropped from the cache and refetched when a listing shows it (SPEC 7.4).
+const BURST: usize = 100;
+/// The most new inbox threads a burst still refetches.
+const BURST_FRESH: usize = 20;
+/// History pages read in one round before the cursor is treated as too old to follow.
+const MAX_HISTORY_PAGES: usize = 100;
+/// Labels whose new messages Gmail does not notify about (with categories on), nor do we.
+const NOT_NOTIFIED: &[&str] = &[
+    labels::SENT,
+    labels::DRAFT,
+    labels::SPAM,
+    "CATEGORY_PROMOTIONS",
+    "CATEGORY_SOCIAL",
+    "CATEGORY_UPDATES",
+    "CATEGORY_FORUMS",
+];
+/// Labels whose counts every round and every change refreshes.
+const ROUND_COUNTS: &[&str] = &[labels::INBOX, labels::SPAM, labels::DRAFT];
+const CHANGE_COUNTS: &[&str] = &[labels::INBOX, labels::SPAM, labels::TRASH, labels::DRAFT];
 const SAVE_NOT_YET: &str = "Saving attachments isn't available in this build yet.";
 
 /// Starts the Google worker with the real endpoints, the compiled-in client and the sync
@@ -202,13 +228,49 @@ impl Backoff {
     }
 }
 
-/// One unit of work (SPEC 7.2). Mutations, sends and saves join in M11 and M12.
+/// What a [`Mutation`] does to each thread.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Change {
+    Modify(LabelDelta),
+    Trash,
+    /// Untrash, then apply the delta (when not empty) to put the labels back.
+    Untrash(LabelDelta),
+}
+
+/// One optimistic change the store is waiting to hear about.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Mutation {
+    op: OpId,
+    account: AccountId,
+    thread_ids: Vec<String>,
+    change: Change,
+}
+
+/// A message to send. Two are the same job when they share an op id (`Outgoing` has no
+/// equality of its own, and its `Debug` is redacting).
+#[derive(Clone, Debug)]
+struct Outbox {
+    op: OpId,
+    outgoing: Outgoing,
+}
+
+impl PartialEq for Outbox {
+    fn eq(&self, other: &Self) -> bool {
+        self.op == other.op
+    }
+}
+
+impl Eq for Outbox {}
+
+/// One unit of work (SPEC 7.2). Saves join in M12.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Job {
     // Interactive lane: the front of the queue, FIFO among themselves.
     OpenThread(ThreadKey),
     /// A view's page 1 (`false`) or next page (`true`).
     ListView(ViewKey, bool),
+    Mutate(Mutation),
+    Send(Box<Outbox>),
     // Background lane: the back of the queue, coalesced.
     InitialSync(AccountId),
     /// Label ids whose counts to fetch, at most [`CHUNK`].
@@ -216,18 +278,29 @@ enum Job {
     /// Thread ids whose metadata to fetch, at most [`CHUNK`].
     FetchMeta(AccountId, Vec<String>),
     History(AccountId),
+    /// The next chunk of a history round's changed threads (SPEC 7.4 step 4).
+    Refetch(AccountId),
 }
 
 impl Job {
     fn interactive(&self) -> bool {
-        matches!(self, Job::OpenThread(_) | Job::ListView(..))
+        matches!(
+            self,
+            Job::OpenThread(_) | Job::ListView(..) | Job::Mutate(_) | Job::Send(_)
+        )
     }
 
     fn account(&self) -> &str {
         match self {
             Job::OpenThread(key) => &key.account,
             Job::ListView(view, _) => &view.account,
-            Job::InitialSync(a) | Job::Labels(a, _) | Job::FetchMeta(a, _) | Job::History(a) => a,
+            Job::Mutate(m) => &m.account,
+            Job::Send(s) => &s.outgoing.account,
+            Job::InitialSync(a)
+            | Job::Labels(a, _)
+            | Job::FetchMeta(a, _)
+            | Job::History(a)
+            | Job::Refetch(a) => a,
         }
     }
 
@@ -340,7 +413,7 @@ impl CallError {
     /// The text a failed thread shows in the reader.
     fn reader_message(&self) -> String {
         match self {
-            CallError::Auth | CallError::Gone => "This account is not signed in.".into(),
+            CallError::Auth | CallError::Gone => SIGNED_OUT.into(),
             CallError::Network => NETWORK_PROBLEM.into(),
             CallError::Api(ApiError::TooLarge) => "Message too large to open".into(),
             CallError::Api(ApiError::NotFound) => "This conversation is no longer in Gmail.".into(),
@@ -357,10 +430,144 @@ struct Access {
 /// What the worker last fetched of a thread.
 struct Known {
     history_id: u64,
-    /// Message ids in thread order; M11 stars the last one that is not a draft.
-    #[allow(dead_code)] // consumed in M11
-    message_ids: Vec<String>,
+    /// The message a star goes on: the last one that is not a draft (SPEC 6.2).
+    star_target: Option<String>,
     summary: ThreadSummary,
+}
+
+/// What one history round changed (SPEC 7.4 step 1), from [`collect_changes`].
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Changes {
+    /// Every thread a message was added to, deleted from, or relabelled in.
+    changed: BTreeSet<String>,
+    /// Threads with a new unread inbox message Gmail would notify about.
+    fresh_inbox: BTreeSet<String>,
+    /// Labels added to or removed from a message, whose counts moved.
+    labels: BTreeSet<String>,
+    /// The cursor for the next round: the last page's history id.
+    new_history_id: Option<u64>,
+}
+
+/// Folds history pages into the threads to refetch and the new inbox mail (SPEC 7.4). Pure.
+fn collect_changes(pages: &[gmail::HistoryList]) -> Changes {
+    let mut c = Changes::default();
+    let mut changed = |thread_id: &str| {
+        if !thread_id.is_empty() {
+            c.changed.insert(thread_id.to_string());
+        }
+    };
+    let mut fresh = Vec::new();
+    let mut moved = Vec::new();
+    for record in pages.iter().flat_map(|p| &p.history) {
+        for m in &record.messages {
+            changed(&m.thread_id);
+        }
+        for added in &record.messages_added {
+            let m = &added.message;
+            changed(&m.thread_id);
+            let has = |l: &str| m.label_ids.iter().any(|id| id == l);
+            if has(labels::INBOX)
+                && has(labels::UNREAD)
+                && !NOT_NOTIFIED.iter().any(|l| has(l))
+                && !m.thread_id.is_empty()
+            {
+                fresh.push(m.thread_id.clone());
+            }
+        }
+        for deleted in &record.messages_deleted {
+            changed(&deleted.message.thread_id);
+        }
+        for l in record.labels_added.iter().chain(&record.labels_removed) {
+            changed(&l.message.thread_id);
+            moved.extend(l.label_ids.iter().cloned());
+        }
+    }
+    c.fresh_inbox.extend(fresh);
+    c.labels.extend(moved);
+    c.new_history_id = pages
+        .last()
+        .map(|p| parse::parse_u64(&p.history_id))
+        .filter(|h| *h > 0);
+    c
+}
+
+/// Whether a delta is exactly "star", which goes on one message rather than the thread.
+fn is_star(delta: &LabelDelta) -> bool {
+    delta.remove.is_empty() && delta.add == [labels::STARRED]
+}
+
+/// The message a star goes on: the last one that is not a draft.
+fn star_target(dto: &gmail::ThreadDto) -> Option<String> {
+    dto.messages
+        .iter()
+        .rev()
+        .find(|m| !m.label_ids.iter().any(|l| l == labels::DRAFT))
+        .map(|m| m.id.clone())
+}
+
+/// The text a failed change shows (the store rolls the change back with it).
+fn change_message(e: &CallError) -> String {
+    match e {
+        CallError::Auth | CallError::Gone => SIGNED_OUT.into(),
+        CallError::Network | CallError::Api(ApiError::Network(_)) => NETWORK_PROBLEM.into(),
+        CallError::Api(ApiError::NotFound) => "This conversation is no longer in Gmail.".into(),
+        CallError::Api(e) => e.to_string(),
+    }
+}
+
+/// How a failed send is reported (SPEC 7.5). A send is never retried: when Google may have
+/// taken the message (the connection failed, a 5xx, or a success answer that could not be
+/// read) the composer says to check Sent; a refusal, or a failure before anything went out,
+/// carries its reason.
+fn send_error(e: &CallError) -> SendError {
+    let (message, maybe_sent) = match e {
+        CallError::Api(
+            ApiError::Network(_)
+            | ApiError::Http { status: 500.., .. }
+            | ApiError::Decode(_)
+            | ApiError::TooLarge,
+        ) => (MAYBE_SENT.to_string(), true),
+        CallError::Api(e) => (e.to_string(), false),
+        // The token could not be refreshed, so nothing was sent.
+        CallError::Network => (NETWORK_PROBLEM.to_string(), false),
+        CallError::Auth | CallError::Gone => (SIGNED_OUT.to_string(), false),
+    };
+    SendError {
+        message,
+        maybe_sent,
+    }
+}
+
+/// Reads a message's local attachments within the 25 MB budget. Gmail-held ones (a forward's)
+/// arrive in M12.
+fn local_attachments(out: &Outgoing) -> Result<Vec<(OutgoingAttachment, Vec<u8>)>, SendError> {
+    let refuse = |message: String| SendError {
+        message,
+        maybe_sent: false,
+    };
+    let mut budget = MAX_OUTGOING_ATTACHMENTS;
+    let mut parts = Vec::with_capacity(out.attachments.len());
+    for a in &out.attachments {
+        let bytes = match &a.source {
+            AttachmentSource::Gmail { .. } => return Err(refuse(FORWARD_NOT_YET.into())),
+            AttachmentSource::Local(path) => compose::read_local(path, budget).map_err(refuse)?,
+        };
+        budget = budget
+            .checked_sub(bytes.len() as u64)
+            .ok_or_else(|| refuse(compose::TOO_LARGE_TO_SEND.into()))?;
+        let mut a = a.clone();
+        a.size = bytes.len() as u64;
+        parts.push((a, bytes));
+    }
+    Ok(parts)
+}
+
+/// Whether the sidebar shows a label, so its count is worth fetching.
+fn shown(l: &Label) -> bool {
+    match l.kind {
+        LabelKind::System => SHOWN_SYSTEM_LABELS.contains(&l.id.as_str()),
+        LabelKind::User => !l.hidden,
+    }
 }
 
 struct AccountState {
@@ -378,6 +585,13 @@ struct AccountState {
     /// id they were refused at. Neither the poll nor a listing fetches them again until a
     /// listing shows a new history id.
     refused: HashMap<String, u64>,
+    /// Thread ids a history round found changed whose refetch has not succeeded yet. They
+    /// survive failures, so moving the cursor can never lose a change.
+    pending_changed: BTreeSet<String>,
+    /// Candidate new-mail thread ids not reported yet.
+    pending_fresh: BTreeSet<String>,
+    /// Labels whose counts the round in progress moved.
+    round_labels: BTreeSet<String>,
     /// Background jobs parked while in backoff.
     deferred: Vec<Job>,
     backoff: Backoff,
@@ -396,6 +610,9 @@ impl AccountState {
             pages: HashMap::new(),
             missing: BTreeMap::new(),
             refused: HashMap::new(),
+            pending_changed: BTreeSet::new(),
+            pending_fresh: BTreeSet::new(),
+            round_labels: BTreeSet::new(),
             deferred: Vec::new(),
             backoff: Backoff::default(),
             labels: BTreeMap::new(),
@@ -407,6 +624,101 @@ impl AccountState {
         if !self.deferred.contains(&job) {
             self.deferred.push(job);
         }
+    }
+
+    /// SPEC 7.4 step 2: the cursor moves together with the work it implies, in one step.
+    fn commit_round(&mut self, changes: Changes) {
+        self.pending_changed.extend(changes.changed);
+        self.pending_fresh.extend(changes.fresh_inbox);
+        self.round_labels.extend(changes.labels);
+        if let Some(h) = changes.new_history_id {
+            self.history_id = Some(h);
+        }
+    }
+
+    /// The next chunk of changed threads to refetch, new inbox mail first. A burst of more
+    /// than [`BURST`] keeps only the newest [`BURST_FRESH`] new inbox threads and drops the
+    /// rest from the cache, so a later listing fetches them instead.
+    fn next_refetch(&mut self) -> Vec<String> {
+        if self.pending_changed.len() > BURST {
+            let mut fresh: Vec<String> = self
+                .pending_fresh
+                .iter()
+                .filter(|id| self.pending_changed.contains(*id))
+                .cloned()
+                .collect();
+            // Gmail thread ids grow with time, so the longest, then greatest, is the newest.
+            fresh.sort_by(|a, b| (b.len(), b).cmp(&(a.len(), a)));
+            fresh.truncate(BURST_FRESH);
+            let keep: BTreeSet<String> = fresh.into_iter().collect();
+            for id in &self.pending_changed {
+                if !keep.contains(id) {
+                    self.known.remove(id);
+                }
+            }
+            self.pending_fresh.retain(|id| keep.contains(id));
+            self.pending_changed = keep;
+        }
+        let mut ids: Vec<String> = self
+            .pending_fresh
+            .iter()
+            .filter(|id| self.pending_changed.contains(*id))
+            .take(CHUNK)
+            .cloned()
+            .collect();
+        for id in &self.pending_changed {
+            if ids.len() >= CHUNK {
+                break;
+            }
+            if !ids.contains(id) {
+                ids.push(id.clone());
+            }
+        }
+        ids
+    }
+
+    /// A changed thread was refetched.
+    fn refetch_succeeded(&mut self, id: &str) {
+        self.pending_changed.remove(id);
+    }
+
+    /// A changed thread is gone from Gmail: nothing to refetch or report.
+    fn refetch_gone(&mut self, id: &str) {
+        self.pending_changed.remove(id);
+        self.pending_fresh.remove(id);
+        self.known.remove(id);
+        self.missing.remove(id);
+        self.refused.remove(id);
+    }
+
+    /// SPEC 7.4 step 7, once every changed thread is refetched: the candidates still unread
+    /// and in the inbox, newest first. Every candidate is cleared, reported or not.
+    fn take_new_mail(&mut self) -> Vec<ThreadSummary> {
+        let mut threads: Vec<ThreadSummary> = std::mem::take(&mut self.pending_fresh)
+            .iter()
+            .filter_map(|id| self.known.get(id))
+            .map(|k| &k.summary)
+            .filter(|s| s.unread() && s.in_label(labels::INBOX))
+            .cloned()
+            .collect();
+        threads.sort_by_key(|s| std::cmp::Reverse(s.last_date));
+        threads
+    }
+
+    /// SPEC 7.4 step 8: the history is too old to follow, so every cache goes and the next
+    /// sync is a first one again (which never reports new mail).
+    fn reset(&mut self) {
+        self.known.clear();
+        self.pages.clear();
+        self.history_id = None;
+        self.synced_once = false;
+        self.pending_changed.clear();
+        self.pending_fresh.clear();
+        self.round_labels.clear();
+        self.missing.clear();
+        self.refused.clear();
+        self.deferred
+            .retain(|j| !matches!(j, Job::FetchMeta(..) | Job::Refetch(_) | Job::History(_)));
     }
 }
 
@@ -622,10 +934,13 @@ impl Worker {
         match job {
             Job::OpenThread(key) => self.open_thread(key),
             Job::ListView(view, more) => self.list_view(view, more),
+            Job::Mutate(m) => self.mutate(m),
+            Job::Send(s) => self.send(s.op, s.outgoing),
             Job::InitialSync(email) => self.initial_sync(&email),
             Job::Labels(email, ids) => self.label_counts(&email, ids),
             Job::FetchMeta(email, ids) => self.fetch_meta(&email, ids),
             Job::History(email) => self.history(&email),
+            Job::Refetch(email) => self.refetch(&email),
         }
     }
 
@@ -653,9 +968,17 @@ impl Worker {
                         account.backoff.reset();
                     }
                     self.requeue_deferred(Instant::now());
-                    let emails: Vec<AccountId> = self.accounts.keys().cloned().collect();
-                    for email in emails {
-                        self.queue.push(Job::InitialSync(email));
+                    // Labels and page 1 again, then whatever changed since the cursor.
+                    let accounts: Vec<(AccountId, bool)> = self
+                        .accounts
+                        .iter()
+                        .map(|(e, a)| (e.clone(), a.synced_once && a.history_id.is_some()))
+                        .collect();
+                    for (email, synced) in accounts {
+                        self.queue.push(Job::InitialSync(email.clone()));
+                        if synced {
+                            self.queue.push(Job::History(email));
+                        }
                     }
                 }
             }
@@ -696,19 +1019,52 @@ impl Worker {
                 }
             }
             Command::OpenThread(key) => self.queue.push(Job::OpenThread(key)),
-            Command::Modify { op, .. }
-            | Command::Trash { op, .. }
-            | Command::Untrash { op, .. } => self.emit(SyncEvent::MutationFinished {
+            Command::Modify {
                 op,
-                error: Some(CHANGE_NOT_YET.into()),
-            }),
-            Command::Send { op, .. } => self.emit(SyncEvent::SendFinished {
+                account,
+                thread_ids,
+                delta,
+            } => self.queue_mutation(Mutation {
                 op,
-                error: Some(SendError {
-                    message: SEND_NOT_YET.into(),
-                    maybe_sent: false,
-                }),
+                account,
+                thread_ids,
+                change: Change::Modify(delta),
             }),
+            Command::Trash {
+                op,
+                account,
+                thread_ids,
+            } => self.queue_mutation(Mutation {
+                op,
+                account,
+                thread_ids,
+                change: Change::Trash,
+            }),
+            Command::Untrash {
+                op,
+                account,
+                thread_ids,
+                restore,
+            } => self.queue_mutation(Mutation {
+                op,
+                account,
+                thread_ids,
+                change: Change::Untrash(restore),
+            }),
+            Command::Send { op, outgoing } => {
+                if self.accounts.contains_key(&outgoing.account) {
+                    self.queue
+                        .push(Job::Send(Box::new(Outbox { op, outgoing })));
+                } else {
+                    self.emit(SyncEvent::SendFinished {
+                        op,
+                        error: Some(SendError {
+                            message: SIGNED_OUT.into(),
+                            maybe_sent: false,
+                        }),
+                    });
+                }
+            }
             Command::SaveAttachment { .. } => self.emit(SyncEvent::Notice(SAVE_NOT_YET.into())),
             Command::Shutdown => {}
         }
@@ -1254,7 +1610,8 @@ impl Worker {
     // ----- jobs -----------------------------------------------------------------------------
 
     /// SPEC 7.3: the history cursor first, then the labels (counts follow in chunks), then
-    /// page 1 of the inbox and of the shown view. The first sync never reports new mail.
+    /// page 1 of the inbox and of the shown view. The first sync never reports new mail. A
+    /// repeat (Refresh, a retried poll) keeps the cursor it already has.
     fn initial_sync(&mut self, email: &str) {
         let profile = match self.with_token(email, gmail::profile) {
             Ok(p) => p,
@@ -1267,7 +1624,11 @@ impl Worker {
         self.succeeded(email);
         let synced_before = match self.accounts.get_mut(email) {
             Some(account) => {
-                account.history_id = Some(parse::parse_u64(&profile.history_id));
+                // A repeat keeps the cursor it has: moving it here would skip the changes
+                // since then outside page 1, which the next history round still covers.
+                account
+                    .history_id
+                    .get_or_insert(parse::parse_u64(&profile.history_id));
                 account.synced_once
             }
             None => return,
@@ -1326,10 +1687,7 @@ impl Worker {
         account.labels = labels.iter().map(|l| (l.id.clone(), l.clone())).collect();
         let shown: Vec<String> = labels
             .iter()
-            .filter(|l| match l.kind {
-                LabelKind::System => SHOWN_SYSTEM_LABELS.contains(&l.id.as_str()),
-                LabelKind::User => !l.hidden,
-            })
+            .filter(|l| shown(l))
             .map(|l| l.id.clone())
             .collect();
         self.emit(SyncEvent::Labels {
@@ -1463,7 +1821,7 @@ impl Worker {
             dto.id.clone(),
             Known {
                 history_id: summary.history_id,
-                message_ids: dto.messages.iter().map(|m| m.id.clone()).collect(),
+                star_target: star_target(dto),
                 summary: summary.clone(),
             },
         );
@@ -1590,40 +1948,333 @@ impl Worker {
         }
     }
 
-    /// A poll round after the first sync. Until M11's history sync: `profile`'s history id
-    /// says whether anything changed; if so, page 1 of the inbox and the shown view are
-    /// re-listed (changed threads are refetched by their history ids) and the inbox, spam and
-    /// drafts counts refreshed.
+    /// Queues the count refresh for `ids`, keeping only labels the sidebar shows (a count
+    /// for any other would add it to the sidebar), in chunks.
+    fn queue_counts(&mut self, email: &str, ids: impl IntoIterator<Item = String>) {
+        let Some(account) = self.accounts.get(email) else {
+            return;
+        };
+        let ids: BTreeSet<String> = ids
+            .into_iter()
+            .filter(|id| account.labels.get(id).is_some_and(shown))
+            .collect();
+        let ids: Vec<String> = ids.into_iter().collect();
+        for job in chunked(&ids, |ids| Job::Labels(email.to_string(), ids)) {
+            self.queue.push(job);
+        }
+    }
+
+    /// SPEC 7.4: one incremental round. Every history page is read before anything is
+    /// committed; then the cursor moves together with the changed threads it implies, and
+    /// those are refetched in chunks.
     fn history(&mut self, email: &str) {
-        let profile = match self.with_token(email, gmail::profile) {
-            Ok(p) => p,
-            Err(e) => {
-                self.failed(email, &e);
+        let Some(start) = self.accounts.get(email).and_then(|a| a.history_id) else {
+            return;
+        };
+        let mut pages: Vec<gmail::HistoryList> = Vec::new();
+        let mut page_token: Option<String> = None;
+        loop {
+            if pages.len() >= MAX_HISTORY_PAGES {
+                // Too much to follow change by change: start afresh, as for an expired cursor.
+                self.history_expired(email);
                 return;
             }
-        };
-        self.succeeded(email);
-        let history_id = parse::parse_u64(&profile.history_id);
-        let unchanged = self
-            .accounts
-            .get(email)
-            .is_some_and(|a| a.history_id == Some(history_id));
-        if !unchanged {
-            for view in self.page_one_views(email) {
-                if let Err(e) = self.list(&view, false, PageMode::Refresh) {
+            let token = page_token.clone();
+            match self.with_token(email, |agent, ep, t| {
+                gmail::history(agent, ep, t, start, token.as_deref())
+            }) {
+                Ok(page) => {
+                    page_token = page.next_page_token.clone();
+                    pages.push(page);
+                    if page_token.is_none() {
+                        break;
+                    }
+                }
+                Err(CallError::Api(ApiError::NotFound)) => {
+                    self.history_expired(email);
+                    return;
+                }
+                Err(e) => {
+                    // Nothing committed: the next poll reads the same history again.
                     self.failed(email, &e);
                     return;
                 }
             }
-            if let Some(account) = self.accounts.get_mut(email) {
-                account.history_id = Some(history_id);
-            }
-            let counts = [labels::INBOX, labels::SPAM, labels::DRAFT]
-                .map(String::from)
-                .to_vec();
-            self.queue.push(Job::Labels(email.to_string(), counts));
         }
-        self.emit(SyncEvent::Synced(Timestamp::now()));
+        self.succeeded(email);
+        let Some(account) = self.accounts.get_mut(email) else {
+            return;
+        };
+        account.commit_round(collect_changes(&pages));
+        if account.pending_changed.is_empty() {
+            self.emit(SyncEvent::Synced(Timestamp::now()));
+        } else {
+            self.queue.push(Job::Refetch(email.to_string()));
+        }
+    }
+
+    /// SPEC 7.4 step 8: Gmail no longer has the history since our cursor.
+    fn history_expired(&mut self, email: &str) {
+        let Some(account) = self.accounts.get_mut(email) else {
+            return;
+        };
+        account.reset();
+        self.queue
+            .background
+            .retain(|j| j.account() != email || !matches!(j, Job::FetchMeta(..) | Job::Refetch(_)));
+        self.emit(SyncEvent::AccountReset(email.to_string()));
+        self.queue.push(Job::InitialSync(email.to_string()));
+    }
+
+    /// SPEC 7.4 step 4: one chunk of the round's changed threads. A thread that is gone is
+    /// reported gone; a retryable failure stops the chunk and leaves the rest pending for the
+    /// next round; a thread Gmail refuses for good is dropped from the round. When nothing is
+    /// pending any more the round finishes.
+    fn refetch(&mut self, email: &str) {
+        let Some(account) = self.accounts.get_mut(email) else {
+            return;
+        };
+        let ids = account.next_refetch();
+        let mut updated = Vec::new();
+        let mut gone = Vec::new();
+        let mut stopped = false;
+        for id in &ids {
+            let before: Vec<String> = self
+                .accounts
+                .get(email)
+                .and_then(|a| a.known.get(id))
+                .map(|k| k.summary.label_ids.iter().cloned().collect())
+                .unwrap_or_default();
+            let result = self.with_token(email, |agent, ep, token| {
+                gmail::thread_meta(agent, ep, token, id)
+            });
+            let summary = match result {
+                Ok(dto) => {
+                    self.succeeded(email);
+                    self.remember(email, &dto)
+                }
+                Err(CallError::Api(ApiError::NotFound)) => None,
+                Err(e) => {
+                    let retry = self.failed(email, &e);
+                    if retry || matches!(e, CallError::Auth | CallError::Gone) {
+                        stopped = true;
+                        break;
+                    }
+                    // Refused for good (403, too large): not worth asking every round.
+                    if let Some(account) = self.accounts.get_mut(email) {
+                        account.refetch_succeeded(id);
+                    }
+                    continue;
+                }
+            };
+            let Some(account) = self.accounts.get_mut(email) else {
+                return;
+            };
+            account.round_labels.extend(before);
+            match summary {
+                Some(summary) => {
+                    account
+                        .round_labels
+                        .extend(summary.label_ids.iter().cloned());
+                    account.refetch_succeeded(id);
+                    updated.push(summary);
+                }
+                None => {
+                    account.refetch_gone(id);
+                    gone.push(id.clone());
+                }
+            }
+        }
+        if !updated.is_empty() {
+            self.emit(SyncEvent::ThreadsUpdated(updated));
+        }
+        if !gone.is_empty() {
+            self.emit(SyncEvent::ThreadsGone {
+                account: email.to_string(),
+                ids: gone,
+            });
+        }
+        if stopped {
+            return;
+        }
+        match self.accounts.get(email) {
+            Some(a) if !a.pending_changed.is_empty() => {
+                self.queue.push(Job::Refetch(email.to_string()));
+            }
+            Some(_) => self.finish_round(email),
+            None => {}
+        }
+    }
+
+    /// SPEC 7.4 steps 5 to 7, once every changed thread is in: page 1 of the inbox and the
+    /// shown view are re-listed, the moved labels' counts refreshed, and new inbox mail
+    /// reported (even if the re-list fails, since the candidates are cleared here).
+    fn finish_round(&mut self, email: &str) {
+        let Some(account) = self.accounts.get_mut(email) else {
+            return;
+        };
+        let new_mail = account.take_new_mail();
+        let mut counts = std::mem::take(&mut account.round_labels);
+        counts.extend(ROUND_COUNTS.iter().map(|s| s.to_string()));
+        let mut listed = true;
+        for view in self.page_one_views(email) {
+            if let Err(e) = self.list(&view, false, PageMode::Refresh) {
+                self.failed(email, &e);
+                listed = false;
+                break;
+            }
+        }
+        self.queue_counts(email, counts);
+        if !new_mail.is_empty() {
+            self.emit(SyncEvent::NewMail {
+                account: email.to_string(),
+                threads: new_mail,
+            });
+        }
+        if listed {
+            self.emit(SyncEvent::Synced(Timestamp::now()));
+        }
+    }
+
+    /// Queues a change, or answers at once for an account that is not signed in.
+    fn queue_mutation(&mut self, m: Mutation) {
+        if self.accounts.contains_key(&m.account) {
+            self.queue.push(Job::Mutate(m));
+        } else {
+            self.emit(SyncEvent::MutationFinished {
+                op: m.op,
+                error: Some(SIGNED_OUT.into()),
+            });
+        }
+    }
+
+    /// SPEC 7.5 `Mutate`: thread by thread, stopping at the first failure. Never retried
+    /// (bar the one token refresh); the store rolls back on an error. The touched threads'
+    /// metadata is then fetched again, which also corrects a change that stopped part-way,
+    /// and the counts of the labels involved are refreshed.
+    fn mutate(&mut self, m: Mutation) {
+        let email = m.account.clone();
+        let mut carried: BTreeSet<String> = CHANGE_COUNTS.iter().map(|s| s.to_string()).collect();
+        if let Some(account) = self.accounts.get(&email) {
+            for id in &m.thread_ids {
+                if let Some(k) = account.known.get(id) {
+                    carried.extend(k.summary.label_ids.iter().cloned());
+                }
+            }
+        }
+        let mut error = None;
+        let mut touched = false;
+        for id in &m.thread_ids {
+            let result = match &m.change {
+                Change::Modify(delta) if is_star(delta) => self.star(&email, id),
+                Change::Modify(delta) => self.with_token(&email, |agent, ep, token| {
+                    gmail::modify_thread(agent, ep, token, id, delta)
+                }),
+                Change::Trash => self
+                    .with_token(&email, |agent, ep, token| {
+                        gmail::trash(agent, ep, token, id)
+                    })
+                    .map(drop),
+                Change::Untrash(restore) => self
+                    .with_token(&email, |agent, ep, token| {
+                        gmail::untrash(agent, ep, token, id)
+                    })
+                    .and_then(|_| {
+                        if restore.is_empty() {
+                            return Ok(());
+                        }
+                        self.with_token(&email, |agent, ep, token| {
+                            gmail::modify_thread(agent, ep, token, id, restore)
+                        })
+                    }),
+            };
+            match result {
+                Ok(()) => {
+                    touched = true;
+                    self.succeeded(&email);
+                }
+                Err(e) => {
+                    error = Some(change_message(&e));
+                    self.failed(&email, &e);
+                    break;
+                }
+            }
+        }
+        self.emit(SyncEvent::MutationFinished { op: m.op, error });
+        if !touched {
+            return;
+        }
+        match &m.change {
+            Change::Modify(delta) | Change::Untrash(delta) => {
+                carried.extend(delta.add.iter().chain(&delta.remove).cloned());
+            }
+            Change::Trash => {}
+        }
+        self.queue.strip_meta(&email, &m.thread_ids);
+        self.queue.push_soon(chunked(&m.thread_ids, |ids| {
+            Job::FetchMeta(email.clone(), ids)
+        }));
+        self.queue_counts(&email, carried);
+    }
+
+    /// Stars the thread's last message that is not a draft, as Gmail web does. A thread the
+    /// worker has not fetched yet is fetched first to find it.
+    fn star(&mut self, email: &str, id: &str) -> Result<(), CallError> {
+        let known = self
+            .accounts
+            .get(email)
+            .and_then(|a| a.known.get(id))
+            .and_then(|k| k.star_target.clone());
+        let target = match known {
+            Some(target) => target,
+            None => {
+                let dto = self.with_token(email, |agent, ep, token| {
+                    gmail::thread_meta(agent, ep, token, id)
+                })?;
+                self.remember(email, &dto);
+                star_target(&dto).ok_or(CallError::Api(ApiError::NotFound))?
+            }
+        };
+        self.with_token(email, |agent, ep, token| {
+            gmail::modify_message(agent, ep, token, &target, &LabelDelta::star())
+        })
+        .map(drop)
+    }
+
+    /// SPEC 7.5 `Send`: build the message and upload it once. Never retried; a failure says
+    /// whether the message may have gone out. A sent message shows up through the history
+    /// round queued afterwards.
+    fn send(&mut self, op: OpId, out: Outgoing) {
+        let result = self.deliver(&out);
+        let sent = result.is_ok();
+        self.emit(SyncEvent::SendFinished {
+            op,
+            error: result.err(),
+        });
+        if sent
+            && let Some(account) = self.accounts.get(&out.account)
+            && account.synced_once
+            && account.history_id.is_some()
+        {
+            self.queue.push(Job::History(out.account.clone()));
+        }
+    }
+
+    fn deliver(&mut self, out: &Outgoing) -> Result<(), SendError> {
+        let parts = local_attachments(out)?;
+        let message_id = compose::new_message_id();
+        let raw =
+            compose::build(out, &parts, Timestamp::now(), &message_id).map_err(|e| SendError {
+                message: e.to_string(),
+                maybe_sent: false,
+            })?;
+        drop(parts);
+        let thread_id = out.thread_id.as_deref();
+        self.with_token(&out.account, |agent, ep, token| {
+            gmail::send(agent, ep, token, &raw, thread_id)
+        })
+        .map(drop)
+        .map_err(|e| send_error(&e))
     }
 }
 
@@ -1807,7 +2458,7 @@ mod tests {
     }
 
     #[test]
-    fn reads_queue_jobs_and_changes_are_answered_until_m11() {
+    fn reads_and_changes_queue_interactive_jobs() {
         let (mut w, rx) = worker(Secrets::memory(), nowhere());
         signed_in(&mut w, "me@example.com", "rt");
         let inbox = ViewKey {
@@ -1819,15 +2470,26 @@ mod tests {
             more: false,
         });
         w.handle(Command::OpenThread(ThreadKey::new("me@example.com", "t")));
+        w.handle(Command::Trash {
+            op: 3,
+            account: "me@example.com".into(),
+            thread_ids: vec!["t".into()],
+        });
         assert_eq!(w.want.as_ref(), Some(&inbox));
         assert_eq!(
             w.queue.interactive,
             [
                 Job::ListView(inbox, false),
-                Job::OpenThread(ThreadKey::new("me@example.com", "t"))
+                Job::OpenThread(ThreadKey::new("me@example.com", "t")),
+                Job::Mutate(Mutation {
+                    op: 3,
+                    account: "me@example.com".into(),
+                    thread_ids: vec!["t".into()],
+                    change: Change::Trash,
+                }),
             ]
         );
-        // A view of an account that is not signed in answers at once, empty.
+        // A view, a change or a send for an account that is not signed in answers at once.
         w.handle(Command::Want {
             view: ViewKey {
                 account: "gone@example.com".into(),
@@ -1835,10 +2497,15 @@ mod tests {
             },
             more: false,
         });
-        w.handle(Command::Trash {
-            op: 3,
-            account: "me@example.com".into(),
+        w.handle(Command::Modify {
+            op: 4,
+            account: "gone@example.com".into(),
             thread_ids: vec!["t".into()],
+            delta: LabelDelta::archive(),
+        });
+        w.handle(Command::Send {
+            op: 5,
+            outgoing: outgoing("gone@example.com", None),
         });
         let events = drain(&rx);
         assert!(matches!(
@@ -1847,12 +2514,19 @@ mod tests {
         ));
         assert!(matches!(
             &events[1],
-            SyncEvent::MutationFinished {
-                op: 3,
-                error: Some(_)
+            SyncEvent::MutationFinished { op: 4, error: Some(e) } if e == SIGNED_OUT
+        ));
+        assert!(matches!(
+            &events[2],
+            SyncEvent::SendFinished {
+                op: 5,
+                error: Some(SendError {
+                    maybe_sent: false,
+                    ..
+                })
             }
         ));
-        assert_eq!(w.queue.interactive.len(), 2);
+        assert_eq!(w.queue.interactive.len(), 3);
     }
 
     #[test]
@@ -2282,6 +2956,30 @@ mod tests {
     }
 
     #[test]
+    fn refresh_resyncs_and_keeps_following_the_history() {
+        let (mut w, _rx) = worker(Secrets::memory(), nowhere());
+        signed_in(&mut w, "me@example.com", "rt");
+        signed_in(&mut w, "new@example.com", "rt");
+        {
+            let a = w.accounts.get_mut("me@example.com").unwrap();
+            a.synced_once = true;
+            a.history_id = Some(7);
+            a.backoff.retry_at = Some(Instant::now() + Duration::from_secs(60));
+        }
+        w.handle(Command::Refresh);
+        let jobs: Vec<Job> = std::iter::from_fn(|| w.queue.pop()).collect();
+        assert_eq!(
+            jobs,
+            [
+                Job::InitialSync("me@example.com".into()),
+                Job::History("me@example.com".into()),
+                Job::InitialSync("new@example.com".into()),
+            ]
+        );
+        assert_eq!(w.accounts["me@example.com"].backoff, Backoff::default());
+    }
+
+    #[test]
     fn tune_moves_the_next_poll() {
         let (mut w, _rx) = worker(Secrets::memory(), nowhere());
         let last = w.last_poll;
@@ -2333,9 +3031,9 @@ mod tests {
             Reply::json(500, r#"{"error":{"code":500,"message":"Backend Error"}}"#)
                 .for_path("/gmail/profile"),
             Reply::json(200, fixtures::PROFILE).for_path("/gmail/profile"),
-            // Later polls find the history id unchanged.
-            Reply::json(200, fixtures::PROFILE)
-                .for_path("/gmail/profile")
+            // Later polls find no history since the cursor.
+            Reply::json(200, fixtures::HISTORY_EMPTY)
+                .for_path("/gmail/history")
                 .sticky(),
             Reply::json(200, fixtures::LABELS).for_path("/gmail/labels"),
             Reply::json(200, fixtures::THREADS).for_path("/gmail/threads"),
@@ -2480,7 +3178,10 @@ mod tests {
             "one refresh serves every call"
         );
         assert_eq!(reqs.iter().filter(|r| r.path() == "/token").count(), 1);
-        assert!(reqs.iter().filter(|r| r.path() == "/gmail/profile").count() >= 2);
+        assert_eq!(
+            reqs.iter().filter(|r| r.path() == "/gmail/profile").count(),
+            2
+        );
 
         let lists: Vec<_> = reqs
             .iter()
@@ -2823,5 +3524,641 @@ mod tests {
         assert_eq!(w.accounts.len(), 1);
         assert_eq!(w.client, Some(client()));
         assert_eq!(secrets.tokens().unwrap()["me@example.com"], "rt");
+    }
+
+    fn outgoing(account: &str, thread_id: Option<&str>) -> Outgoing {
+        Outgoing {
+            account: account.into(),
+            kind: crate::model::ComposeKind::Reply,
+            from: crate::model::Address::new(Some("Me"), account),
+            to: vec![crate::model::Address::new(Some("Zoë"), "zoe@example.org")],
+            cc: vec![],
+            bcc: vec![crate::model::Address::new(None, "hidden@example.org")],
+            subject: "Re: Café plans".into(),
+            body: "See you at noon.\n".into(),
+            thread_id: thread_id.map(str::to_string),
+            in_reply_to: Some("<m2@mail.example>".into()),
+            references: vec!["<m2@mail.example>".into()],
+            attachments: vec![],
+        }
+    }
+
+    fn history_page(json: &str) -> gmail::HistoryList {
+        serde_json::from_str(json).unwrap()
+    }
+
+    fn set(ids: &[&str]) -> BTreeSet<String> {
+        ids.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn collect_changes_folds_every_kind_and_filters_new_inbox_mail() {
+        let fixture = history_page(fixtures::HISTORY);
+        let added = |id: &str, labels: &[&str]| {
+            format!(
+                r#"{{"messagesAdded":[{{"message":{{"id":"x","threadId":"{id}","labelIds":{}}}}}]}}"#,
+                serde_json::to_string(labels).unwrap()
+            )
+        };
+        let second = history_page(&format!(
+            r#"{{"history":[{},{},{},{},{}],"historyId":"123600"}}"#,
+            added("promo", &["INBOX", "UNREAD", "CATEGORY_PROMOTIONS"]),
+            added("social", &["INBOX", "UNREAD", "CATEGORY_SOCIAL"]),
+            added("self", &["INBOX", "UNREAD", "SENT"]),
+            added("read", &["INBOX"]),
+            added("personal", &["INBOX", "UNREAD", "CATEGORY_PERSONAL"]),
+        ));
+        let c = collect_changes(&[fixture, second]);
+        assert_eq!(
+            c.changed,
+            set(&[
+                "t-new",
+                "18c0a1b2c3d4e5f6",
+                "t-old",
+                "promo",
+                "social",
+                "self",
+                "read",
+                "personal"
+            ]),
+            "added, relabelled and deleted threads are all refetched"
+        );
+        assert_eq!(c.fresh_inbox, set(&["t-new", "personal"]));
+        assert_eq!(c.labels, set(&["UNREAD"]));
+        assert_eq!(c.new_history_id, Some(123600), "the last page's id");
+
+        let empty = collect_changes(&[history_page(fixtures::HISTORY_EMPTY)]);
+        assert!(empty.changed.is_empty() && empty.fresh_inbox.is_empty());
+        assert_eq!(empty.new_history_id, Some(123456));
+        assert_eq!(collect_changes(&[]).new_history_id, None);
+    }
+
+    fn summary(id: &str, label_ids: &[&str]) -> ThreadSummary {
+        ThreadSummary {
+            key: ThreadKey::new("me@example.com", id),
+            history_id: 1,
+            subject: String::new(),
+            snippet: String::new(),
+            participants: vec![],
+            last_date: Timestamp::UNIX_EPOCH,
+            message_count: 1,
+            label_ids: label_ids.iter().map(|s| s.to_string()).collect(),
+            has_attachments: false,
+        }
+    }
+
+    fn know(account: &mut AccountState, id: &str, label_ids: &[&str]) {
+        account.known.insert(
+            id.into(),
+            Known {
+                history_id: 1,
+                star_target: None,
+                summary: summary(id, label_ids),
+            },
+        );
+    }
+
+    #[test]
+    fn the_cursor_moves_with_its_pending_work_and_failures_keep_it() {
+        let mut a = AccountState::new("rt".into(), None);
+        a.history_id = Some(5);
+        a.commit_round(Changes {
+            changed: set(&["a", "b", "c"]),
+            fresh_inbox: set(&["c"]),
+            labels: set(&["UNREAD"]),
+            new_history_id: Some(9),
+        });
+        assert_eq!(a.history_id, Some(9), "committed with the pending ids");
+        // New inbox mail first.
+        assert_eq!(a.next_refetch(), ["c", "a", "b"]);
+        // `c` lands, `a` is gone, then `b` fails: `b` stays pending for the next round.
+        know(&mut a, "c", &["INBOX", "UNREAD"]);
+        a.refetch_succeeded("c");
+        a.refetch_gone("a");
+        assert_eq!(a.pending_changed, set(&["b"]));
+        assert_eq!(a.pending_fresh, set(&["c"]), "reported once the round ends");
+
+        // A failed history page commits nothing; an empty round keeps what is pending.
+        a.commit_round(Changes {
+            new_history_id: Some(11),
+            ..Changes::default()
+        });
+        assert_eq!(a.history_id, Some(11));
+        assert_eq!(a.next_refetch(), ["b"]);
+        know(&mut a, "b", &["INBOX"]);
+        a.refetch_succeeded("b");
+        assert!(a.pending_changed.is_empty());
+        let new_mail = a.take_new_mail();
+        assert_eq!(new_mail.len(), 1);
+        assert_eq!(new_mail[0].key.id, "c");
+        assert!(a.pending_fresh.is_empty());
+
+        // A candidate that was read meanwhile is cleared without a report.
+        a.commit_round(Changes {
+            changed: set(&["d"]),
+            fresh_inbox: set(&["d"]),
+            ..Changes::default()
+        });
+        know(&mut a, "d", &["INBOX"]);
+        a.refetch_succeeded("d");
+        assert!(a.take_new_mail().is_empty());
+        assert!(a.pending_fresh.is_empty());
+
+        // An expired history drops every cache.
+        a.commit_round(Changes {
+            changed: set(&["e"]),
+            ..Changes::default()
+        });
+        a.missing.insert("f".into(), 1);
+        a.synced_once = true;
+        a.reset();
+        assert!(a.known.is_empty() && a.pending_changed.is_empty() && a.missing.is_empty());
+        assert_eq!((a.history_id, a.synced_once), (None, false));
+    }
+
+    #[test]
+    fn a_burst_still_refetches_new_inbox_mail() {
+        let mut a = AccountState::new("rt".into(), None);
+        let ids: Vec<String> = (0..150).map(|i| format!("18c0{i:012x}")).collect();
+        for id in &ids {
+            know(&mut a, id, &["INBOX"]);
+        }
+        let fresh: Vec<&str> = ids[100..130].iter().map(String::as_str).collect();
+        a.commit_round(Changes {
+            changed: ids.iter().cloned().collect(),
+            fresh_inbox: set(&fresh),
+            ..Changes::default()
+        });
+        let first = a.next_refetch();
+        assert_eq!(a.pending_changed.len(), BURST_FRESH);
+        assert_eq!(a.pending_fresh, a.pending_changed);
+        // The newest twenty new threads survive; the rest leave the cache.
+        let kept: BTreeSet<String> = ids[110..130].iter().cloned().collect();
+        assert_eq!(a.pending_changed, kept);
+        assert_eq!(first.len(), CHUNK);
+        assert!(first.iter().all(|id| kept.contains(id)));
+        assert_eq!(a.known.len(), BURST_FRESH);
+        assert!(!a.known.contains_key(&ids[0]));
+    }
+
+    #[test]
+    fn send_errors_say_whether_the_message_may_have_gone() {
+        let maybe = |e: ApiError| send_error(&CallError::Api(e)).maybe_sent;
+        assert!(maybe(ApiError::Network(api::NetKind::Timeout)));
+        assert!(maybe(ApiError::Network(api::NetKind::Io)));
+        for status in [500, 502, 503, 504] {
+            assert!(maybe(ApiError::Http {
+                status,
+                body: String::new()
+            }));
+        }
+        assert!(
+            maybe(ApiError::Decode("eof".into())),
+            "a 2xx we could not read"
+        );
+        for e in [
+            ApiError::Http {
+                status: 400,
+                body: "Invalid To header".into(),
+            },
+            ApiError::Http {
+                status: 413,
+                body: String::new(),
+            },
+            ApiError::QuotaExhausted {
+                message: "sending limit".into(),
+                retry_after: None,
+            },
+            ApiError::Unauthorized,
+            ApiError::Forbidden("no".into()),
+            ApiError::RateLimited { retry_after: None },
+        ] {
+            assert!(!maybe(e.clone()), "{e:?}");
+        }
+        let e = send_error(&CallError::Api(ApiError::Http {
+            status: 400,
+            body: "Invalid To header".into(),
+        }));
+        assert!(e.message.contains("Invalid To header"));
+        assert_eq!(
+            send_error(&CallError::Api(ApiError::Network(api::NetKind::Connect))).message,
+            MAYBE_SENT
+        );
+        // The token could not be refreshed, so nothing went out.
+        assert!(!send_error(&CallError::Network).maybe_sent);
+        assert!(!send_error(&CallError::Auth).maybe_sent);
+
+        // Gmail-held attachments wait for M12; nothing is uploaded.
+        let mut out = outgoing("me@example.com", None);
+        out.attachments.push(OutgoingAttachment {
+            filename: "a.pdf".into(),
+            mime_type: "application/pdf".into(),
+            size: 1,
+            source: AttachmentSource::Gmail {
+                message_id: "m".into(),
+                part_id: "1".into(),
+            },
+        });
+        let e = local_attachments(&out).err().unwrap();
+        assert_eq!(e.message, FORWARD_NOT_YET);
+        assert!(!e.maybe_sent);
+    }
+
+    #[test]
+    fn auth_network_errors_take_the_backoff_path() {
+        let server = FakeServer::start(vec![Reply::json(503, "down").for_path("/token")]);
+        let (mut w, rx) = worker(Secrets::memory(), fake_endpoints(&server));
+        signed_in(&mut w, "me@example.com", "rt");
+        w.fetch_meta("me@example.com", vec!["t1".into(), "t2".into()]);
+        let account = &w.accounts["me@example.com"];
+        assert!(account.backoff.waiting(Instant::now()), "backed off");
+        assert_eq!(account.backoff.attempts, 1);
+        assert_eq!(
+            account.deferred,
+            [Job::FetchMeta(
+                "me@example.com".into(),
+                vec!["t1".into(), "t2".into()]
+            )],
+            "the chunk is parked, not lost"
+        );
+        assert_eq!(w.accounts.len(), 1, "the account stays");
+        assert_eq!(problem(&drain(&rx)).as_deref(), Some(NETWORK_PROBLEM));
+        assert_eq!(server.finish().len(), 1);
+    }
+
+    /// Waits until an event in `all` (old or newly received) matches `done`.
+    fn wait_for(
+        rx: &async_channel::Receiver<SyncEvent>,
+        all: &mut Vec<SyncEvent>,
+        done: impl Fn(&SyncEvent) -> bool,
+    ) {
+        if all.iter().any(&done) {
+            return;
+        }
+        all.extend(until(rx, done));
+    }
+
+    /// The parts of a `multipart/related` body, as (content type, bytes).
+    fn multipart_parts(content_type: &str, body: &[u8]) -> Vec<(String, Vec<u8>)> {
+        let boundary = content_type
+            .split_once("boundary=")
+            .map(|(_, b)| b.trim_matches('"'))
+            .unwrap();
+        let delimiter = format!("--{boundary}");
+        let text = body.to_vec();
+        let mut parts = Vec::new();
+        let mut rest = &text[..];
+        while let Some(start) = find(rest, delimiter.as_bytes()) {
+            rest = &rest[start + delimiter.len()..];
+            if rest.starts_with(b"--") {
+                break;
+            }
+            let Some(end) = find(rest, delimiter.as_bytes()) else {
+                break;
+            };
+            let part = &rest[..end];
+            let part = part.strip_prefix(b"\r\n").unwrap_or(part);
+            let part = part.strip_suffix(b"\r\n").unwrap_or(part);
+            let split = find(part, b"\r\n\r\n").unwrap();
+            let head = String::from_utf8_lossy(&part[..split]).to_string();
+            let ct = head
+                .lines()
+                .find_map(|l| l.strip_prefix("Content-Type: "))
+                .unwrap_or_default()
+                .to_string();
+            parts.push((ct, part[split + 4..].to_vec()));
+            rest = &rest[end..];
+        }
+        parts
+    }
+
+    fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+        haystack.windows(needle.len()).position(|w| w == needle)
+    }
+
+    /// SPEC 12.2 `fake_gmail_write_path`: changes, stars, trash and untrash, history rounds
+    /// with new mail, a failed refetch, a deleted thread, an expired history, a stale access
+    /// token, and sends, all through the real worker thread against a scripted Gmail.
+    #[test]
+    fn fake_gmail_write_path() {
+        let labels: gmail::LabelList = serde_json::from_str(fixtures::LABELS).unwrap();
+        let listed = format!(r#"{{"threads":[{{"id":"{A}","historyId":"123450"}}]}}"#);
+        let round_one = r#"{"history":[
+            {"messagesAdded":[{"message":{"id":"m9","threadId":"tnew","labelIds":["INBOX","UNREAD"]}}]},
+            {"messagesDeleted":[{"message":{"id":"m5","threadId":"t-old"}}]}
+        ],"historyId":"200"}"#;
+        let ok = "{}";
+        let mut script = vec![
+            Reply::json(200, TOKEN).for_path("/token"),
+            // The second history call finds the access token stale: one refresh, one retry.
+            Reply::json(200, TOKEN).for_path("/token"),
+            Reply::json(200, fixtures::PROFILE)
+                .for_path("/gmail/profile")
+                .sticky(),
+            Reply::json(200, fixtures::LABELS)
+                .for_path("/gmail/labels")
+                .sticky(),
+            Reply::json(200, &listed)
+                .for_path("/gmail/threads")
+                .sticky(),
+            Reply::json(200, &meta(A))
+                .for_path(&format!("/gmail/threads/{A}"))
+                .sticky(),
+            // Archive both threads, then star, trash and untrash with the inbox put back.
+            Reply::json(200, ok).for_path(&format!("/gmail/threads/{A}/modify")),
+            Reply::json(200, ok).for_path("/gmail/threads/t2/modify"),
+            Reply::json(200, &meta("t2")).for_path("/gmail/threads/t2"),
+            Reply::json(200, r#"{"id":"m2","threadId":"x","labelIds":["STARRED"]}"#)
+                .for_path("/gmail/messages/m2/modify"),
+            Reply::json(200, &format!(r#"{{"id":"{A}"}}"#))
+                .for_path(&format!("/gmail/threads/{A}/trash")),
+            Reply::json(200, &format!(r#"{{"id":"{A}"}}"#))
+                .for_path(&format!("/gmail/threads/{A}/untrash")),
+            Reply::json(200, ok).for_path(&format!("/gmail/threads/{A}/modify")),
+            // Round one: new inbox mail and a deleted message; the new thread's refetch fails.
+            Reply::json(200, round_one).for_path("/gmail/history"),
+            Reply::json(500, r#"{"error":{"code":500,"message":"Backend Error"}}"#)
+                .for_path("/gmail/threads/tnew"),
+            // Round two: nothing new, after a stale token; the pending threads are refetched.
+            Reply::json(401, r#"{"error":{"code":401,"message":"stale"}}"#)
+                .for_path("/gmail/history"),
+            Reply::json(200, r#"{"historyId":"200"}"#).for_path("/gmail/history"),
+            Reply::json(200, &meta("tnew")).for_path("/gmail/threads/tnew"),
+            Reply::json(404, r#"{"error":{"code":404,"message":"Not Found"}}"#)
+                .for_path("/gmail/threads/t-old"),
+            // Round three: the history expired.
+            Reply::json(404, r#"{"error":{"code":404,"message":"Not Found"}}"#)
+                .for_path("/gmail/history"),
+            Reply::json(200, r#"{"historyId":"123456"}"#)
+                .for_path("/gmail/history")
+                .sticky(),
+            // Sends: a 503 (may have gone), then a success.
+            Reply::json(503, r#"{"error":{"code":503,"message":"Unavailable"}}"#)
+                .for_path("/upload/messages/send"),
+            Reply::json(200, fixtures::SEND).for_path("/upload/messages/send"),
+        ];
+        for l in &labels.labels {
+            script.push(
+                Reply::json(
+                    200,
+                    &format!(
+                        r#"{{"id":"{}","name":"{}","threadsUnread":1,"threadsTotal":2}}"#,
+                        l.id, l.name
+                    ),
+                )
+                .for_path(&format!("/gmail/labels/{}", l.id))
+                .sticky(),
+            );
+        }
+        let server = FakeServer::start(script);
+        let secrets = Secrets::memory();
+        secrets.set_token("me@example.com", "rt").unwrap();
+        let (handle, rx) =
+            start_with(secrets, fake_endpoints(&server), Some(client()), fast()).unwrap();
+        let me = || "me@example.com".to_string();
+        let mut all = Vec::new();
+
+        // The first sync, which never reports new mail.
+        wait_for(
+            &rx,
+            &mut all,
+            |e| matches!(e, SyncEvent::ThreadsUpdated(t) if t[0].key.id == A),
+        );
+        let finished = |op: OpId| move |e: &SyncEvent| matches!(e, SyncEvent::MutationFinished { op: o, .. } if *o == op);
+        let mutation_error = |all: &[SyncEvent], op: OpId| {
+            all.iter().find_map(|e| match e {
+                SyncEvent::MutationFinished { op: o, error } if *o == op => Some(error.clone()),
+                _ => None,
+            })
+        };
+
+        handle.send(Command::Modify {
+            op: 1,
+            account: me(),
+            thread_ids: vec![A.into(), "t2".into()],
+            delta: LabelDelta::archive(),
+        });
+        wait_for(&rx, &mut all, finished(1));
+        // The authoritative state follows the change.
+        wait_for(
+            &rx,
+            &mut all,
+            |e| matches!(e, SyncEvent::ThreadsUpdated(t) if t.iter().any(|s| s.key.id == "t2")),
+        );
+        handle.send(Command::Modify {
+            op: 2,
+            account: me(),
+            thread_ids: vec![A.into()],
+            delta: LabelDelta::star(),
+        });
+        wait_for(&rx, &mut all, finished(2));
+        handle.send(Command::Trash {
+            op: 3,
+            account: me(),
+            thread_ids: vec![A.into()],
+        });
+        wait_for(&rx, &mut all, finished(3));
+        handle.send(Command::Untrash {
+            op: 4,
+            account: me(),
+            thread_ids: vec![A.into()],
+            restore: LabelDelta::archive().inverse(),
+        });
+        wait_for(&rx, &mut all, finished(4));
+        for op in 1..=4 {
+            assert_eq!(mutation_error(&all, op), Some(None), "op {op}");
+        }
+
+        // History rounds: new mail is reported once its refetch finally works, and the deleted
+        // thread is gone.
+        wait_for(&rx, &mut all, |e| matches!(e, SyncEvent::NewMail { .. }));
+        let new_mail: Vec<&Vec<ThreadSummary>> = all
+            .iter()
+            .filter_map(|e| match e {
+                SyncEvent::NewMail { threads, .. } => Some(threads),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(new_mail.len(), 1);
+        assert_eq!(new_mail[0].len(), 1);
+        assert_eq!(new_mail[0][0].key, ThreadKey::new("me@example.com", "tnew"));
+        assert!(all.iter().any(|e| matches!(
+            e,
+            SyncEvent::ThreadsGone { ids, .. } if ids == &vec!["t-old".to_string()]
+        )));
+        let refresh_after_new_mail = all.iter().any(|e| {
+            matches!(
+                e,
+                SyncEvent::ThreadPage {
+                    mode: PageMode::Refresh,
+                    ..
+                }
+            )
+        });
+        assert!(refresh_after_new_mail, "the round re-lists page 1");
+
+        // The expired history resets the account and syncs it from scratch.
+        wait_for(&rx, &mut all, |e| matches!(e, SyncEvent::AccountReset(_)));
+        let reset_at = all
+            .iter()
+            .position(|e| matches!(e, SyncEvent::AccountReset(a) if a == "me@example.com"))
+            .unwrap();
+        let mut after = all.split_off(reset_at);
+        wait_for(&rx, &mut after, |e| {
+            matches!(
+                e,
+                SyncEvent::ThreadPage {
+                    mode: PageMode::Replace,
+                    ..
+                }
+            )
+        });
+        all.extend(after);
+
+        // A send that may have gone out, then one that did.
+        handle.send(Command::Send {
+            op: 5,
+            outgoing: outgoing("me@example.com", Some(A)),
+        });
+        wait_for(&rx, &mut all, |e| {
+            matches!(e, SyncEvent::SendFinished { op: 5, .. })
+        });
+        handle.send(Command::Send {
+            op: 6,
+            outgoing: outgoing("me@example.com", Some(A)),
+        });
+        wait_for(&rx, &mut all, |e| {
+            matches!(e, SyncEvent::SendFinished { op: 6, .. })
+        });
+        let send_result = |op: OpId| {
+            all.iter().find_map(|e| match e {
+                SyncEvent::SendFinished { op: o, error } if *o == op => Some(error.clone()),
+                _ => None,
+            })
+        };
+        assert_eq!(
+            send_result(5),
+            Some(Some(SendError {
+                message: MAYBE_SENT.into(),
+                maybe_sent: true
+            }))
+        );
+        assert_eq!(send_result(6), Some(None));
+        assert_eq!(
+            all.iter()
+                .filter(|e| matches!(e, SyncEvent::NewMail { .. }))
+                .count(),
+            1,
+            "the sync after the reset reports nothing"
+        );
+        handle.send(Command::Shutdown);
+
+        let reqs = server.finish();
+        let posts = |path: &str| -> Vec<&crate::google::fake::Recorded> {
+            reqs.iter()
+                .filter(|r| r.method == "POST" && r.path() == path)
+                .collect()
+        };
+        let body = |r: &crate::google::fake::Recorded| -> serde_json::Value {
+            serde_json::from_slice(&r.body).unwrap()
+        };
+        let a_modify = posts(&format!("/gmail/threads/{A}/modify"));
+        assert_eq!(a_modify.len(), 2);
+        assert_eq!(
+            body(a_modify[0]),
+            serde_json::json!({"removeLabelIds": ["INBOX"]})
+        );
+        assert_eq!(
+            body(a_modify[1]),
+            serde_json::json!({"addLabelIds": ["INBOX"]}),
+            "untrash puts the inbox back"
+        );
+        let t2 = posts("/gmail/threads/t2/modify");
+        assert_eq!(t2.len(), 1, "one modify per thread");
+        assert_eq!(
+            body(t2[0]),
+            serde_json::json!({"removeLabelIds": ["INBOX"]})
+        );
+        let star = posts("/gmail/messages/m2/modify");
+        assert_eq!(star.len(), 1, "star goes on the last message");
+        assert_eq!(
+            body(star[0]),
+            serde_json::json!({"addLabelIds": ["STARRED"]})
+        );
+        assert_eq!(posts(&format!("/gmail/threads/{A}/trash")).len(), 1);
+        let untrash_at = reqs
+            .iter()
+            .position(|r| r.path() == format!("/gmail/threads/{A}/untrash"))
+            .unwrap();
+        assert_eq!(
+            reqs[untrash_at + 1].path(),
+            format!("/gmail/threads/{A}/modify"),
+            "the restore follows the untrash"
+        );
+
+        // History: repeated types from the cursor, and one refresh for the stale token.
+        let history: Vec<&crate::google::fake::Recorded> = reqs
+            .iter()
+            .filter(|r| r.path() == "/gmail/history")
+            .collect();
+        assert!(history.len() >= 4);
+        let q = query(history[0]);
+        assert!(has(&q, "startHistoryId", "123456"));
+        assert_eq!(q.iter().filter(|(k, _)| k == "historyTypes").count(), 4);
+        assert!(
+            has(&query(history[1]), "startHistoryId", "200"),
+            "cursor moved"
+        );
+        assert_eq!(reqs.iter().filter(|r| r.path() == "/token").count(), 2);
+        let second_token = reqs
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.path() == "/token")
+            .nth(1)
+            .unwrap()
+            .0;
+        assert_eq!(reqs[second_token - 1].path(), "/gmail/history");
+        assert_eq!(reqs[second_token + 1].path(), "/gmail/history");
+        assert_eq!(
+            reqs[second_token + 1].header("authorization").as_deref(),
+            Some("Bearer at2")
+        );
+        let tnew = reqs
+            .iter()
+            .filter(|r| r.path() == "/gmail/threads/tnew")
+            .count();
+        assert_eq!(tnew, 2, "the failed refetch was retried by the next round");
+        // The reset's initial sync listed the inbox again.
+        assert_eq!(
+            reqs.iter().filter(|r| r.path() == "/gmail/profile").count(),
+            2
+        );
+
+        // Sends: a multipart upload carrying the thread id and the raw message.
+        let sends = posts("/upload/messages/send");
+        assert_eq!(sends.len(), 2);
+        for send in &sends {
+            assert!(has(&query(send), "uploadType", "multipart"));
+            let ct = send.header("content-type").unwrap();
+            assert!(ct.starts_with("multipart/related; boundary="), "{ct}");
+            let parts = multipart_parts(&ct, &send.body);
+            assert_eq!(parts.len(), 2);
+            assert_eq!(parts[0].0, "application/json; charset=UTF-8");
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&parts[0].1).unwrap(),
+                serde_json::json!({"threadId": A})
+            );
+            assert_eq!(parts[1].0, "message/rfc822");
+            let m = mail_parser::MessageParser::default()
+                .parse(&parts[1].1[..])
+                .unwrap();
+            assert_eq!(m.subject(), Some("Re: Café plans"));
+            assert_eq!(
+                m.in_reply_to().and_then(|l| l.first()),
+                Some("m2@mail.example")
+            );
+            let bcc = m.bcc().and_then(|l| l.first()).and_then(|a| a.address());
+            assert_eq!(bcc, Some("hidden@example.org"), "Bcc stays for Gmail");
+        }
     }
 }

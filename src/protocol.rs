@@ -182,7 +182,6 @@ pub enum SyncEvent {
         threads: Vec<ThreadSummary>,
     },
     /// History expired, so the account's caches are dropped.
-    #[allow(dead_code)] // consumed in M11
     AccountReset(AccountId),
 }
 

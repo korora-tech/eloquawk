@@ -248,7 +248,6 @@ impl LabelDelta {
         }
     }
 
-    #[allow(dead_code)] // consumed in M11
     pub fn is_empty(&self) -> bool {
         self.add.is_empty() && self.remove.is_empty()
     }

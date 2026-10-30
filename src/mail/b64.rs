@@ -12,8 +12,9 @@ pub fn decode(data: &str) -> Result<Vec<u8>, DecodeError> {
     URL_SAFE_PAD_INDIFFERENT.decode(data.trim())
 }
 
-/// Encodes bytes as padded URL-safe base64.
-#[allow(dead_code)] // consumed in M11
+/// Encodes bytes as padded URL-safe base64. Test-only: sends upload the raw bytes as a
+/// multipart body (SPEC 6.2), so nothing outside the tests encodes.
+#[cfg(test)]
 pub fn encode(bytes: &[u8]) -> String {
     URL_SAFE_PAD_INDIFFERENT.encode(bytes)
 }

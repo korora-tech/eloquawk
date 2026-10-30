@@ -1833,6 +1833,43 @@ milestone are welcome. **No trailers.** Push to main after each commit.
   - The remaining live steps of 12.4 (archive and undo, star, send to self, reply threads)
     are done if a client is available; otherwise marked not performed.
 
+- **M11 notes:**
+  - `gmail::history` returns `ApiError::NotFound` for an expired cursor; the worker treats
+    that as `HistoryExpired` (no separate error variant). More than 100 history pages in one
+    round is treated the same way (reset and initial sync) rather than followed.
+  - `collect_changes` also folds each record's `messages` list into `changed`, and collects
+    the label ids of `labelsAdded` / `labelsRemoved` so their counts are refreshed with the
+    labels the refetched threads carried before and after (step 6). Counts are only fetched
+    for labels the sidebar shows (a `LabelCounts` for any other label would add it to the
+    sidebar).
+  - The worker keeps each thread's star target (the last non-draft message id) instead of
+    every message id.
+  - A refetch refused for good (403, `TooLarge`) drops the id from `pending_changed`, so one
+    unreadable thread cannot hold a round open forever. Retryable failures stop the chunk and
+    leave the ids pending, as specified.
+  - Large bursts pick the "newest" fresh ids by thread id (longest, then greatest): Gmail
+    thread ids grow with time. Fresh ids beyond the 20 kept are dropped without a report.
+  - Step 7's `NewMail` is emitted even when step 5's re-list fails (the candidates are
+    cleared at that point, so they would otherwise be lost); `Synced` is emitted only when
+    the re-list worked.
+  - A repeat initial sync (Refresh, a retried poll) keeps an existing history cursor instead
+    of moving it to `profile.historyId` (7.3 step 1), because moving it would skip changes
+    outside page 1. `Refresh` queues `History` after `InitialSync` for accounts that have
+    synced, so a manual refresh also catches up on changes.
+  - Mutations and sends for an account that is not signed in are answered at once with an
+    error. A mutation that changed at least one thread queues `FetchMeta` for all of its
+    threads at the front of the background lane (the authoritative refetch) and the count
+    refresh. Send failures go to the composer only, not the banner.
+  - `send` failure mapping also counts an unreadable success answer (`Decode`, `TooLarge`)
+    as `maybe_sent: true`, since Gmail answered 2xx; a token-endpoint failure is
+    `maybe_sent: false`, since nothing was uploaded. `SendResponse` keeps only `threadId`
+    (shape still unverified, 15 item 14).
+  - `mail::b64::encode` became test-only: the upload send carries raw bytes, so nothing
+    outside the tests encodes.
+  - Not changed: `known` still grows over a session apart from the burst path and resets.
+  - Live steps of 12.4 were not performed by the implementing agent; they are left for the
+    user.
+
 ### M12: Attachments
 - **Files:** `mail/files.rs` (sanitise, unique name, download dir), `sync.rs` `SaveAttachment`
   and Gmail-sourced attachment resolution for Send, the reader's Save button enabled, the

@@ -109,7 +109,6 @@ pub enum ApiError {
     /// The response exceeded its body limit.
     TooLarge,
     Decode(String),
-    #[allow(dead_code)] // consumed in M11
     InvalidRequest(String),
 }
 
@@ -355,7 +354,6 @@ pub fn get<T: DeserializeOwned>(
 }
 
 /// `POST url` with a JSON body, decoding a JSON response.
-#[allow(dead_code)] // consumed in M11
 pub fn post_json<B: serde::Serialize, T: DeserializeOwned>(
     agent: &ureq::Agent,
     token: &str,
@@ -374,7 +372,6 @@ pub fn post_json<B: serde::Serialize, T: DeserializeOwned>(
 }
 
 /// `POST url` with a JSON body, accepting any 2xx including 204 with an empty body.
-#[allow(dead_code)] // consumed in M11
 pub fn post_json_no_content<B: serde::Serialize>(
     agent: &ureq::Agent,
     token: &str,
@@ -389,7 +386,6 @@ pub fn post_json_no_content<B: serde::Serialize>(
 }
 
 /// `POST url` with no body (trash, untrash), decoding a JSON response.
-#[allow(dead_code)] // consumed in M11
 pub fn post_empty<T: DeserializeOwned>(
     agent: &ureq::Agent,
     token: &str,
@@ -428,7 +424,6 @@ fn multipart_body(parts: &[(&str, &[u8])]) -> (String, Vec<u8>) {
 }
 
 /// `POST url?query` with a `multipart/related` body (the upload send), decoding JSON.
-#[allow(dead_code)] // consumed in M11
 pub fn post_multipart<T: DeserializeOwned>(
     agent: &ureq::Agent,
     token: &str,
