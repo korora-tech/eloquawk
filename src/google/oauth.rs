@@ -384,8 +384,14 @@ fn token_request(
         .read_to_string()
         .map_err(|e| AuthError::Network(net_kind(&e)))?;
     if status == 200 {
-        return serde_json::from_str(&body)
-            .map_err(|e| AuthError::Other(format!("unexpected token response: {e}")));
+        return serde_json::from_str(&body).map_err(|e| {
+            // Not `e`'s message: it can echo a token from the body.
+            AuthError::Other(format!(
+                "Google's sign-in service gave an unexpected answer (line {} column {})",
+                e.line(),
+                e.column()
+            ))
+        });
     }
     if status >= 500 {
         return Err(AuthError::Server(status));

@@ -15,9 +15,9 @@ use crate::google::oauth::ClientCredentials;
 
 /// Secret Service name used for all Eloquawk keyring items.
 pub const SERVICE: &str = "korora.tech.Eloquawk";
-const CLIENT_USER: &str = "google-oauth-client";
+pub(crate) const CLIENT_USER: &str = "google-oauth-client";
 /// JSON map of account email → refresh token, in one item: one unlock, one atomic write.
-const TOKENS_USER: &str = "google-refresh-tokens";
+pub(crate) const TOKENS_USER: &str = "google-refresh-tokens";
 
 /// Failure to read or update a stored credential.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -108,7 +108,7 @@ impl Secrets {
             #[serde(default)]
             tokens: BTreeMap<String, String>,
         }
-        let seed: Seed = serde_json::from_str(raw).map_err(|e| e.to_string())?;
+        let seed: Seed = serde_json::from_str(raw).map_err(|e| describe(&e))?;
         if let Some(c) = seed.client {
             self.set_client(&ClientCredentials {
                 client_id: c.client_id,
@@ -130,7 +130,7 @@ impl Secrets {
             return Ok(None);
         };
         let c: StoredClient =
-            serde_json::from_str(&raw).map_err(|e| SecretError::Corrupt(e.to_string()))?;
+            serde_json::from_str(&raw).map_err(|e| SecretError::Corrupt(describe(&e)))?;
         Ok(Some(ClientCredentials {
             client_id: c.client_id,
             client_secret: c.client_secret,
@@ -166,9 +166,7 @@ impl Secrets {
     pub fn tokens(&self) -> Result<BTreeMap<String, String>, SecretError> {
         match self.store.get(TOKENS_USER)? {
             None => Ok(BTreeMap::new()),
-            Some(raw) => {
-                serde_json::from_str(&raw).map_err(|e| SecretError::Corrupt(e.to_string()))
-            }
+            Some(raw) => serde_json::from_str(&raw).map_err(|e| SecretError::Corrupt(describe(&e))),
         }
     }
 
@@ -235,6 +233,18 @@ fn entry(user: &str) -> Result<keyring_core::Entry, SecretError> {
     };
     keyring_core::Entry::new_with_modifiers(SERVICE, user, &HashMap::from([("label", label)]))
         .map_err(map_err)
+}
+
+/// Where and how a stored entry failed to parse, without serde's message: that echoes the
+/// offending value, which can be a refresh token or client secret.
+fn describe(e: &serde_json::Error) -> String {
+    let kind = match e.classify() {
+        serde_json::error::Category::Io => "read error",
+        serde_json::error::Category::Syntax => "invalid JSON",
+        serde_json::error::Category::Data => "unexpected shape",
+        serde_json::error::Category::Eof => "truncated JSON",
+    };
+    format!("{kind} at line {} column {}", e.line(), e.column())
 }
 
 fn map_err(e: keyring_core::Error) -> SecretError {
@@ -356,6 +366,22 @@ mod tests {
         let s = Secrets::new(store);
         assert!(matches!(s.client(), Err(SecretError::Corrupt(_))));
         assert!(matches!(s.tokens(), Err(SecretError::Corrupt(_))));
+    }
+
+    #[test]
+    fn corrupt_entries_never_quote_their_contents() {
+        let store = Arc::new(MemoryStore::default());
+        store.set(TOKENS_USER, r#""1//0g-refresh""#).unwrap();
+        let s = Secrets::new(store);
+        let Err(SecretError::Corrupt(m)) = s.tokens() else {
+            panic!("expected Corrupt");
+        };
+        assert_eq!(m, "unexpected shape at line 1 column 15");
+        assert!(
+            !s.seed(r#"{"tokens": "1//0g-refresh"}"#)
+                .unwrap_err()
+                .contains("0g")
+        );
     }
 
     #[test]

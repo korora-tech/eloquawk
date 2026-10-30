@@ -1731,7 +1731,16 @@ milestone are welcome. **No trailers.** Push to main after each commit.
     be written by the implementing agent (its tool permissions refused to read the client
     JSON's secret), so `BUILTIN_CLIENT_SECRET` in `google/oauth.rs` is empty for now and a
     default build behaves as having no built-in client (the needs-client card) until the
-    secret is pasted into that constant.
+    secret is pasted into that constant. The follow-up fix pass hit the same refusal (writing
+    the secret into the source was blocked as credential leakage), so this stays open for the
+    user. The sign-in card was checked visually with a throwaway
+    `ELOQUAWK_GOOGLE_CLIENT_SECRET` override at build time instead.
+  - Refresh failures other than invalid grant, invalid client and network (say a 400
+    `invalid_request`) go into the banner for that account. An unreadable stored client is
+    removed, together with its tokens, and the banner points to Settings instead of the
+    keyring. Neither keyring parse errors nor token-endpoint parse errors quote the stored or
+    received value, since that could be a token. Saving a different client writes the
+    keyring first and signs out the old accounts only after that write succeeds.
   - `Endpoints` gains `revoke`, so a sign-out in a test never reaches Google.
   - `AuthError::Network` holds an `api::NetKind`, like `ApiError::Network`, and a 5xx from
     the token endpoint is `AuthError::Server(status)`; the worker treats both as the

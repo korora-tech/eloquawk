@@ -265,6 +265,18 @@ impl Worker {
         self.keyring_failed = false;
         let saved = match self.secrets.client() {
             Ok(saved) => saved,
+            // Unlocking cannot fix an unreadable client, so drop it (and the tokens it issued)
+            // and say where to set it again.
+            Err(SecretError::Corrupt(_)) => {
+                let _ = self.secrets.clear_client();
+                self.problems.insert(
+                    "client".into(),
+                    "Your saved OAuth client was unreadable and was removed; set it again in \
+                     Settings and add your accounts again."
+                        .into(),
+                );
+                None
+            }
             Err(e) => {
                 self.locked(e);
                 return;
@@ -282,14 +294,13 @@ impl Worker {
         let tokens = match self.secrets.tokens() {
             Ok(t) => t,
             // Unreadable, so unusable: start afresh rather than failing forever.
-            Err(SecretError::Corrupt(e)) => {
+            // The parse error is left out: it could quote a token.
+            Err(SecretError::Corrupt(_)) => {
                 let _ = self.secrets.clear_tokens();
                 self.problems.insert(
                     "tokens".into(),
-                    format!(
-                        "Stored sign-ins were unreadable ({e}) and were reset; add your \
-                         accounts again."
-                    ),
+                    "Stored sign-ins were unreadable and were reset; add your accounts again."
+                        .into(),
                 );
                 BTreeMap::new()
             }
@@ -357,14 +368,15 @@ impl Worker {
             .client
             .as_ref()
             .is_some_and(|c| c.client_id == client.client_id);
-        if !same_id {
-            // Refresh tokens belong to the client id that issued them; a rotated secret for
-            // the same client keeps every session.
-            self.remove_all_accounts(Revoke::WithGoogle);
-        }
+        // The keyring write comes first: if it fails, the old client and its accounts stay
+        // as they were.
         match self.secrets.set_client(&client) {
             Ok(()) => {
-                if same_id {
+                if !same_id {
+                    // Refresh tokens belong to the client id that issued them; a rotated
+                    // secret for the same client keeps every session.
+                    self.remove_all_accounts(Revoke::WithGoogle);
+                } else {
                     // Saving the client in use (say, the built-in one) keeps its accounts,
                     // but the keyring dropped their tokens when no client was stored there.
                     for (email, account) in &self.accounts {
@@ -380,7 +392,14 @@ impl Worker {
                 ));
                 self.set_auth(AuthState::Ready);
             }
-            Err(e) => self.emit(SyncEvent::Problem(Some(e.to_string()))),
+            Err(e) => {
+                // `set_client` may have dropped the stored tokens before failing; put back
+                // those of the accounts still in use.
+                for (email, account) in &self.accounts {
+                    let _ = self.secrets.set_token(email, &account.refresh_token);
+                }
+                self.emit(SyncEvent::Problem(Some(e.to_string())));
+            }
         }
     }
 
@@ -648,7 +667,14 @@ impl Worker {
                 self.report();
                 Err(CallError::Network)
             }
-            Err(_) => Err(CallError::Auth),
+            // Anything else (a 400 other than invalid_grant, an unreadable answer) keeps the
+            // account but must not fail silently. The message carries no URL or token.
+            Err(e) => {
+                self.problems
+                    .insert(email.to_string(), format!("{email}: {e}"));
+                self.report();
+                Err(CallError::Auth)
+            }
         }
     }
 
@@ -698,7 +724,7 @@ impl Worker {
                     self.problems.insert(email.clone(), msg);
                     self.report();
                 }
-                // Already reported by `access_token`.
+                // `access_token` reports every refresh failure itself.
                 Err(CallError::Auth | CallError::Gone | CallError::Network) => {}
             }
         }
@@ -710,6 +736,7 @@ mod tests {
     use super::*;
     use crate::google::fake::{FakeServer, Reply};
     use crate::model::{ThreadKey, ViewKey, ViewKind};
+    use crate::secrets::SecretStore;
 
     const PROFILE: &str = r#"{"emailAddress":"me@example.com","historyId":"42"}"#;
     const TOKEN: &str = r#"{"access_token":"at2","expires_in":3599,"token_type":"Bearer"}"#;
@@ -1074,5 +1101,144 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, SyncEvent::Client(Some(_))))
         );
+    }
+
+    fn signed_in(w: &mut Worker, email: &str, rt: &str) {
+        w.accounts.insert(
+            email.into(),
+            AccountState {
+                refresh_token: rt.into(),
+                access: None,
+            },
+        );
+    }
+
+    #[test]
+    fn an_unexpected_refresh_error_is_reported_and_keeps_the_account() {
+        let server = FakeServer::start(vec![
+            Reply::json(
+                400,
+                r#"{"error":"invalid_request","error_description":"Missing parameter"}"#,
+            ),
+            Reply::json(200, TOKEN),
+        ]);
+        let (mut w, rx) = worker(Secrets::memory(), fake_endpoints(&server));
+        signed_in(&mut w, "me@example.com", "rt");
+        assert!(matches!(
+            w.access_token("me@example.com"),
+            Err(CallError::Auth)
+        ));
+        assert_eq!(w.accounts.len(), 1);
+        assert_eq!(
+            problem(&drain(&rx)).as_deref(),
+            Some("me@example.com: Missing parameter")
+        );
+        // A later success clears it through `check_accounts`' usual path.
+        assert!(w.access_token("me@example.com").is_ok());
+    }
+
+    #[test]
+    fn an_unreadable_token_answer_is_reported_without_its_body() {
+        let server = FakeServer::start(vec![Reply::json(
+            200,
+            r#"{"access_token":"ya29.secret","expires_in":"soon"}"#,
+        )]);
+        let (mut w, rx) = worker(Secrets::memory(), fake_endpoints(&server));
+        signed_in(&mut w, "me@example.com", "rt");
+        assert!(w.access_token("me@example.com").is_err());
+        let p = problem(&drain(&rx)).unwrap();
+        assert!(
+            p.starts_with("me@example.com: Google's sign-in service"),
+            "{p}"
+        );
+        assert!(!p.contains("ya29") && !p.contains("soon"), "{p}");
+    }
+
+    #[test]
+    fn unreadable_tokens_are_reset_without_quoting_them() {
+        let store = Arc::new(crate::secrets::MemoryStore::default());
+        store
+            .set(crate::secrets::TOKENS_USER, r#""1//0g-refresh""#)
+            .unwrap();
+        let (handle, rx) =
+            start_with(Secrets::new(store.clone()), nowhere(), Some(client())).unwrap();
+        let events = until(&rx, |e| matches!(e, SyncEvent::Problem(Some(_))));
+        let p = problem(&events).unwrap();
+        assert!(p.starts_with("Stored sign-ins were unreadable"), "{p}");
+        assert!(!p.contains("0g-refresh"), "{p}");
+        assert_eq!(store.get(crate::secrets::TOKENS_USER).unwrap(), None);
+        handle.send(Command::Shutdown);
+    }
+
+    #[test]
+    fn an_unreadable_client_is_removed_and_points_to_settings() {
+        for builtin in [Some(client()), None] {
+            let store = Arc::new(crate::secrets::MemoryStore::default());
+            store
+                .set(crate::secrets::CLIENT_USER, r#"{"client_id":"x"}"#)
+                .unwrap();
+            store
+                .set(crate::secrets::TOKENS_USER, r#"{"me@example.com":"rt"}"#)
+                .unwrap();
+            let expect = if builtin.is_some() {
+                AuthState::Ready
+            } else {
+                AuthState::NeedsClient
+            };
+            let (handle, rx) = start_with(Secrets::new(store.clone()), nowhere(), builtin).unwrap();
+            let events = until(&rx, |e| matches!(e, SyncEvent::Problem(Some(_))));
+            assert!(
+                events
+                    .iter()
+                    .any(|e| matches!(e, SyncEvent::Auth(a) if *a == expect))
+            );
+            assert!(
+                problem(&events)
+                    .unwrap()
+                    .contains("set it again in Settings")
+            );
+            assert_eq!(store.get(crate::secrets::CLIENT_USER).unwrap(), None);
+            assert_eq!(store.get(crate::secrets::TOKENS_USER).unwrap(), None);
+            handle.send(Command::Shutdown);
+        }
+    }
+
+    /// A memory store whose client entry cannot be written.
+    #[derive(Default)]
+    struct ClientWriteFails(crate::secrets::MemoryStore);
+
+    impl SecretStore for ClientWriteFails {
+        fn get(&self, user: &str) -> Result<Option<String>, SecretError> {
+            self.0.get(user)
+        }
+        fn set(&self, user: &str, value: &str) -> Result<(), SecretError> {
+            if user == crate::secrets::CLIENT_USER {
+                return Err(SecretError::Unavailable("locked".into()));
+            }
+            self.0.set(user, value)
+        }
+        fn delete(&self, user: &str) -> Result<(), SecretError> {
+            self.0.delete(user)
+        }
+    }
+
+    #[test]
+    fn a_failed_client_save_keeps_the_accounts() {
+        let store = Arc::new(ClientWriteFails::default());
+        let secrets = Secrets::new(store.clone());
+        secrets.set_token("me@example.com", "rt").unwrap();
+        let (mut w, rx) = worker(secrets.clone(), nowhere());
+        signed_in(&mut w, "me@example.com", "rt");
+        w.handle(Command::SaveClient {
+            client_id: "other.apps.googleusercontent.com".into(),
+            client_secret: Some("s".into()),
+        });
+        let events = drain(&rx);
+        assert!(problem(&events).unwrap().contains("locked"));
+        // Nothing was signed out or revoked.
+        assert!(!events.iter().any(|e| matches!(e, SyncEvent::Notice(_))));
+        assert_eq!(w.accounts.len(), 1);
+        assert_eq!(w.client, Some(client()));
+        assert_eq!(secrets.tokens().unwrap()["me@example.com"], "rt");
     }
 }
