@@ -2283,6 +2283,16 @@ are `{"error":{"message":"…","code":401}}` with a **numeric** code (a bad key 
 top-level `user_id`; latency 0.2–0.65 s; about $0.00002 per call of three to five questions.
 `openrouter::classify` accepts a numeric or string `code` and never logs `message`. Items
 below are marked with what this settles.
+**Not performed at M16 (confirmed by the M16 review, 2026-10-30).** No key was available, so
+Eloquawk itself has made no live OpenRouter call. Still to do once a key is available, with the
+results recorded here: the 16.15 live check; items 15 (thresholds), 16 (`max_price` accepted
+alongside `zdr`/`data_collection`, and its value type), 17 and 25 (exact 402/403/422/415 and
+"no endpoint" bodies), and 27 (prompt injection). Item 23 (two Secret Service clients) was not
+run against a real keyring, and the M16 acceptance run with a debug build,
+`ELOQUAWK_SECRETS=memory` and no `--demo` was not done; it is covered only by store and worker
+tests. Risk until then: the `max_price` field and the matching of the "no endpoint" wording
+are guesses, so a real response could be classified wrongly (for example as `Unavailable`
+rather than a validation error).
 15. **Thresholds.** The values in 16.7 and `SUGGEST_MIN` are initial. Calibrate them on a
     labelled sample. With the user's consent, use their own Spam folder and a set of known-good
     mail **that includes legitimate security notices** (new sign-in, password changed, 2FA
