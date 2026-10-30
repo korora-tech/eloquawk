@@ -11,6 +11,7 @@ pub mod links;
 pub mod mailto;
 pub mod parse;
 pub mod query;
+pub mod quote;
 pub mod reply;
 
 /// `s` with every CR and LF turned into a space, for one-line values such as a subject. A

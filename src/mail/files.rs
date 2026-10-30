@@ -16,21 +16,24 @@ const MAX_EXT: usize = 32;
 /// How many numbered names a save tries before giving up.
 const MAX_TRIES: u32 = 10_000;
 
-/// Whether `c` is stripped from a filename: path separators, NUL, C0 and C1 controls (and
-/// DEL), and the bidi and invisible formatting characters that can disguise an extension
-/// (`invoice\u{202E}fdp.exe` shows as `invoiceexe.pdf`).
-fn stripped(c: char) -> bool {
+/// Whether `c` is a bidi or invisible formatting character, which can disguise text
+/// (`invoice\u{202E}fdp.exe` shows as `invoiceexe.pdf`). Shared with the AI prompt builder's
+/// `strip_controls` (SPEC 16.6.4).
+pub(crate) fn is_invisible(c: char) -> bool {
     matches!(c,
-        '/' | '\\'
-        | '\u{0}'..='\u{1F}'
-        | '\u{7F}'..='\u{9F}'
-        | '\u{061C}'                  // Arabic letter mark
+        '\u{061C}'                   // Arabic letter mark
         | '\u{200B}'..='\u{200F}'     // zero-width space, joiners, LRM, RLM
         | '\u{202A}'..='\u{202E}'     // embeddings and overrides
         | '\u{2060}'..='\u{2064}'     // word joiner and invisible operators
         | '\u{2066}'..='\u{2069}'     // isolates
-        | '\u{FEFF}'                  // zero-width no-break space
+        | '\u{FEFF}'                   // zero-width no-break space
     )
+}
+
+/// Whether `c` is stripped from a filename: path separators, NUL, C0 and C1 controls (and
+/// DEL), and the bidi and invisible formatting characters of [`is_invisible`].
+fn stripped(c: char) -> bool {
+    matches!(c, '/' | '\\' | '\u{0}'..='\u{1F}' | '\u{7F}'..='\u{9F}') || is_invisible(c)
 }
 
 /// `name` split at its last dot into a stem and an extension (with the dot), when the stem is
