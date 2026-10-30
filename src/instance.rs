@@ -122,25 +122,26 @@ fn claim_in(dir: &Path, demo: bool, request: &Handoff) -> Claim {
             return Claim::Unavailable(format!("cannot open {}: {e}", lock_path.display()));
         }
     };
-    match lock.try_lock() {
-        Ok(()) => {}
-        Err(std::fs::TryLockError::WouldBlock) => {
-            let deadline = Instant::now() + HAND_OFF_WAIT;
-            loop {
-                if let Some(claim) = hand_off(&sock_path, request) {
-                    return claim;
-                }
-                if Instant::now() >= deadline {
-                    return Claim::Unavailable(
-                        "another Eloquawk holds the lock but does not answer".into(),
-                    );
-                }
-                std::thread::sleep(Duration::from_millis(100));
+    let deadline = Instant::now() + HAND_OFF_WAIT;
+    loop {
+        match lock.try_lock() {
+            Ok(()) => break,
+            Err(std::fs::TryLockError::WouldBlock) => {}
+            Err(std::fs::TryLockError::Error(e)) => {
+                return Claim::Unavailable(format!("cannot lock {}: {e}", lock_path.display()));
             }
         }
-        Err(std::fs::TryLockError::Error(e)) => {
-            return Claim::Unavailable(format!("cannot lock {}: {e}", lock_path.display()));
+        if let Some(claim) = hand_off(&sock_path, request) {
+            return claim;
         }
+        // The holder may still be binding, or be on its way out (its socket already gone);
+        // the lock is tried again each round, so a launch takes over once the holder exits.
+        if Instant::now() >= deadline {
+            return Claim::Unavailable(
+                "another Eloquawk holds the lock but does not answer".into(),
+            );
+        }
+        std::thread::sleep(Duration::from_millis(100));
     }
     // Holding the lock: a socket nobody answers on is stale, and `bind` replaces it.
     match bind(&sock_path, lock) {
@@ -231,7 +232,7 @@ impl Listener {
             path: self.path,
             file: self.file,
             stopped: stopped.clone(),
-            _lock: self.lock,
+            lock: self.lock,
         };
         let listener = self.listener;
         let spawned = std::thread::Builder::new()
@@ -262,12 +263,12 @@ impl Listener {
     }
 }
 
-/// The serving socket. [`Server::shutdown`] removes it; the lock is released on drop.
+/// The serving socket. [`Server::shutdown`] removes it and releases the lock (as does drop).
 pub struct Server {
     path: PathBuf,
     file: (u64, u64),
     stopped: Arc<AtomicBool>,
-    _lock: File,
+    lock: File,
 }
 
 impl Server {
@@ -281,6 +282,9 @@ impl Server {
         if std::fs::metadata(&self.path).is_ok_and(|m| (m.dev(), m.ino()) == self.file) {
             let _ = std::fs::remove_file(&self.path);
         }
+        // With the socket gone nothing answers here any more, so let the next launch become
+        // the instance at once rather than wait for this process to exit.
+        let _ = self.lock.unlock();
     }
 }
 
@@ -487,9 +491,24 @@ mod tests {
 
         server.shutdown();
         assert!(!sock.exists(), "shutdown removes the socket");
-        drop(server);
-        // With the lock released, the next launch becomes the instance again.
+        // Shutdown releases the lock, so a launch while this process is still exiting
+        // becomes the instance instead of waiting on a holder that no longer answers.
         drop(bound(claim_in(&dir.0, false, &ask(Request::Show))));
+        drop(server);
+    }
+
+    #[test]
+    fn a_launch_takes_over_when_the_silent_holder_exits() {
+        let dir = TempDir::new("takeover");
+        let held = File::create(dir.0.join("eloquawk.lock")).unwrap();
+        held.try_lock().unwrap();
+        // The holder answers nothing (its socket is gone) and exits a moment later.
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            drop(held);
+        });
+        drop(bound(claim_in(&dir.0, false, &ask(Request::Show))));
+        releaser.join().unwrap();
     }
 
     #[test]
