@@ -93,7 +93,7 @@ src/...
 | `main.rs` | Parses arguments, claims the single instance, picks the demo or Google worker, sets up the GPUI app, pumps events into the Store, fires notifications, runs the demo script, and handles quit and window close. | adapt antarctical `main.rs` (no tray, dankcal or ShellPush) |
 | `cli.rs` | `Args` parsing as a pure function with tests. Flags grow per milestone: `--demo`, `-h`, `-V` (M3); `--theme light|dark|system`, `--demo-actions <list>` (M4); `--instance` and an optional positional `mailto:` URL (M13). Also reads `ELOQUAWK_DEMO=1`. | new |
 | `demo_script.rs` | Pure `parse_steps(&str) -> Vec<Step>` for `--demo-actions` (section 11), with tests. | new |
-| `branding.rs` | `APP_ID` (M1); embedded SVG and PNG icons (`LazyLock<Arc<Image>>`), `icon(size)` (M14). | copy+adapt |
+| `branding.rs` | `APP_ID` (M1); the embedded SVG icon (`LazyLock<Arc<Image>>`) and `icon(size)` (M14). The PNG is installed but not embedded: with no tray nothing in the app decodes it (M14 change). | copy+adapt |
 | `config.rs` | `Prefs` (section 4.3), XDG path `$XDG_CONFIG_HOME/eloquawk/settings.json`, atomic save, `ephemeral`. `load_from(path)` / `save_to(path)` take the path so tests use a temp dir. | copy+adapt |
 | `secrets.rs` | `SecretStore` trait, `KeyringStore`, `MemoryStore`, and the typed `Secrets` API (client, token map). Debug builds honour `ELOQUAWK_SECRETS=memory`. | copy, with the legacy migration removed |
 | `instance.rs` | Single instance: flock on `$XDG_RUNTIME_DIR/eloquawk.lock`, 0600 socket `eloquawk.sock`, JSON-line `hello` / `show` / `compose {mailto}`. `--demo --instance` uses `eloquawk-demo.lock` / `eloquawk-demo.sock`. | extracted from antarctical `dankcal.rs` |
@@ -971,6 +971,12 @@ Navigation:
   the M4/M5 shots: unread rows looked like read ones). At start `theme::init_ui_font` picks
   the first installed family of IBM Plex Sans, Inter, Cantarell, Noto Sans, Adwaita Sans,
   DejaVu Sans and Liberation Sans, and each window root sets it with `font_family`.
+  **M14:** the Nix package's wrapper sets a default `FONTCONFIG_FILE` that includes
+  `/etc/fonts/fonts.conf` and the user's `fontconfig/fonts.conf` and adds `pkgs.inter`'s font
+  directory, so a Nix install always has a family with real weights. gpui's fontdb only scans
+  directories named by fontconfig, so prefixing `XDG_DATA_DIRS` would not help. A
+  `FONTCONFIG_FILE` the user already set wins. Non-Nix installs still depend on installed
+  fonts.
 - **Tests:** WCAG ratio ≥ 4.5 for text, secondary, accent_text and link on bg, panel and
   selected, and ≥ 3.0 for muted and caption, in both palettes.
 
@@ -1981,6 +1987,13 @@ milestone are welcome. **No trailers.** Push to main after each commit.
     is no tray)
   - `flake.nix`: adds `./data` to the fileset and the `postInstall` desktop and icon lines,
     `homeModules.default` plus the `homeManagerModules` alias, and an `hm-module` check
+- **As built (M14):** the auth card shows `branding::icon(96)` above it (antarctical shows its
+  mascot there; Eloquawk has one icon). `checks` holds `hm-module` (stub evaluation:
+  enabled installs the package, disabled installs nothing, `package` is honoured) and
+  `desktop-entry` (runs `desktop-file-validate` on the installed entry and checks both icons
+  exist). The wrapper also bundles Inter through fontconfig (section 8.3). The desktop entry
+  adds `GenericName`, `Keywords` and `StartupNotify`; a unit test ties its `Icon`,
+  `StartupWMClass`, `Exec`, `MimeType` and `Categories` to `APP_ID` and this list.
 - **Acceptance:**
   - `nix build -L` succeeds and `nix flake check` passes.
   - `result/share/applications/korora.tech.Eloquawk.desktop` and the hicolor icons exist.

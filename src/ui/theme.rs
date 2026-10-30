@@ -193,7 +193,7 @@ pub fn tabular() -> FontFeatures {
 
 /// The window header.
 pub const HEADER_H: f32 = 56.0;
-/// The header's icon slot (filled with the app icon in M14).
+/// The header's app icon.
 pub const ICON_SLOT: f32 = 28.0;
 pub const SIDEBAR_W: f32 = 240.0;
 pub const LIST_W: f32 = 420.0;

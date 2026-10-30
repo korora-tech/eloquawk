@@ -7,8 +7,12 @@ use gpui::{AnyElement, ClickEvent, ClipboardItem, Context, Div, div, px};
 use super::main_view::MainView;
 use super::theme::{Palette, palette};
 use super::widgets::{ButtonStyle, OnClick, body_text, button, card};
+use crate::branding;
 use crate::protocol::{AuthState, Command};
 use crate::store::Store;
+
+/// The app icon above the auth card.
+const AUTH_ICON: f32 = 96.0;
 
 const KEYRING_READ_ERROR: &str = concat!(
     "Eloquawk could not read your Google credentials from the system keyring. ",
@@ -106,7 +110,9 @@ impl MainView {
             .flex_col()
             .items_center()
             .justify_center()
+            .gap_4()
             .p_8()
+            .child(branding::icon(AUTH_ICON))
             .child(div().w(px(460.0)).child(content))
             .into_any_element()
     }

@@ -31,6 +31,7 @@ use super::{
     PrevMessage, PrevThread, Quit, Refresh, Reply, ReplyAll, ReportSpam, ScrollReaderDown,
     ScrollReaderUp, ToggleHelp, ToggleSelect, ToggleStar, Trash, Undo,
 };
+use crate::branding;
 use crate::demo_script::{Cond, FocusTarget};
 use crate::model::{ComposeKind, LabelDelta, ThreadKey, ViewKind, labels};
 use crate::protocol::Command;
@@ -823,8 +824,7 @@ impl MainView {
             .bg(rgb(p.header))
             .border_b_1()
             .border_color(rgb(p.border))
-            // The app icon fills this slot in M14.
-            .child(div().size(px(ICON_SLOT)).flex_shrink_0())
+            .child(branding::icon(ICON_SLOT))
             .child(
                 div()
                     .key_context("Search")

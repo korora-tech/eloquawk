@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=Eloquawk
+GenericName=Mail Client
+Comment=Read and send Gmail on your desktop
+Exec=eloquawk %u
+Icon=korora.tech.Eloquawk
+Terminal=false
+Categories=Network;Email;
+Keywords=Gmail;Google;Mail;Email;
+MimeType=x-scheme-handler/mailto;
+StartupNotify=true
+StartupWMClass=korora.tech.Eloquawk

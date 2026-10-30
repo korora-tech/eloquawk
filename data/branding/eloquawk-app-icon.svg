@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" fill="none" role="img" aria-labelledby="title description">
+  <title id="title">Eloquawk app icon</title>
+  <desc id="description">A smiling icy blue penguin with closed eyes holding a sealed envelope in its faceted flippers. Editable vector artwork with a transparent background.</desc>
+
+  <g id="penguin-body">
+    <path d="M256 40C190 40 148 92 139 164C134 209 119 240 115 295C109 370 132 430 168 452C202 471 311 471 346 452C382 430 405 368 397 295C393 240 378 209 373 164C364 92 322 40 256 40Z" fill="#284f73"/>
+    <path d="M256 219C203 214 159 250 145 309C132 366 146 424 177 449C211 474 301 474 335 449C366 424 380 366 367 309C353 250 309 214 256 219Z" fill="#dbeaf3"/>
+  </g>
+
+  <g id="smiling-face">
+    <path d="M256 168C241 154 242 111 211 103C184 96 161 117 154 146C141 189 163 224 194 243C214 256 238 259 256 260C274 259 298 256 318 243C349 224 371 189 358 146C351 117 328 96 301 103C270 111 271 154 256 168Z" fill="#f3f9fc"/>
+    <g fill="none" stroke="#193b5b" stroke-width="11" stroke-linecap="round">
+      <path d="M180 155C184 139 201 139 208 155"/>
+      <path d="M304 155C308 139 325 139 332 155"/>
+    </g>
+    <path d="M219 178L256 157L293 178C281 191 270 207 256 208C242 207 231 191 219 178Z" fill="#1d4163"/>
+    <path d="M227 178L256 164L285 178L256 189Z" fill="#b6d9ed"/>
+    <path d="M229 183L256 195L283 183C273 193 265 201 256 201C247 201 239 193 229 183Z" fill="#92b9d2"/>
+  </g>
+
+  <g id="envelope">
+    <path d="M160 296H352Q370 296 370 314V430Q370 448 352 448H160Q142 448 142 430V314Q142 296 160 296Z" fill="#173b5c" opacity=".2" transform="translate(0 6)"/>
+    <path d="M160 290H352Q370 290 370 308V424Q370 442 352 442H160Q142 442 142 424V308Q142 290 160 290Z" fill="#f8fcff" stroke="#244a6d" stroke-width="10" stroke-linejoin="round"/>
+    <path d="M150 432L232 362M362 432L280 362" fill="none" stroke="#abc9dc" stroke-width="8" stroke-linecap="round"/>
+    <path d="M147 302L240 375Q256 387 272 375L365 302Q362 295 352 295H160Q150 295 147 302Z" fill="#c8deec" stroke="#244a6d" stroke-width="10" stroke-linejoin="round"/>
+    <circle id="envelope-seal" cx="256" cy="366" r="17" fill="#529abb"/>
+    <circle cx="256" cy="366" r="7" fill="#dbeaf3"/>
+  </g>
+
+  <g id="flippers">
+    <g id="left-flipper">
+      <path d="M138 209C118 226 87 266 81 300C74 329 88 354 117 368C140 378 168 377 188 366C195 360 180 349 162 338C142 325 125 308 119 286C113 261 123 233 138 209Z" fill="#527d9f"/>
+    </g>
+    <g id="right-flipper" transform="translate(512 0) scale(-1 1)">
+      <path d="M138 209C118 226 87 266 81 300C74 329 88 354 117 368C140 378 168 377 188 366C195 360 180 349 162 338C142 325 125 308 119 286C113 261 123 233 138 209Z" fill="#527d9f"/>
+    </g>
+  </g>
+</svg>
