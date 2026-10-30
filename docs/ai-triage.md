@@ -1,7 +1,8 @@
 # Message checks with Jev (AI triage)
 
 Eloquawk can ask Jev, TypeSafe's decision model, reached through OpenRouter's Decisions API,
-whether a message looks like phishing, a scam or spam. It is **off by default** and
+whether a message looks like phishing, a scam or spam, and which of your labels it belongs
+under. It is **off by default** and
 **advisory only**: Eloquawk never moves, labels, archives or reports anything by itself. The
 design is section 16 of [SPEC.md](SPEC.md) and issue
 [#1](https://github.com/korora-tech/eloquawk/issues/1).
@@ -17,7 +18,9 @@ design is section 16 of [SPEC.md](SPEC.md) and issue
    tiny request with no mail in it and shows the credit left on the key.
 3. Turn on **Check messages in &lt;account&gt;** for each account you want checked. The first
    time, Eloquawk shows exactly what it sends and asks you to confirm.
-4. Optionally turn on **Check new inbox mail in the background**. Without it, a message is
+4. **Suggest labels when I open a message** is on by default; turn it off to send no label
+   names (see "Suggested labels" below).
+5. Optionally turn on **Check new inbox mail in the background**. Without it, a message is
    checked only when you open it.
 
 Removing the key (**Remove**) deletes it from the keyring, stops every queued check and
@@ -35,7 +38,9 @@ draft, not sent by you and not from any of your signed-in accounts):
 - whether there is a `List-Unsubscribe` header;
 - for each link (up to 40): its display text and the **host** it points to;
 - the types of attachments (extension and MIME type), never their names or contents;
-- the first 6,000 characters of the body, without the quoted reply.
+- the first 6,000 characters of the body, without the quoted reply;
+- while **Suggest labels** is on, and only for a message you open: the names of your own
+  labels (up to 100; system labels and hidden labels are never sent).
 
 Before anything is sent, Eloquawk:
 
@@ -48,8 +53,12 @@ Before anything is sent, Eloquawk:
 
 It never sends the recipient list, full link addresses, attachments or their names, other
 messages in the thread, Gmail ids, or the Decisions API's optional `user`, `session_id`,
-`trace` and `assets` fields. Label suggestions (a later version) will add your label names;
-turning them on will ask for consent again.
+`trace` and `assets` fields. Label ids never reach the model: each label is asked as `l0`,
+`l1`, … and mapped back on your machine. Background checks never carry label names.
+
+The disclosure is versioned. Label names were added in version 2, so an account turned on
+before label suggestions existed shows "What Eloquawk sends has changed. Review and turn on
+again." and sends nothing until you accept the new text.
 
 Every request carries `"provider": {"zdr": true, "data_collection": "deny",
 "max_price": {"prompt": 0.42}}`: OpenRouter routes it only to an endpoint with zero data
@@ -95,8 +104,39 @@ one opened. Background checks are capped at 60 per account per hour.
 - **Couldn't check this message · Retry** after a failure, or **Paused: …** while checks are
   paused (a rejected key, no credit, a budget limit, the spend limit).
 
+- **Suggested labels** under the subject: up to three chips, each with its key (`1`, `2`,
+  `3`), the label's colour and its name. See below.
+
 Thresholds (initial, to be calibrated on a labelled sample, SPEC section 15 item 15): phishing
 or scam at 0.50 is a warning and at 0.80 danger; spam at 0.85.
+
+## Suggested labels
+
+When you open a message, Jev is also asked, label by label, whether you would file the
+message under each of your labels ("Would the recipient file this email under their label
+"Receipts"?"). Labels can overlap, so each is a separate yes/no question rather than one
+choice.
+
+- A label is suggested from a score of 0.70, at most three, highest first. When a label and
+  one of its nested labels both qualify ("Projects" and "Projects/Eloquawk"), only the nested
+  one is shown. Labels already on the conversation are not suggested.
+- Click a chip, or press `1`, `2` or `3`, to add that label to the **open conversation only**
+  (never to a selection). It is the same change as the label picker's: the toast reads
+  "Added “Receipts” to 1 conversation" and `z` undoes it. ✕ hides the row for the session.
+- **No suggestions on risky mail.** When the banner says Warning or Danger, or the local
+  caution shows, there is no row and `1`/`2`/`3` do nothing: a sender can word a message to
+  steer the label scores, and one key press must not file a scam among real bills.
+- The digits do nothing while you type in a field, so `1` in the search box is just "1".
+- Up to 100 labels are asked, by how many conversations they hold. A very long message on an
+  account with many labels may take a second request (labels only, same redacted extract), and
+  at most two; labels that fit in neither are skipped for that message.
+- Renaming, adding, deleting or hiding a label makes the next open of an already-checked
+  message ask about its labels again (only the labels, not the phishing questions). Label
+  counts changing does not.
+- Suggestions are never applied automatically. Turning **Suggest labels** off stops label
+  names being sent at once.
+
+Label scores share the uncalibrated status of the other thresholds (SPEC section 15 item 15).
 
 ## The local caution and the link guard (every account)
 
@@ -127,5 +167,6 @@ a request or response body, OpenRouter's error message, a subject, an address or
 No live OpenRouter call has been made from Eloquawk itself. The request and response shapes
 come from OpenRouter's documentation and a live call recorded on 2026-10-30, and everything
 else is tested against a local fake server and the demo checker. The calibration of the
-thresholds and the prompt-injection measurement (SPEC section 15 items 15 and 27) need a key
+thresholds (including the 0.70 suggestion cut-off), whether a real account's labels come back
+as useful suggestions, and the prompt-injection measurement (SPEC section 15 items 15 and 27) need a key
 and the user's consent to use their own mail.

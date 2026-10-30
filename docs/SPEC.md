@@ -2186,6 +2186,33 @@ client and worker`, `feat(ui): show triage banner and list badges`.
   - The help overlay and the README list `1`/`2`/`3`; `help::tests` and
     `readme_lists_every_shortcut` pass.
 
+**M17 implementation notes** (deviations from section 16, kept small):
+- `prompt::fit(input, triage, labels) -> Plan` takes whether triage questions are asked, so a
+  labels-only re-ask (16.8) goes through the same budget; it keeps at least one label in the
+  first request. After shrinking the state (steps 3 and 4) it moves labels back from the
+  second request into the first while the first has room, before trimming the second (step
+  5); without that refill the worst case would leave the first request with no labels and
+  only the second request's share, which by estimate falls below `LABEL_FLOOR`.
+- Label question ids number across both requests (`l0` … in the first, continuing in the
+  second), so `Plan::label_id(i)` maps any answer back.
+- The worker drains commands between a split check's two requests and skips the second if
+  the account or key was revoked meanwhile. The second request is not retried: its failure
+  leaves a partial answer (fingerprint `None`), and if the error is one that pauses (401,
+  402) the worker pauses after emitting the partial `Checked`.
+- A labels-only `Checked` carries the merged cache entry, so it includes the cached verdict.
+- `jev::select_suggestions(probs, labels, applied)` takes the labels already on the thread,
+  so step 4 runs before the top three are taken. Names are looked up in
+  `prompt::candidate_labels` (uncapped), so a label asked before counts moved it past the cap
+  still shows, under its current name.
+- The 16.6.6 estimate of about 175 bytes plus the name per label question is high: a 20-char
+  ASCII name measures about 173 bytes in all, so 100 such labels with a bare 6,000-char body
+  still fit one request (27.3 KB). The typical `fit` tests use a body plus a subject and ten
+  links, which takes 100 labels over the budget as intended.
+- The `suggest` shot runs as two separate screenshot runs (`suggest`, `suggest-applied`),
+  since `scripts/screenshot.sh` captures once per run; a third, `suggest-undo`, checks `z`.
+- Live checks for M17 were not performed (no key): whether 103 questions are accepted in one
+  request (item 21), and the 16.15 live step 6 (a suggestion matching an obvious label).
+
 ---
 
 ## 14. Non-goals for v1
@@ -2293,6 +2320,9 @@ run against a real keyring, and the M16 acceptance run with a debug build,
 tests. Risk until then: the `max_price` field and the matching of the "no endpoint" wording
 are guesses, so a real response could be classified wrongly (for example as `Unavailable`
 rather than a validation error).
+**Not performed at M17 either (2026-10-30).** Still no key: the label questions have not been
+sent live, so item 21's 103-question request and the 16.15 live step 6 remain open; the
+two-request split is tested only against the local fake server and the demo checker.
 15. **Thresholds.** The values in 16.7 and `SUGGEST_MIN` are initial. Calibrate them on a
     labelled sample. With the user's consent, use their own Spam folder and a set of known-good
     mail **that includes legitimate security notices** (new sign-in, password changed, 2FA

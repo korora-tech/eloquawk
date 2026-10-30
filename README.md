@@ -23,7 +23,7 @@ A native Gmail client for Linux, built with Rust and [GPUI](https://www.gpui.rs/
 - **Attachments:** save them to your download directory with one click.
 - **New-mail notifications:** for unread mail that lands in the inbox, skipping Gmail's Promotions, Social, Updates and Forums categories.
 - **Mail handler:** registers for `mailto:` links and hands them to the running window.
-- **Message checks (optional, off by default):** with your own OpenRouter key, Jev flags likely phishing, scams and spam in the accounts you turn on. See [Message checks](#message-checks).
+- **Message checks (optional, off by default):** with your own OpenRouter key, Jev flags likely phishing, scams and spam in the accounts you turn on, and suggests which of your labels a message you open belongs under (`1`, `2`, `3` apply them). See [Message checks](#message-checks).
 - **Local credential storage:** refresh tokens stay in your system keyring; mail stays in memory and is never written to disk. No analytics or telemetry.
 
 **Current limits:** Eloquawk does not render HTML mail, edit or sync drafts (Drafts are listed read-only), use send-as aliases or signatures, snooze, schedule sends, manage filters or labels, or delete permanently. There is no offline cache, so mail is fetched again at startup, and no tray icon: closing the last window quits.
@@ -40,7 +40,10 @@ for zero data retention; your OpenRouter account's own logging and Broadcast set
 apply, so use a dedicated key with those off. Each check costs a fraction of a cent, and a
 per-session spend limit (default $1.00) stops them.
 
-Results are advisory: a banner and a list badge, never an automatic move. Independently of
+While label suggestions are on, the names of your labels (up to 100) go with each message you
+open, and up to three suggested labels appear under the subject; press `1`, `2` or `3` (or
+click) to add one, and `z` to undo. Risky messages get no suggestions. Results are advisory: a
+banner, a list badge and suggested labels, never an automatic move or label. Independently of
 Jev and for every account, a message that fails DMARC and has a link whose text names another
 site shows "Eloquawk noticed: …", and its web links ask before opening. That guard is best
 effort. Details, costs and limits: [docs/ai-triage.md](docs/ai-triage.md). Demo mode uses an
