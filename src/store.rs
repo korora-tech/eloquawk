@@ -2167,6 +2167,7 @@ impl Store {
                     return;
                 }
                 self.ai.failed.remove(&id);
+                let unlabelled = outcome.labels.is_none();
                 let (labels, label_fp) = match outcome.labels {
                     Some((fp, probs)) => (Some(probs), fp),
                     None => (None, None),
@@ -2181,6 +2182,11 @@ impl Store {
                 );
                 self.ai.by_thread.insert(thread.clone(), message_id);
                 self.ai.bump(&thread);
+                // A background check that was queued or in flight when the thread opened
+                // answered without labels: ask them now rather than on the next open.
+                if unlabelled {
+                    self.check_open(&thread);
+                }
             }
             AiEvent::Failed {
                 thread,
@@ -3788,6 +3794,31 @@ mod tests {
             r.s.dismiss_suggestions();
             assert!(names(&r.s, &d.key).is_empty());
             assert!(r.s.apply_suggestion(0).is_none());
+        }
+
+        #[test]
+        fn background_answer_without_labels_asks_them_for_the_open_thread() {
+            let (mut r, d) = labelled("p-ai-order");
+            r.drain();
+            // The background check was already in flight when the thread opened.
+            let target = r.s.ai_target(&d).unwrap().id.clone();
+            r.s.apply_ai(AiEvent::Checking {
+                thread: d.key.clone(),
+                message_id: target,
+            });
+            r.checked(&d, (0.03, 0.02, 0.05));
+            let checks = r.checks();
+            assert_eq!(checks.len(), 1, "the labels go out without a reopen");
+            assert!(!checks[0].verdict, "labels only");
+            assert!(checks[0].labels.is_some());
+            // Once labelled, an answer asks nothing more.
+            checked_labels(
+                &mut r,
+                &d,
+                (0.03, 0.02, 0.05),
+                &[(demo_data::RECEIPTS, 0.88)],
+            );
+            assert!(r.checks().is_empty());
         }
 
         #[test]
