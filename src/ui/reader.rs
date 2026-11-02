@@ -28,7 +28,9 @@ use super::body_text::{BodyEvent, BodyText};
 use super::format;
 use super::theme::{Palette, palette};
 use super::triage::{self, GuardDecision};
-use super::widgets::{ButtonStyle, OnClick, button, caption, ghost_button, label_chip};
+use super::widgets::{
+    ButtonStyle, OnClick, button, caption, ghost_button, icon_button, label_chip,
+};
 use crate::ai::jev::Level;
 use crate::mail::address::display_name;
 use crate::mail::links::LinkTarget;
@@ -548,7 +550,33 @@ impl ReaderView {
         let in_view = |id: &str| self.last.view == Some(ViewKind::Label(id.to_string()));
         let starred = summary.is_some_and(ThreadSummary::starred);
         let tool = |id: &'static str, label: &'static str, on: Option<OnClick>| {
-            button(p, id, label, ButtonStyle::Toolbar, on)
+            let icon = match id {
+                "archive" if label == "Not spam" => {
+                    r#"<path d="M12 3 3 7v5c0 5 3.8 8 9 9 5.2-1 9-4 9-9V7z"/><path d="m8 12 3 3 5-6"/>"#
+                }
+                "archive" => {
+                    r#"<rect x="3" y="4" width="18" height="4" rx="1"/><path d="M5 8v11h14V8M9 12h6"/>"#
+                }
+                "trash" if label == "Restore" => r#"<path d="M4 11a8 8 0 1 1 2 6M4 5v6h6"/>"#,
+                "trash" => r#"<path d="M3 6h18M8 6V4h8v2m3 0-1 14H6L5 6m5 4v6m4-6v6"/>"#,
+                "mark-unread" => {
+                    r#"<rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3 7 9 6 9-6"/>"#
+                }
+                "star" if starred => {
+                    r#"<path fill="currentColor" d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2L12 17.3l-5.6 2.9 1.1-6.2L3 9.6l6.2-.9z"/>"#
+                }
+                "star" => {
+                    r#"<path d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2L12 17.3l-5.6 2.9 1.1-6.2L3 9.6l6.2-.9z"/>"#
+                }
+                "labels" => {
+                    r#"<path d="M3 12V4h8l10 10-7 7L3 10"/><circle cx="7.5" cy="8" r="1"/>"#
+                }
+                "reply" => r#"<path d="m9 6-6 6 6 6M3 12h10c5 0 8 3 8 7"/>"#,
+                "reply-all" => r#"<path d="m11 6-6 6 6 6M5 12h9c4 0 7 3 7 7M7 6l-6 6 6 6"/>"#,
+                "forward" => r#"<path d="m15 6 6 6-6 6m6-6H11c-5 0-8 3-8 7"/>"#,
+                _ => unreachable!(),
+            };
+            icon_button(p, id, label, icon, on)
         };
         let first = tool(
             "archive",
@@ -736,7 +764,12 @@ impl ReaderView {
                             cx.notify();
                         })
                     });
-                    (s.name, colour, on_click)
+                    let name = if s.p <= crate::ai::jev::SUGGEST_MIN {
+                        format!("{} (best guess)", s.name)
+                    } else {
+                        s.name
+                    };
+                    (name, colour, on_click)
                 })
                 .collect();
             let dismiss = self.click(cx, |this, _, cx| {

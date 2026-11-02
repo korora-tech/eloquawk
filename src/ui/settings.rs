@@ -92,7 +92,7 @@ const DISCLOSURE: [&str; 4] = [
         "sender-authentication results, the website names that links point to, the types of ",
         "any attachments, the first 6,000 characters of the message without quoted replies, ",
         "and, while label suggestions are on, the names of your labels (up to 100) with each ",
-        "check of a message you open. Before sending, Eloquawk replaces web links with just their website name, ",
+        "check of a message you open, plus any label guidance you choose to save. Before sending, Eloquawk replaces web links with just their website name, ",
         "your address and the other recipients' addresses with placeholders, and one-time ",
         "codes it recognises (English wording only) with \"[code]\". Names, phone numbers and ",
         "anything else in the text are sent as written.",
@@ -186,6 +186,10 @@ pub struct SettingsView {
     ai_key: Entity<TextInput>,
     /// The session spend limit in dollars.
     spend: Entity<TextInput>,
+    label_guidance: Entity<TextInput>,
+    shown_guidance: Option<String>,
+    required_label_group: Entity<TextInput>,
+    shown_label_group: Option<String>,
     /// The spend limit last copied into its field, so typing is not overwritten.
     shown_spend: Option<u32>,
     key_error: Option<&'static str>,
@@ -210,6 +214,9 @@ impl SettingsView {
         let client_secret = cx.new(|cx| TextInput::new("GOCSPX-…", true, 2, cx));
         let ai_key = cx.new(|cx| TextInput::new("sk-or-…", true, 3, cx));
         let spend = cx.new(|cx| TextInput::new("1.00", false, 4, cx));
+        let label_guidance =
+            cx.new(|cx| TextInput::new("e.g. TTL/M3: keep for three months", false, 5, cx));
+        let required_label_group = cx.new(|cx| TextInput::new("e.g. TTL", false, 6, cx));
         let subscription = cx.observe(&store, |this, _, cx| {
             this.sync_from_store(cx);
             cx.notify();
@@ -224,6 +231,10 @@ impl SettingsView {
             client_secret,
             ai_key,
             spend,
+            label_guidance,
+            shown_guidance: None,
+            required_label_group,
+            shown_label_group: None,
             shown_spend: None,
             key_error: None,
             spend_error: false,
@@ -255,6 +266,18 @@ impl SettingsView {
             self.shown_spend = Some(limit);
             self.spend
                 .update(cx, |i, cx| i.set_text(dollars(limit), cx));
+        }
+        let guidance = self.store.read(cx).prefs.ai.label_guidance.clone();
+        if self.shown_guidance.as_ref() != Some(&guidance) {
+            self.shown_guidance = Some(guidance.clone());
+            self.label_guidance
+                .update(cx, |i, cx| i.set_text(guidance, cx));
+        }
+        let group = self.store.read(cx).prefs.ai.required_label_group.clone();
+        if self.shown_label_group.as_ref() != Some(&group) {
+            self.shown_label_group = Some(group.clone());
+            self.required_label_group
+                .update(cx, |i, cx| i.set_text(group, cx));
         }
         let stored = self.store.read(cx).client_id.clone();
         if self.shown_client.as_ref() == Some(&stored) {
@@ -371,12 +394,44 @@ impl SettingsView {
         cx.notify();
     }
 
+    fn save_label_guidance(&mut self, cx: &mut Context<Self>) {
+        let text = crate::ai::prompt::strip_controls(self.label_guidance.read(cx).text());
+        let text =
+            crate::ai::prompt::cut_chars(text.trim(), crate::config::LABEL_GUIDANCE_MAX_CHARS).0;
+        self.store.update(cx, |s, cx| {
+            s.change_prefs(|p| p.ai.label_guidance = text.clone());
+            cx.notify();
+        });
+        self.shown_guidance = Some(text.clone());
+        self.label_guidance.update(cx, |i, cx| i.set_text(text, cx));
+    }
+
+    fn save_label_group(&mut self, cx: &mut Context<Self>) {
+        let group = crate::ai::prompt::strip_controls(self.required_label_group.read(cx).text());
+        let group = crate::ai::prompt::cut_chars(group.trim().trim_end_matches('/'), 100).0;
+        self.store.update(cx, |s, cx| {
+            s.change_prefs(|p| p.ai.required_label_group = group.clone());
+            cx.notify();
+        });
+        self.shown_label_group = Some(group.clone());
+        self.required_label_group
+            .update(cx, |i, cx| i.set_text(group, cx));
+    }
+
     /// Enter: saves whichever field it was pressed in.
     fn submit(&mut self, window: &Window, cx: &mut Context<Self>) {
         if self.ai_key.focus_handle(cx).is_focused(window) {
             self.save_key(cx);
         } else if self.spend.focus_handle(cx).is_focused(window) {
             self.save_spend(cx);
+        } else if self.label_guidance.focus_handle(cx).is_focused(window) {
+            self.save_label_guidance(cx);
+        } else if self
+            .required_label_group
+            .focus_handle(cx)
+            .is_focused(window)
+        {
+            self.save_label_group(cx);
         } else {
             self.save_client(cx);
         }
@@ -918,6 +973,18 @@ impl SettingsView {
                         self.pref(cx, |p| p.ai.suggest_labels = !p.ai.suggest_labels),
                     ))
                     .child(div().pl(px(30.0)).child(caption(p, SUGGEST_CAPTION))),
+            )
+            .child(
+                div().flex().flex_col().gap_2()
+                    .child(Self::field(p, "LABEL GUIDANCE", "Explain what your labels mean (up to 500 characters)", self.label_guidance.clone()))
+                    .child(caption(p, "Saved on this device and sent to OpenRouter and TypeSafe with label suggestions. Avoid secrets and private information."))
+                    .child(button(p, "ai-save-label-guidance", "Save guidance", ButtonStyle::Secondary, Some(self.click(cx, |this, _, cx| this.save_label_guidance(cx)))))
+            )
+            .child(
+                div().flex().flex_col().gap_2()
+                    .child(Self::field(p, "ALWAYS SUGGEST FROM LABEL GROUP", "Parent label name (optional)", self.required_label_group.clone()))
+                    .child(caption(p, "Offer the best-scoring child even when confidence is low, including on risky mail. Leave blank to turn this off. You still choose whether to apply it."))
+                    .child(button(p, "ai-save-label-group", "Save label group", ButtonStyle::Secondary, Some(self.click(cx, |this, _, cx| this.save_label_group(cx)))))
             )
             .child(
                 div()

@@ -19,7 +19,7 @@ use super::jev::{
     DecisionsRequest, DecisionsResponse, Question, THRESHOLDS, validate, verdict_from,
 };
 use super::openrouter::{self, AiEndpoints, AiError, ApiKey, BACKOFF_CAP, Backoff};
-use super::prompt::{fit, label_question_id, shrink};
+use super::prompt::{label_question_id, shrink};
 use super::{AiCommand, AiEvent, AiHandle, CheckRequest, KeyState, Outcome, Priority};
 use crate::config::Prefs;
 use crate::model::AccountId;
@@ -294,6 +294,7 @@ impl Worker {
     // ----- the key ---------------------------------------------------------------------------
 
     fn load_key(&mut self) {
+        super::debug(format_args!("loading key"));
         if self.demo() {
             self.emit(AiEvent::Key(KeyState::Demo));
             return;
@@ -442,6 +443,7 @@ impl Worker {
 
     fn accept(&mut self, req: CheckRequest) {
         if !self.can_send() {
+            super::debug(format_args!("worker dropped check: not ready to send"));
             self.emit(AiEvent::Dropped {
                 thread: req.thread,
                 message_id: req.message_id,
@@ -453,6 +455,7 @@ impl Worker {
         if self.cache.covers(&id, req.verdict, fp)
             && let Some(entry) = self.cache.get(&id)
         {
+            super::debug(format_args!("worker cache hit"));
             self.emit(AiEvent::Checked {
                 thread: req.thread,
                 message_id: req.message_id,
@@ -552,9 +555,18 @@ impl Worker {
             Some(ask) if !(job.shrunk && verdict) => ask.candidates.as_slice(),
             _ => &[],
         };
-        let plan = fit(input, verdict, candidates);
+        let guidance = job
+            .req
+            .labels
+            .as_ref()
+            .map_or("", |ask| ask.guidance.as_str());
+        let plan = super::prompt::fit_with_guidance(input, verdict, candidates, guidance);
         let first = plan.first_request(verdict);
         self.in_flight = Some(job.id());
+        super::debug(format_args!(
+            "sending request: interactive={interactive}, verdict={verdict}, labels={}",
+            !candidates.is_empty()
+        ));
         let result = self.ask(&first);
         // Revocations and newer opens sent meanwhile are handled before the result is used,
         // and before a second request carries the same message out again.
@@ -623,6 +635,7 @@ impl Worker {
                         true
                     }
                     Some(Err(e)) => {
+                        super::debug(format_args!("label request failed: kind={}", e.kind_name()));
                         second_error = Some(e.clone());
                         false
                     }
@@ -678,6 +691,12 @@ impl Worker {
     }
 
     fn failed(&mut self, mut job: Job, interactive: bool, e: AiError) {
+        super::debug(format_args!(
+            "request failed: kind={}, retryable={}, pauses={}",
+            e.kind_name(),
+            e.retryable(),
+            e.pauses()
+        ));
         let fail = |w: &Self, job: &Job, retryable: bool| {
             w.emit(AiEvent::Failed {
                 thread: job.req.thread.clone(),
@@ -1024,6 +1043,7 @@ mod tests {
     fn long_labels(n: usize) -> crate::ai::LabelAsk {
         crate::ai::LabelAsk {
             fingerprint: 7,
+            guidance: String::new(),
             candidates: (0..n)
                 .map(|i| crate::ai::LabelCandidate {
                     id: format!("Label_{i}"),
@@ -1083,6 +1103,7 @@ mod tests {
         again.verdict = false;
         again.labels = Some(crate::ai::LabelAsk {
             fingerprint: 8,
+            guidance: String::new(),
             candidates: long_labels(3).candidates,
         });
         h.send(AiCommand::Check(Box::new(again)));

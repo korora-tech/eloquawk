@@ -241,7 +241,8 @@ mod tests {
     fn demo_messages_get_their_expected_suggestions() {
         assert_eq!(suggestions_of("p-ai-order"), ["Receipts"]);
         assert_eq!(suggestions_of("p-ai-trip"), ["Travel"]);
-        assert!(suggestions_of("p-cafe").is_empty());
+        // With no strong scores, tied highest scores are offered as best guesses.
+        assert!(!suggestions_of("p-cafe").is_empty());
         // Already filed: the render-time filter leaves nothing to suggest.
         assert!(suggestions_of("p-receipt").is_empty());
         // The crafted notice steers the checker towards Receipts; the store hides it.

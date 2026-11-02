@@ -600,6 +600,27 @@ pub fn label_candidates(account_labels: &[Label]) -> Vec<LabelCandidate> {
     all
 }
 
+/// Put the required group's descendants first so they survive the candidate and request caps.
+pub fn label_candidates_for_group(account_labels: &[Label], group: &str) -> Vec<LabelCandidate> {
+    let mut all = candidate_labels(account_labels);
+    if !group.trim().is_empty() {
+        all.sort_by_key(|label| !in_label_group(&label.name, group));
+    }
+    all.truncate(MAX_LABELS);
+    all
+}
+
+/// A group refers to descendants, never the grouping label itself.
+pub fn in_label_group(name: &str, group: &str) -> bool {
+    let group = group.trim().trim_end_matches('/');
+    !group.is_empty()
+        && name
+            .get(..group.len())
+            .is_some_and(|s| s.eq_ignore_ascii_case(group))
+        && name.as_bytes().get(group.len()) == Some(&b'/')
+        && name.len() > group.len() + 1
+}
+
 /// Every label that could be a candidate, in the candidates' order but uncapped: what the
 /// suggestions look names up in, so a label asked before the counts moved it past the cap
 /// is still shown.
@@ -631,6 +652,34 @@ pub fn label_fingerprint(account_labels: &[Label]) -> u64 {
     ls.sort_unstable();
     let mut h = DefaultHasher::new();
     ls.hash(&mut h);
+    h.finish()
+}
+
+/// Include the effective guidance so edits invalidate cached label answers.
+pub fn label_fingerprint_with_guidance(account_labels: &[Label], guidance: &str) -> u64 {
+    let labels = label_fingerprint(account_labels);
+    if guidance.is_empty() {
+        return labels;
+    }
+    let mut h = DefaultHasher::new();
+    labels.hash(&mut h);
+    guidance.hash(&mut h);
+    h.finish()
+}
+
+/// The required group changes candidate ordering and must invalidate cached scores.
+pub fn label_fingerprint_with_options(
+    account_labels: &[Label],
+    guidance: &str,
+    group: &str,
+) -> u64 {
+    let fingerprint = label_fingerprint_with_guidance(account_labels, guidance);
+    if group.is_empty() {
+        return fingerprint;
+    }
+    let mut h = DefaultHasher::new();
+    fingerprint.hash(&mut h);
+    group.to_lowercase().hash(&mut h);
     h.finish()
 }
 
@@ -668,6 +717,16 @@ pub fn request(
     labels: &[LabelCandidate],
     start: usize,
 ) -> DecisionsRequest {
+    request_with_guidance(input, triage, labels, start, "")
+}
+
+fn request_with_guidance(
+    input: &AiInput,
+    triage: bool,
+    labels: &[LabelCandidate],
+    start: usize,
+    guidance: &str,
+) -> DecisionsRequest {
     let mut state = state_json(input);
     let mut questions = if triage {
         triage_questions()
@@ -676,6 +735,9 @@ pub fn request(
     };
     if !labels.is_empty() {
         state["label_names_note"] = json!(LABEL_NOTE);
+        if !guidance.is_empty() {
+            state["recipient_label_guidance"] = json!(guidance);
+        }
         questions.extend(label_questions(labels, start));
     }
     DecisionsRequest::new(state, questions)
@@ -688,18 +750,26 @@ pub struct Plan {
     pub input: AiInput,
     pub first: Vec<LabelCandidate>,
     pub second: Vec<LabelCandidate>,
+    pub guidance: String,
 }
 
 impl Plan {
     /// The first request.
     pub fn first_request(&self, triage: bool) -> DecisionsRequest {
-        request(&self.input, triage, &self.first, 0)
+        request_with_guidance(&self.input, triage, &self.first, 0, &self.guidance)
     }
 
     /// The second request, labels only, when there is one.
     pub fn second_request(&self) -> Option<DecisionsRequest> {
-        (!self.second.is_empty())
-            .then(|| request(&self.input, false, &self.second, self.first.len()))
+        (!self.second.is_empty()).then(|| {
+            request_with_guidance(
+                &self.input,
+                false,
+                &self.second,
+                self.first.len(),
+                &self.guidance,
+            )
+        })
     }
 
     /// The label id of question `l<index>`.
@@ -729,13 +799,33 @@ impl Plan {
 ///    the second drops labels from its tail until it fits.
 ///
 /// A labels-only check (`triage` false) keeps at least one label in the first request.
-pub fn fit(mut input: AiInput, triage: bool, labels: &[LabelCandidate]) -> Plan {
+pub fn fit(input: AiInput, triage: bool, labels: &[LabelCandidate]) -> Plan {
+    fit_with_guidance(input, triage, labels, "")
+}
+
+pub fn fit_with_guidance(
+    mut input: AiInput,
+    triage: bool,
+    labels: &[LabelCandidate],
+    guidance: &str,
+) -> Plan {
+    let guidance = cut_chars(
+        strip_controls(guidance).trim(),
+        crate::config::LABEL_GUIDANCE_MAX_CHARS,
+    )
+    .0;
     let mut first: Vec<LabelCandidate> = labels.to_vec();
     let mut second: Vec<LabelCandidate> = Vec::new();
-    let size = |i: &AiInput, ls: &[LabelCandidate], t: bool| request(i, t, ls, 0).to_bytes().len();
+    let size = |i: &AiInput, ls: &[LabelCandidate], t: bool| {
+        request_with_guidance(i, t, ls, 0, &guidance)
+            .to_bytes()
+            .len()
+    };
     // The second request numbers its labels on from the first's, so its ids are sized there.
     let size2 = |i: &AiInput, first: &[LabelCandidate], second: &[LabelCandidate]| {
-        request(i, false, second, first.len()).to_bytes().len()
+        request_with_guidance(i, false, second, first.len(), &guidance)
+            .to_bytes()
+            .len()
     };
     let keep = usize::from(!triage);
     // 2. Move labels into the second request.
@@ -786,6 +876,7 @@ pub fn fit(mut input: AiInput, triage: bool, labels: &[LabelCandidate]) -> Plan 
         input,
         first,
         second,
+        guidance,
     }
 }
 
@@ -1199,6 +1290,46 @@ mod tests {
         assert!(plain.state.get("label_names_note").is_none());
         let only = request(&input, false, &labels, 4);
         assert_eq!(ids_of(&only), ["l4"]);
+    }
+
+    #[test]
+    fn required_group_is_prioritised_before_label_cap() {
+        let mut labels: Vec<_> = (0..120)
+            .map(|i| user_label(&format!("L{i}"), &format!("Common {i}"), 100))
+            .collect();
+        labels.push(user_label("ttl", "TTL/M3", 0));
+        assert!(!label_candidates(&labels).iter().any(|l| l.id == "ttl"));
+        assert_eq!(label_candidates_for_group(&labels, "ttl")[0].id, "ttl");
+        assert!(!in_label_group("TTLExtra/M3", "TTL"));
+        assert!(!in_label_group("TTL", "TTL"));
+    }
+
+    #[test]
+    fn guidance_follows_label_requests_and_fits_the_budget() {
+        let labels = ascii_labels(100);
+        let guidance = "TTL/M3 means keep for three months. ".repeat(40);
+        let plan = fit_with_guidance(typical(), true, &labels, &guidance);
+        assert_eq!(
+            plan.guidance.chars().count(),
+            crate::config::LABEL_GUIDANCE_MAX_CHARS
+        );
+        let first = plan.first_request(true);
+        assert!(first.to_bytes().len() <= REQUEST_BUDGET);
+        if !plan.first.is_empty() {
+            assert_eq!(first.state["recipient_label_guidance"], plan.guidance);
+        }
+        let second = plan
+            .second_request()
+            .expect("100 labels require a second request");
+        assert_eq!(second.state["recipient_label_guidance"], plan.guidance);
+        assert!(second.to_bytes().len() <= REQUEST_BUDGET);
+        let triage = fit_with_guidance(typical(), true, &[], &guidance).first_request(true);
+        assert!(triage.state.get("recipient_label_guidance").is_none());
+        let labels = [user_label("ttl", "TTL/M3", 1)];
+        assert_ne!(
+            label_fingerprint_with_guidance(&labels, "three months"),
+            label_fingerprint_with_guidance(&labels, "five years")
+        );
     }
 
     #[test]

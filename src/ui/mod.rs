@@ -12,6 +12,7 @@
 pub mod activation;
 pub mod auth;
 pub mod body_text;
+pub mod command_palette;
 pub mod compose;
 pub mod format;
 pub mod help;
@@ -103,6 +104,7 @@ actions!(
         CloseCompose,
         /// The compose window's "Discard" answer (not bound to a key).
         DiscardCompose,
+        OpenCommandPalette,
         OpenSettings,
         /// Closes the Settings screen.
         CloseSettings,
@@ -163,6 +165,9 @@ pub fn bindings() -> Vec<KeyBinding> {
         KeyBinding::new("1", ApplySuggestion1, mail),
         KeyBinding::new("2", ApplySuggestion2, mail),
         KeyBinding::new("3", ApplySuggestion3, mail),
+        KeyBinding::new("escape", ClosePicker, Some("CommandPalette")),
+        KeyBinding::new("up", PickerUp, Some("CommandPalette")),
+        KeyBinding::new("down", PickerDown, Some("CommandPalette")),
         KeyBinding::new("escape", ClosePicker, Some("LabelPicker")),
         KeyBinding::new("up", PickerUp, Some("LabelPicker")),
         KeyBinding::new("down", PickerDown, Some("LabelPicker")),
@@ -173,6 +178,7 @@ pub fn bindings() -> Vec<KeyBinding> {
         // Quit from a compose window asks about its edits first.
         KeyBinding::new("ctrl-q", Quit, Some("Compose")),
         KeyBinding::new("escape", CloseSettings, Some("Settings")),
+        KeyBinding::new("ctrl-k", OpenCommandPalette, app),
         KeyBinding::new("ctrl-r", Refresh, app),
         KeyBinding::new("ctrl-,", OpenSettings, app),
         KeyBinding::new("ctrl-n", Compose, app),

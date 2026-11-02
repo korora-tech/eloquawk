@@ -41,8 +41,7 @@ apply, so use a dedicated key with those off. Each check costs a fraction of a c
 per-session spend limit (default $1.00) stops them.
 
 While label suggestions are on, the names of your labels (up to 100) go with each message you
-open, and up to three suggested labels appear under the subject; press `1`, `2` or `3` (or
-click) to add one, and `z` to undo. Risky messages get no suggestions. Results are advisory: a
+open, along with optional label guidance you save in Settings. Use guidance to explain names such as `TTL/M3`; it is stored locally and sent to OpenRouter and TypeSafe with label checks. Suggested labels appear under the subject; press `1`, `2` or `3` for the first three, or click any suggestion to add it, and `z` to undo. Labels scoring above 0.60 are shown; if none do, the highest-scoring labels are offered as best guesses. Risky messages get no suggestions by default. You can set a required label group such as `TTL` in Settings to show its best-scoring child even on risky mail and below the normal threshold; review it before applying it. Results are advisory: a
 banner, a list badge and suggested labels, never an automatic move or label. Independently of
 Jev and for every account, a message that fails DMARC and has a link whose text names another
 site shows "Eloquawk noticed: …", and its web links ask before opening. That guard is best
@@ -143,6 +142,7 @@ These are the keys the `?` overlay shows. Mail keys do nothing while a text fiel
 | `Esc` or `Ctrl w` | Close the message | Compose window |
 | `Ctrl q` | Quit | Compose window |
 | `Esc` | Close Settings | Settings |
+| `Ctrl k` | Command palette | Anywhere |
 | `Ctrl r` | Refresh | Anywhere |
 | `Ctrl ,` | Settings | Anywhere |
 | `Ctrl n` | Compose | Anywhere |
@@ -172,6 +172,9 @@ nix develop -c cargo run -- --demo
 ```
 
 The Nix development shell supplies Rust and the native build dependencies. Run the app normally with `nix develop -c cargo run --release`, or build the packaged application with `nix build`. Debug builds honour `ELOQUAWK_SECRETS=memory`, which keeps credentials in memory instead of your keyring.
+
+For Jev diagnostics, close the running Eloquawk instance and start it from a terminal with `ELOQUAWK_JEV_DEBUG=1 nix develop -c cargo run --release`. Open a message and look for `eloquawk: jev: debug:` lines. These opt-in diagnostics report check decisions, key state, request outcomes, and label names and scores. Label names may be sensitive. They do not include email contents, account identifiers, or credentials. Existing non-debug error messages may also appear in the terminal.
+
 
 ```sh
 nix develop -c cargo fmt --check

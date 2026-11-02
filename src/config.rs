@@ -27,6 +27,8 @@ pub const REFRESH_SECS_MAX: u64 = 900;
 pub const PAGE_SIZE_MIN: u32 = 10;
 pub const PAGE_SIZE_MAX: u32 = 100;
 
+pub const LABEL_GUIDANCE_MAX_CHARS: usize = 500;
+
 pub const SPEND_LIMIT_CENTS_MIN: u32 = 10;
 pub const SPEND_LIMIT_CENTS_MAX: u32 = 10_000;
 
@@ -38,6 +40,10 @@ pub struct AiPrefs {
     pub accounts: BTreeMap<AccountId, u32>,
     /// Suggest labels when a message is opened (M17; on by default).
     pub suggest_labels: bool,
+    /// User-authored label meanings, stored locally and sent with label questions.
+    pub label_guidance: String,
+    /// Optional parent label whose best-scoring child is always offered.
+    pub required_label_group: String,
     /// Check new inbox mail as it arrives (decision 2: off by default).
     pub background: bool,
     /// Checks stop for the session at this much spend, in cents, clamped to 10..=10_000.
@@ -49,6 +55,8 @@ impl Default for AiPrefs {
         Self {
             accounts: BTreeMap::new(),
             suggest_labels: true,
+            label_guidance: String::new(),
+            required_label_group: String::new(),
             background: false,
             spend_limit_cents: 100,
         }
@@ -69,6 +77,8 @@ pub struct Prefs {
     /// The account and label id shown last; restored at start.
     pub last_view: Option<(AccountId, String)>,
     pub collapsed_accounts: BTreeSet<AccountId>,
+    /// Collapsed user label trees, keyed by account and Gmail label id.
+    pub collapsed_labels: BTreeSet<(AccountId, String)>,
     /// The AI message checks (M16).
     pub ai: AiPrefs,
     /// Demo mode and tests: never written to disk.
@@ -87,6 +97,7 @@ impl Default for Prefs {
             page_size: 50,
             last_view: None,
             collapsed_accounts: BTreeSet::new(),
+            collapsed_labels: BTreeSet::new(),
             ai: AiPrefs::default(),
             ephemeral: false,
         }
@@ -219,9 +230,12 @@ mod tests {
             page_size: 25,
             last_view: Some(("you@example.com".into(), "Label_7".into())),
             collapsed_accounts: ["you@work.example".to_string()].into(),
+            collapsed_labels: [("you@example.com".into(), "Label_7".into())].into(),
             ai: AiPrefs {
                 accounts: [("you@example.com".to_string(), 1)].into(),
                 suggest_labels: false,
+                label_guidance: "TTL/M3 means retain for three months".into(),
+                required_label_group: "TTL".into(),
                 background: true,
                 spend_limit_cents: 250,
             },

@@ -17,6 +17,7 @@ use gpui::{
 };
 
 use super::auth::Screen;
+use super::command_palette::{Command as PaletteCommand, CommandPalette, PaletteEvent};
 use super::compose;
 use super::label_picker::{LabelPicker, PickerEvent};
 use super::reader::{ReaderEvent, ReaderView};
@@ -28,9 +29,9 @@ use super::{
     ApplySuggestion1, ApplySuggestion2, ApplySuggestion3, Archive, BackToList, CancelSearch,
     CloseSearch, CloseWindow, CollapseAll, Compose, DismissTriage, ExpandAll, FocusSearch, Forward,
     GoAllMail, GoDrafts, GoInbox, GoSent, GoStarred, MarkRead, MarkUnread, NextAccount,
-    NextMessage, NextThread, OpenLabelPicker, OpenSettings, OpenThread, PrevAccount, PrevMessage,
-    PrevThread, Quit, Refresh, Reply, ReplyAll, ReportSpam, ScrollReaderDown, ScrollReaderUp,
-    ToggleHelp, ToggleSelect, ToggleStar, Trash, Undo,
+    NextMessage, NextThread, OpenCommandPalette, OpenLabelPicker, OpenSettings, OpenThread,
+    PrevAccount, PrevMessage, PrevThread, Quit, Refresh, Reply, ReplyAll, ReportSpam,
+    ScrollReaderDown, ScrollReaderUp, ToggleHelp, ToggleSelect, ToggleStar, Trash, Undo,
 };
 use crate::ai::jev::{Kind, Level};
 use crate::branding;
@@ -62,6 +63,7 @@ pub struct MainView {
     pub(super) help_open: bool,
     /// The label picker, while it shows, with its event subscription.
     picker: Option<(Entity<LabelPicker>, Subscription)>,
+    command_palette: Option<(Entity<CommandPalette>, Subscription)>,
     /// The Settings screen, while it shows, with its event subscription.
     settings: Option<(Entity<SettingsView>, Subscription)>,
     /// The reader pane's bounds as last laid out (window coordinates, so below the header and
@@ -108,6 +110,7 @@ impl MainView {
             screen: Screen::Auth,
             help_open: false,
             picker: None,
+            command_palette: None,
             settings: None,
             reader_bounds: Rc::new(Cell::new(None)),
             shown_search: None,
@@ -307,6 +310,85 @@ impl MainView {
                     this.close_picker(window, cx);
                 }))
                 .child(div().absolute().top(top).left(left).child(picker.clone()))
+                .into_any_element(),
+        )
+    }
+
+    pub(super) fn open_command_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.current_screen(cx) != Screen::Mail {
+            return;
+        }
+        self.help_open = false;
+        self.picker = None;
+        let palette = cx.new(CommandPalette::new);
+        let sub = cx.subscribe_in(&palette, window, |this, _, event, window, cx| match event {
+            PaletteEvent::Close => this.close_command_palette(window, cx),
+            PaletteEvent::Run(command) => {
+                let command = *command;
+                this.close_command_palette(window, cx);
+                this.run_palette_command(command, window, cx);
+            }
+        });
+        let focus = palette.read(cx).filter_focus(cx);
+        self.command_palette = Some((palette, sub));
+        window.focus(&focus, cx);
+        cx.notify();
+    }
+
+    fn close_command_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.command_palette.take().is_some() {
+            self.focus_mail(window, cx);
+            cx.notify();
+        }
+    }
+
+    fn run_palette_command(
+        &mut self,
+        command: PaletteCommand,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match command {
+            PaletteCommand::Compose => self.compose_new(cx),
+            PaletteCommand::Search => self.focus_search(&FocusSearch, window, cx),
+            PaletteCommand::Inbox => self.go_label(labels::INBOX, window, cx),
+            PaletteCommand::Starred => self.go_label(labels::STARRED, window, cx),
+            PaletteCommand::Sent => self.go_label(labels::SENT, window, cx),
+            PaletteCommand::Drafts => self.go_label(labels::DRAFT, window, cx),
+            PaletteCommand::AllMail => self.go(ViewKind::AllMail, window, cx),
+            PaletteCommand::Archive => self.archive(&Archive, window, cx),
+            PaletteCommand::Trash => self.trash(&Trash, window, cx),
+            PaletteCommand::Star => self.toggle_star(&ToggleStar, window, cx),
+            PaletteCommand::MarkRead => self.mark_read(&MarkRead, window, cx),
+            PaletteCommand::MarkUnread => self.mark_unread(&MarkUnread, window, cx),
+            PaletteCommand::Labels => self.open_label_picker(&OpenLabelPicker, window, cx),
+            PaletteCommand::Reply => self.compose_reply(ComposeKind::Reply, cx),
+            PaletteCommand::ReplyAll => self.compose_reply(ComposeKind::ReplyAll, cx),
+            PaletteCommand::Forward => self.compose_reply(ComposeKind::Forward, cx),
+            PaletteCommand::Refresh => self.store.read(cx).refresh(),
+            PaletteCommand::Settings => self.open_settings(window, cx),
+            PaletteCommand::Help => self.set_help(true, window, cx),
+        }
+    }
+
+    fn command_palette_overlay(&self, cx: &Context<Self>) -> Option<AnyElement> {
+        let (palette, _) = self.command_palette.as_ref()?;
+        Some(
+            div()
+                .id("command-scrim")
+                .occlude()
+                .absolute()
+                .inset_0()
+                .flex()
+                .justify_center()
+                .items_start()
+                .pt(px(72.0))
+                .px(px(24.0))
+                .bg(gpui::rgba((super::theme::palette(cx).bg << 8) | 0xb8))
+                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                    this.close_command_palette(window, cx)
+                }))
+                .child(palette.clone())
                 .into_any_element(),
         )
     }
@@ -942,8 +1024,20 @@ impl MainView {
             .child(
                 ghost_button(
                     p,
+                    "commands",
+                    "Commands (Ctrl K)",
+                    Some(Box::new(cx.listener(|this, _: &ClickEvent, window, cx| {
+                        this.open_command_palette(window, cx)
+                    }))),
+                )
+                .h(px(CONTROL_H)),
+            )
+            .child(
+                super::widgets::icon_button(
+                    p,
                     "refresh",
                     "Refresh",
+                    r#"<path d="M20 7v5h-5M4 17v-5h5"/><path d="M5 9a7 7 0 0 1 12-2l3 5M4 12l3 5a7 7 0 0 0 12-2"/>"#,
                     (!store.busy).then(|| -> super::widgets::OnClick {
                         Box::new(
                             cx.listener(|this, _: &ClickEvent, _, cx| {
@@ -955,10 +1049,11 @@ impl MainView {
                 .h(px(CONTROL_H)),
             )
             .child(
-                ghost_button(
+                super::widgets::icon_button(
                     p,
                     "settings",
                     "Settings",
+                    r#"<circle cx="12" cy="12" r="3"/><path d="M19 12a7 7 0 0 0-.1-1l2-1.5-2-3.5-2.4 1a7 7 0 0 0-1.7-1L14.5 3h-5l-.3 3a7 7 0 0 0-1.7 1L5.1 6l-2 3.5 2 1.5a7 7 0 0 0 0 2l-2 1.5 2 3.5 2.4-1a7 7 0 0 0 1.7 1l.3 3h5l.3-3a7 7 0 0 0 1.7-1l2.4 1 2-3.5-2-1.5a7 7 0 0 0 .1-1z"/>"#,
                     Some(Box::new(cx.listener(|this, _: &ClickEvent, window, cx| {
                         this.open_settings(window, cx)
                     }))),
@@ -1144,6 +1239,7 @@ impl Render for MainView {
         // drops it, so it neither keeps the focus unseen nor comes back later.
         if screen != Screen::Mail {
             self.picker = None;
+            self.command_palette = None;
         }
         let store_entity = self.store.clone();
         let store = store_entity.read(cx);
@@ -1154,6 +1250,7 @@ impl Render for MainView {
             }
             self.scrolled_to = store.cursor.clone();
         }
+        let command_palette = self.command_palette_overlay(cx);
         let header = self.header(store, cx);
         let banner = self.banner(store, cx);
         let toast = self.toast(store, cx);
@@ -1170,6 +1267,9 @@ impl Render for MainView {
         };
         div()
             .key_context("Eloquawk")
+            .on_action(cx.listener(|this, _: &OpenCommandPalette, window, cx| {
+                this.open_command_palette(window, cx)
+            }))
             .on_action(cx.listener(|this, _: &Refresh, _, cx| this.store.read(cx).refresh()))
             .on_action(cx.listener(|_, _: &CloseWindow, window, _| window.remove_window()))
             // On the root so the reader's buttons and scripts reach them from any focus.
@@ -1281,6 +1381,7 @@ impl Render for MainView {
             )
             .children(picker)
             .children(help)
+            .children(command_palette)
             .children(toast)
     }
 }

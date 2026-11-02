@@ -242,10 +242,8 @@ pub fn verdict_from(p_phishing: f32, p_scam: f32, p_spam: f32, t: &Thresholds) -
     }
 }
 
-/// A label is suggested from this probability up (SPEC 16.8).
-pub const SUGGEST_MIN: f32 = 0.70;
-/// At most this many suggestions are shown.
-pub const SUGGEST_MAX: usize = 3;
+/// Labels scoring strictly above this value qualify without a fallback.
+pub const SUGGEST_MIN: f32 = 0.60;
 
 /// One suggested label for the open thread.
 #[derive(Clone, Debug, PartialEq)]
@@ -262,36 +260,83 @@ fn is_ancestor(ancestor: &str, name: &str) -> bool {
         && name.as_bytes()[ancestor.len()] == b'/'
 }
 
-/// The suggestions from a message's label probabilities (SPEC 16.8): labels at
-/// [`SUGGEST_MIN`] or more that still exist (named as they are now, from `labels`), an
-/// ancestor dropped when one of its descendants qualifies, labels in `applied` (already on
-/// the thread) left out, then by probability and name, at most [`SUGGEST_MAX`].
+/// Show all labels above the threshold, or all labels tied for the highest score when
+/// none clears it. Suppress ancestors of selected descendants and already-applied labels.
 pub fn select_suggestions(
     probs: &[(String, f32)],
     labels: &[LabelCandidate],
     applied: &BTreeSet<String>,
 ) -> Vec<Suggestion> {
-    let qualified: Vec<Suggestion> = probs
+    let eligible: Vec<Suggestion> = probs
         .iter()
-        .filter(|(_, p)| p.is_finite() && *p >= SUGGEST_MIN)
+        .filter(|(_, p)| p.is_finite() && (0.0..=1.0).contains(p))
         .filter_map(|(id, p)| {
-            let l = labels.iter().find(|l| &l.id == id)?;
+            let label = labels.iter().find(|l| &l.id == id)?;
             Some(Suggestion {
                 id: id.clone(),
-                name: l.name.clone(),
+                name: label.name.clone(),
                 p: *p,
             })
         })
         .collect();
-    let mut out: Vec<Suggestion> = qualified
+    let any_above = eligible.iter().any(|s| s.p > SUGGEST_MIN);
+    let max = eligible.iter().map(|s| s.p).max_by(f32::total_cmp);
+    let qualified: Vec<_> = eligible
+        .into_iter()
+        .filter(|s| {
+            if any_above {
+                s.p > SUGGEST_MIN
+            } else {
+                Some(s.p) == max
+            }
+        })
+        .collect();
+    let mut out: Vec<_> = qualified
         .iter()
         .filter(|s| !qualified.iter().any(|d| is_ancestor(&s.name, &d.name)))
         .filter(|s| !applied.contains(&s.id))
         .cloned()
         .collect();
     out.sort_by(|a, b| b.p.total_cmp(&a.p).then_with(|| a.name.cmp(&b.name)));
-    out.truncate(SUGGEST_MAX);
     out
+}
+
+/// Pick the best scored leaf of a required group, unless one is already applied.
+pub fn required_group_suggestion(
+    probs: &[(String, f32)],
+    labels: &[LabelCandidate],
+    applied: &BTreeSet<String>,
+    group: &str,
+) -> Option<Suggestion> {
+    use super::prompt::in_label_group;
+    if labels
+        .iter()
+        .any(|label| applied.contains(&label.id) && in_label_group(&label.name, group))
+    {
+        return None;
+    }
+    let eligible: Vec<_> = labels
+        .iter()
+        .filter(|label| in_label_group(&label.name, group))
+        .collect();
+    probs
+        .iter()
+        .filter(|(_, p)| p.is_finite() && (0.0..=1.0).contains(p))
+        .filter_map(|(id, p)| {
+            let label = eligible.iter().find(|label| label.id == *id)?;
+            if eligible
+                .iter()
+                .any(|child| is_ancestor(&label.name, &child.name))
+            {
+                return None;
+            }
+            Some(Suggestion {
+                id: id.clone(),
+                name: label.name.clone(),
+                p: *p,
+            })
+        })
+        .max_by(|a, b| a.p.total_cmp(&b.p).then_with(|| b.name.cmp(&a.name)))
 }
 
 #[cfg(test)]
@@ -425,7 +470,32 @@ mod tests {
     }
 
     #[test]
-    fn suggestions_threshold_top_three_and_ties() {
+    fn required_group_uses_best_leaf_even_below_threshold_and_respects_applied() {
+        let labels = vec![
+            cand("root", "TTL"),
+            cand("m3", "TTL/M3"),
+            cand("y5", "TTL/Y5"),
+            cand("other", "Other"),
+        ];
+        let probs = vec![
+            ("root".into(), 0.99),
+            ("m3".into(), 0.3),
+            ("y5".into(), 0.5),
+            ("other".into(), 0.99),
+        ];
+        assert_eq!(
+            required_group_suggestion(&probs, &labels, &BTreeSet::new(), "ttl")
+                .unwrap()
+                .id,
+            "y5"
+        );
+        assert!(required_group_suggestion(&probs, &labels, &["m3".into()].into(), "TTL").is_none());
+        assert!(required_group_suggestion(&[], &labels, &BTreeSet::new(), "TTL").is_none());
+        assert!(required_group_suggestion(&probs, &labels, &BTreeSet::new(), "").is_none());
+    }
+
+    #[test]
+    fn suggestions_show_all_above_threshold_and_exclude_applied() {
         let labels = vec![
             cand("a", "Alpha"),
             cand("b", "Beta"),
@@ -443,12 +513,47 @@ mod tests {
         ];
         let none = BTreeSet::new();
         let s = select_suggestions(&probs, &labels, &none);
-        // 0.69 is under the bar, a deleted label is skipped, ties go by name.
-        assert_eq!(names(&s), ["Gamma", "Delta", "Epsilon"]);
-        // An applied label does not take one of the three places.
+        // All scores above 0.60 are kept; a deleted label is skipped.
+        assert_eq!(names(&s), ["Gamma", "Delta", "Epsilon", "Beta", "Alpha"]);
+        // Applied labels are hidden.
+
         let applied: BTreeSet<String> = ["c".to_string()].into();
         let s = select_suggestions(&probs, &labels, &applied);
-        assert_eq!(names(&s), ["Delta", "Epsilon", "Beta"]);
+        assert_eq!(names(&s), ["Delta", "Epsilon", "Beta", "Alpha"]);
+    }
+
+    #[test]
+    fn nested_ttl_from_report_selects_qualifying_child() {
+        let labels = vec![
+            cand("root", "TTL"),
+            cand("m1", "TTL/M1"),
+            cand("m3", "TTL/M3"),
+        ];
+        let scores = vec![
+            ("root".into(), 0.68),
+            ("m1".into(), 0.61),
+            ("m3".into(), 0.52),
+        ];
+        assert_eq!(
+            names(&select_suggestions(&scores, &labels, &BTreeSet::new())),
+            ["TTL/M1"]
+        );
+    }
+
+    #[test]
+    fn fallback_shows_highest_ties_and_does_not_resuggest_after_application() {
+        let labels = vec![cand("a", "Alpha"), cand("b", "Beta"), cand("c", "Other")];
+        let probs = vec![("a".into(), 0.6), ("b".into(), 0.6), ("c".into(), 0.5)];
+        assert_eq!(
+            names(&select_suggestions(&probs, &labels, &BTreeSet::new())),
+            ["Alpha", "Beta"]
+        );
+        assert_eq!(
+            names(&select_suggestions(&probs, &labels, &["a".into()].into())),
+            ["Beta"]
+        );
+        assert!(select_suggestions(&probs, &labels, &["a".into(), "b".into()].into()).is_empty());
+        assert!(select_suggestions(&[], &labels, &BTreeSet::new()).is_empty());
     }
 
     #[test]

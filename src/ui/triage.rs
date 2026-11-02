@@ -352,12 +352,14 @@ pub fn suggestion_row(p: &Palette, chips: Vec<Chip>, dismiss: OnClick) -> Div {
                 .text_size(px(12.0))
                 .line_height(px(18.0))
                 .on_click(on_click)
-                .child(
-                    div()
-                        .font_features(tabular())
-                        .text_color(rgb(p.muted))
-                        .child((i + 1).to_string()),
-                )
+                .when(i < 3, |d| {
+                    d.child(
+                        div()
+                            .font_features(tabular())
+                            .text_color(rgb(p.muted))
+                            .child((i + 1).to_string()),
+                    )
+                })
                 .when_some(colour, |d, (_, bg)| {
                     d.child(div().size(px(8.0)).rounded_full().bg(rgb(bg)))
                 })

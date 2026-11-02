@@ -12,7 +12,7 @@ use std::time::Instant;
 
 use jiff::Timestamp;
 
-use crate::ai::jev::{Level, Suggestion, Verdict, select_suggestions};
+use crate::ai::jev::{Level, Suggestion, Verdict, required_group_suggestion, select_suggestions};
 use crate::ai::prompt::{self, AiInput, Redact};
 use crate::ai::{
     AiCommand, AiEvent, AiHandle, CheckRequest, DISCLOSURE_VERSION, KeyState, LabelAsk, Priority,
@@ -676,6 +676,18 @@ impl Store {
             if ai_before.spend_limit_cents != self.prefs.ai.spend_limit_cents {
                 self.send_ai(AiCommand::SpendLimit(self.prefs.ai.spend_limit_cents));
             }
+            // An already open message needs a check when consent or label suggestions are
+            // enabled; waiting for the user to reopen it makes the feature appear inert.
+            if let Some(key) = self.open.clone()
+                && ((!ai_before.accounts.contains_key(&key.account)
+                    || ai_before.accounts.get(&key.account) != Some(&DISCLOSURE_VERSION))
+                    && self.ai_opted_in(&key.account)
+                    || !ai_before.suggest_labels && self.prefs.ai.suggest_labels
+                    || ai_before.label_guidance != self.prefs.ai.label_guidance
+                    || ai_before.required_label_group != self.prefs.ai.required_label_group)
+            {
+                self.check_open(&key);
+            }
         }
     }
 
@@ -776,7 +788,9 @@ impl Store {
             .iter()
             .filter(|l| l.kind == LabelKind::User && !l.hidden)
             .collect();
-        user.sort_by_key(|l| l.name.to_lowercase());
+        // Compare path components so descendants remain adjacent to their parent, even
+        // when another label shares its name as a prefix (e.g. Projects-old).
+        user.sort_by_cached_key(|l| l.name.split('/').map(str::to_lowercase).collect::<Vec<_>>());
         let names: HashSet<&str> = user.iter().map(|l| l.name.as_str()).collect();
         for l in user {
             // Nest under the longest existing ancestor; without one, show the full name.
@@ -1827,14 +1841,48 @@ impl Store {
         }
     }
 
+    /// Label names may be sensitive; emit them only in explicitly enabled diagnostics.
+    fn debug_label_scores(&self, account: &str, scores: &[(String, f32)]) {
+        if !crate::ai::debug_enabled() {
+            return;
+        }
+        let labels = self
+            .labels
+            .get(account)
+            .map(|ls| prompt::candidate_labels(ls))
+            .unwrap_or_default();
+        crate::ai::debug(format_args!(
+            "label scores: count={}, normal_threshold={:.2}",
+            scores.len(),
+            crate::ai::jev::SUGGEST_MIN
+        ));
+        for (id, score) in scores {
+            let name = labels
+                .iter()
+                .find(|label| label.id == *id)
+                .map(|label| label.name.as_str())
+                .unwrap_or("[unavailable label]");
+            crate::ai::debug(format_args!("label score: name={name:?}, score={score:.4}"));
+        }
+    }
+
     /// The check for `detail`'s target, when SPEC 16.10's conditions hold.
     fn check_request(&self, detail: &ThreadDetail, priority: Priority) -> Option<CheckRequest> {
         let account = &detail.key.account;
         if !self.ai_ready() || !self.ai_opted_in(account) {
+            crate::ai::debug(format_args!(
+                "check skipped: key={}, paused={}, consent={}",
+                crate::ai::key_state_name(&self.ai.key),
+                self.ai.paused.is_some(),
+                self.ai_opted_in(account)
+            ));
             return None;
         }
         let own = self.own_accounts();
-        let target = prompt::target(detail, &own)?;
+        let Some(target) = prompt::target(detail, &own) else {
+            crate::ai::debug(format_args!("check skipped: no eligible incoming message"));
+            return None;
+        };
         let id: MessageKey = (account.clone(), target.id.clone());
         if self.ai.checking.contains(&id)
             || self
@@ -1843,6 +1891,9 @@ impl Store {
                 .get(&id)
                 .is_some_and(|(_, retryable)| !retryable)
         {
+            crate::ai::debug(format_args!(
+                "check skipped: already checking or non-retryable failure"
+            ));
             return None;
         }
         // Labels are asked only on open, while suggestions are on (SPEC 16.8, 16.11).
@@ -1854,9 +1905,19 @@ impl Store {
             // Asked before: only the labels again, when the account's labels changed.
             Some(r) => match &labels {
                 Some(ask) if r.label_fp != Some(ask.fingerprint) => false,
-                _ => return None,
+                _ => {
+                    crate::ai::debug(format_args!("check skipped: result already available"));
+                    if let Some(scores) = &r.labels {
+                        self.debug_label_scores(account, scores);
+                    }
+                    return None;
+                }
             },
         };
+        crate::ai::debug(format_args!(
+            "check requested: priority={priority:?}, verdict={verdict}, labels={}",
+            labels.is_some()
+        ));
         Some(CheckRequest {
             account: account.clone(),
             thread: detail.key.clone(),
@@ -1875,9 +1936,16 @@ impl Store {
             return None;
         }
         let labels = self.labels.get(account)?;
-        let candidates = prompt::label_candidates(labels);
+        let group = self.prefs.ai.required_label_group.trim();
+        let candidates = prompt::label_candidates_for_group(labels, group);
+        let guidance = prompt::cut_chars(
+            prompt::strip_controls(&self.prefs.ai.label_guidance).trim(),
+            crate::config::LABEL_GUIDANCE_MAX_CHARS,
+        )
+        .0;
         (!candidates.is_empty()).then(|| LabelAsk {
-            fingerprint: prompt::label_fingerprint(labels),
+            fingerprint: prompt::label_fingerprint_with_options(labels, &guidance, group),
+            guidance,
             candidates,
         })
     }
@@ -1885,9 +1953,13 @@ impl Store {
     /// Checks the open thread's target when it is due (SPEC 16.10).
     fn check_open(&mut self, key: &ThreadKey) {
         if self.open.as_ref() != Some(key) {
+            crate::ai::debug(format_args!("open check skipped: thread is no longer open"));
             return;
         }
         let Some(detail) = self.loaded(key) else {
+            crate::ai::debug(format_args!(
+                "open check waiting: thread details not loaded"
+            ));
             return;
         };
         if let Some(req) = self.check_request(detail, Priority::Interactive) {
@@ -1950,18 +2022,37 @@ impl Store {
             return None;
         }
         let result = self.ai.results.get(&id)?;
-        if result.verdict.is_some_and(|v| v.level >= Level::Warning)
-            || crate::ui::triage::local_caution(&target.signals).is_some()
+        if result.label_fp.is_some()
+            && result.label_fp != self.label_ask(&key.account).map(|ask| ask.fingerprint)
         {
             return None;
         }
+        let risky = result.verdict.is_some_and(|v| v.level >= Level::Warning)
+            || crate::ui::triage::local_caution(&target.signals).is_some();
         let probs = result.labels.as_ref()?;
         let names = prompt::candidate_labels(self.labels.get(&key.account)?);
         let applied = match self.threads.get(key) {
             Some(s) => &s.label_ids,
             None => &detail.label_ids,
         };
-        Some(select_suggestions(probs, &names, applied))
+        let required =
+            required_group_suggestion(probs, &names, applied, &self.prefs.ai.required_label_group);
+        let mut suggestions = if risky {
+            Vec::new()
+        } else {
+            select_suggestions(probs, &names, applied)
+        };
+        if let Some(required) = required {
+            // Keep other qualifying labels; add the required group's best child if absent.
+            suggestions.retain(|s| {
+                !s.name
+                    .eq_ignore_ascii_case(self.prefs.ai.required_label_group.trim())
+            });
+            if !suggestions.iter().any(|s| s.id == required.id) {
+                suggestions.insert(0, required);
+            }
+        }
+        Some(suggestions)
     }
 
     /// Applies the open thread's `n`th suggestion (0-based) to that thread only, through the
@@ -2139,8 +2230,38 @@ impl Store {
 
     /// Applies one AI worker event (SPEC 16.10).
     pub fn apply_ai(&mut self, ev: AiEvent) {
+        match &ev {
+            AiEvent::Key(state) => crate::ai::debug(format_args!(
+                "key state: {}",
+                crate::ai::key_state_name(state)
+            )),
+            AiEvent::Checking { .. } => crate::ai::debug(format_args!("check started")),
+            AiEvent::Checked { outcome, .. } => crate::ai::debug(format_args!(
+                "check completed: verdict_level={:?}, labels={}",
+                outcome.verdict.map(|v| v.level),
+                outcome.labels.is_some()
+            )),
+            AiEvent::Failed { retryable, .. } => {
+                crate::ai::debug(format_args!("check failed: retryable={retryable}"))
+            }
+            AiEvent::Dropped { .. } => crate::ai::debug(format_args!("check dropped")),
+            AiEvent::Paused(reason) => crate::ai::debug(format_args!(
+                "pause state: {}",
+                if reason.is_some() {
+                    "paused"
+                } else {
+                    "resumed"
+                }
+            )),
+            AiEvent::TestResult(result) => crate::ai::debug(format_args!(
+                "key test: {}",
+                if result.is_ok() { "passed" } else { "failed" }
+            )),
+            AiEvent::Usage { .. } => {}
+        }
         match ev {
             AiEvent::Key(k) => {
+                let was_ready = self.ai_ready();
                 if !matches!(k, KeyState::Saved { .. }) {
                     self.ai.checking.clear();
                 }
@@ -2149,6 +2270,12 @@ impl Store {
                 }
                 self.ai.key = k;
                 self.ai.ai_rev += 1;
+                if !was_ready
+                    && self.ai_ready()
+                    && let Some(key) = self.open.clone()
+                {
+                    self.check_open(&key);
+                }
             }
             AiEvent::Checking { thread, message_id } => {
                 self.ai
@@ -2167,6 +2294,9 @@ impl Store {
                     return;
                 }
                 self.ai.failed.remove(&id);
+                if let Some((_, scores)) = &outcome.labels {
+                    self.debug_label_scores(&thread.account, scores);
+                }
                 let unlabelled = outcome.labels.is_none();
                 let (labels, label_fp) = match outcome.labels {
                     Some((fp, probs)) => (Some(probs), fp),
@@ -2184,7 +2314,10 @@ impl Store {
                 self.ai.bump(&thread);
                 // A background check that was queued or in flight when the thread opened
                 // answered without labels: ask them now rather than on the next open.
-                if unlabelled {
+                if unlabelled
+                    || label_fp.is_some()
+                        && label_fp != self.label_ask(&thread.account).map(|ask| ask.fingerprint)
+                {
                     self.check_open(&thread);
                 }
             }
@@ -2210,11 +2343,18 @@ impl Store {
                 self.ai.bump(&thread);
             }
             AiEvent::Paused(reason) => {
+                let was_ready = self.ai_ready();
                 if reason.is_some() {
                     self.ai.checking.clear();
                 }
                 self.ai.paused = reason;
                 self.ai.ai_rev += 1;
+                if !was_ready
+                    && self.ai_ready()
+                    && let Some(key) = self.open.clone()
+                {
+                    self.check_open(&key);
+                }
             }
             AiEvent::Usage {
                 checks,
@@ -3512,6 +3652,7 @@ mod tests {
                 label("CATEGORY_SOCIAL", LabelKind::System, 4, 4),
                 user("Label_3", "Projects/Website", 0),
                 user("Label_2", "Projects", 0),
+                user("Label_5", "Projects-old", 0),
                 user("Label_1", "Receipts", 1),
                 user("Label_4", "Orphan/Child", 0),
                 hidden,
@@ -3536,6 +3677,7 @@ mod tests {
                 ("Orphan/Child", 0, None),
                 ("Projects", 0, None),
                 ("Website", 1, None),
+                ("Projects-old", 0, None),
                 ("Receipts", 0, Some(1)),
             ]
         );
@@ -3725,6 +3867,34 @@ mod tests {
             });
         }
 
+        #[test]
+        fn guidance_change_rechecks_and_discards_inflight_old_suggestions() {
+            let (mut r, detail) = labelled("p-ai-phish");
+            let old = r.checks().pop().unwrap();
+            let old_fp = old.labels.unwrap().fingerprint;
+            let id = r.s.ai_target(&detail).unwrap().id.clone();
+            r.s.apply_ai(AiEvent::Checking {
+                thread: detail.key.clone(),
+                message_id: id.clone(),
+            });
+            r.s.change_prefs(|p| p.ai.label_guidance = "TTL/M3: retain three months".into());
+            assert!(r.checks().is_empty());
+            r.s.apply_ai(AiEvent::Checked {
+                thread: detail.key.clone(),
+                message_id: id,
+                outcome: Outcome {
+                    verdict: Some(verdict_from(0.0, 0.0, 0.0, &THRESHOLDS)),
+                    labels: Some((Some(old_fp), vec![])),
+                },
+            });
+            let checks = r.checks();
+            assert_eq!(checks.len(), 1);
+            let ask = checks[0].labels.as_ref().unwrap();
+            assert_ne!(ask.fingerprint, old_fp);
+            assert_eq!(ask.guidance, "TTL/M3: retain three months");
+            assert!(r.s.suggestions(&detail.key).is_empty());
+        }
+
         fn names(s: &Store, key: &ThreadKey) -> Vec<String> {
             s.suggestions(key).into_iter().map(|s| s.name).collect()
         }
@@ -3912,6 +4082,45 @@ mod tests {
         }
 
         #[test]
+        fn required_group_reserves_low_score_suggestion_even_for_risky_message() {
+            let (mut r, d) = labelled("p-ai-phish");
+            let mut ttl = r.s.labels[PERSONAL][0].clone();
+            ttl.id = "ttl_m3".into();
+            ttl.name = "TTL/M3".into();
+            ttl.kind = LabelKind::User;
+            ttl.hidden = false;
+            let mut y5 = ttl.clone();
+            y5.id = "ttl_y5".into();
+            y5.name = "TTL/Y5".into();
+            r.s.labels.get_mut(PERSONAL).unwrap().extend([ttl, y5]);
+            r.checks();
+            r.s.change_prefs(|p| p.ai.required_label_group = "TTL".into());
+            let ask = r.checks().pop().unwrap().labels.unwrap();
+            let target = r.s.ai_target(&d).unwrap().id.clone();
+            r.s.apply_ai(AiEvent::Checked {
+                thread: d.key.clone(),
+                message_id: target,
+                outcome: Outcome {
+                    verdict: Some(verdict_from(0.97, 0.0, 0.0, &THRESHOLDS)),
+                    labels: Some((
+                        Some(ask.fingerprint),
+                        vec![("ttl_m3".into(), 0.2), ("ttl_y5".into(), 0.4)],
+                    )),
+                },
+            });
+            let suggestions = r.s.suggestions(&d.key);
+            assert_eq!(suggestions.len(), 1);
+            assert_eq!(suggestions[0].id, "ttl_y5");
+            assert_eq!(suggestions[0].p, 0.4);
+            r.s.threads
+                .get_mut(&d.key)
+                .unwrap()
+                .label_ids
+                .insert("ttl_m3".into());
+            assert!(r.s.suggestions(&d.key).is_empty());
+        }
+
+        #[test]
         fn danger_message_has_no_suggestions() {
             let (mut r, d) = labelled("p-ai-phish");
             checked_labels(
@@ -4005,6 +4214,16 @@ mod tests {
                 Some(&DISCLOSURE_VERSION)
             );
             assert!(r.s.ai_opted_in(PERSONAL));
+            assert_eq!(r.checks().len(), 1, "consent checks the open message");
+        }
+
+        #[test]
+        fn ai_saved_key_checks_message_opened_before_keyring_load() {
+            let mut r = rig(Mode::Google, prefs(&[PERSONAL], false));
+            r.open("p-ai-phish");
+            assert!(r.checks().is_empty());
+            r.s.apply_ai(AiEvent::Key(KeyState::Saved { hint: "h".into() }));
+            assert_eq!(r.checks().len(), 1);
         }
 
         #[test]
@@ -4244,7 +4463,6 @@ mod tests {
             r.open("p-ai-scam");
             assert!(r.checks().is_empty());
             r.s.apply_ai(AiEvent::Paused(None));
-            r.s.open_thread(d.key.clone());
             assert_eq!(r.checks().len(), 1);
         }
 

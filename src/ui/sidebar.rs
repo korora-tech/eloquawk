@@ -67,10 +67,7 @@ impl MainView {
         account: &str,
         cx: &Context<Self>,
     ) -> Div {
-        // The active account is always expanded (SPEC 8.2), so its selected label stays in
-        // sight whatever `collapsed_accounts` remembers; its header does not collapse it.
-        let active = store.view.as_ref().is_some_and(|v| v.account == account);
-        let collapsed = !active && store.prefs.collapsed_accounts.contains(account);
+        let collapsed = store.prefs.collapsed_accounts.contains(account);
         let toggle_account = account.to_string();
         let inbox_unread = store.unread_badge(account, labels::INBOX);
         let header = div()
@@ -89,9 +86,6 @@ impl MainView {
             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                 let account = toggle_account.clone();
                 this.store.update(cx, |s, cx| {
-                    if s.view.as_ref().is_some_and(|v| v.account == account) {
-                        return;
-                    }
                     if !s.prefs.collapsed_accounts.remove(&account) {
                         s.prefs.collapsed_accounts.insert(account);
                     }
@@ -124,7 +118,28 @@ impl MainView {
         if collapsed {
             return section;
         }
-        for (li, entry) in store.labels_for(account).into_iter().enumerate() {
+        let entries = store.labels_for(account);
+        let mut hidden_below = None;
+        for (li, entry) in entries.iter().enumerate() {
+            if let Some(depth) = hidden_below {
+                if entry.depth > depth {
+                    continue;
+                }
+                hidden_below = None;
+            }
+            let has_children = entries
+                .get(li + 1)
+                .is_some_and(|next| next.depth > entry.depth);
+            let label_key = match &entry.view {
+                ViewKind::Label(id) if has_children => Some((account.to_string(), id.clone())),
+                _ => None,
+            };
+            let label_collapsed = label_key
+                .as_ref()
+                .is_some_and(|key| store.prefs.collapsed_labels.contains(key));
+            if label_collapsed {
+                hidden_below = Some(entry.depth);
+            }
             let view = ViewKey {
                 account: account.to_string(),
                 kind: entry.view.clone(),
@@ -142,7 +157,7 @@ impl MainView {
                 .flex()
                 .items_center()
                 .gap(px(8.0))
-                .pl(px(24.0 + 14.0 * entry.depth as f32))
+                .pl(px(8.0 + 14.0 * entry.depth as f32))
                 .pr(px(8.0))
                 .rounded(px(6.0))
                 .cursor_pointer()
@@ -156,6 +171,27 @@ impl MainView {
                     });
                     this.focus_mail(window, cx);
                 }))
+                .child(match label_key {
+                    Some(key) => div()
+                        .id(SharedString::from(format!("label-toggle-{ai}-{li}")))
+                        .w(px(16.0))
+                        .flex_shrink_0()
+                        .text_color(rgb(p.muted))
+                        .child(if label_collapsed { "›" } else { "⌄" })
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            cx.stop_propagation();
+                            let key = key.clone();
+                            this.store.update(cx, |s, cx| {
+                                if !s.prefs.collapsed_labels.remove(&key) {
+                                    s.prefs.collapsed_labels.insert(key);
+                                }
+                                s.prefs.save();
+                                cx.notify();
+                            });
+                        }))
+                        .into_any_element(),
+                    None => div().w(px(16.0)).flex_shrink_0().into_any_element(),
+                })
                 .when_some(dot, |d, color| {
                     d.child(
                         div()

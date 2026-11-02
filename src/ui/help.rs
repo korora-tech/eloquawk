@@ -135,6 +135,12 @@ pub const SHORTCUTS: &[Shortcut] = &[
     ),
     row(&["ctrl-q"], "Quit", "Compose", "Quit"),
     row(&["escape"], "CloseSettings", "Settings", "Close Settings"),
+    row(
+        &["ctrl-k"],
+        "OpenCommandPalette",
+        "Eloquawk",
+        "Command palette",
+    ),
     row(&["ctrl-r"], "Refresh", "Eloquawk", "Refresh"),
     row(&["ctrl-,"], "OpenSettings", "Eloquawk", "Settings"),
     row(&["ctrl-n"], "Compose", "Eloquawk", "Compose"),

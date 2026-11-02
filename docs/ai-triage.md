@@ -104,7 +104,7 @@ one opened. Background checks are capped at 60 per account per hour.
 - **Couldn't check this message · Retry** after a failure, or **Paused: …** while checks are
   paused (a rejected key, no credit, a budget limit, the spend limit).
 
-- **Suggested labels** under the subject: up to three chips, each with its key (`1`, `2`,
+- **Suggested labels** under the subject: chips, with keys on the first three (`1`, `2`,
   `3`), the label's colour and its name. See below.
 
 Thresholds (initial, to be calibrated on a labelled sample, SPEC section 15 item 15): phishing
@@ -117,17 +117,22 @@ message under each of your labels ("Would the recipient file this email under th
 "Receipts"?"). Labels can overlap, so each is a separate yes/no question rather than one
 choice.
 
-- A label is suggested from a score of 0.70, at most three, highest first. When a label and
+- All labels scoring above 0.60 are suggested, highest first. If none do, all labels tied
+  for the highest score are offered as best guesses. When a label and
   one of its nested labels both qualify ("Projects" and "Projects/Eloquawk"), only the nested
   one is shown. Labels already on the conversation are not suggested.
 - Click a chip, or press `1`, `2` or `3`, to add that label to the **open conversation only**
   (never to a selection). It is the same change as the label picker's: the toast reads
   "Added “Receipts” to 1 conversation" and `z` undoes it. ✕ hides the row for the session.
-- **No suggestions on risky mail.** When the banner says Warning or Danger, or the local
-  caution shows, there is no row and `1`/`2`/`3` do nothing: a sender can word a message to
-  steer the label scores, and one key press must not file a scam among real bills.
+- By default, risky mail gets no suggestions. An optional required label group can offer its
+  best-scoring child even on risky mail; message text can influence that suggestion, so review
+  it before applying it.
 - The digits do nothing while you type in a field, so `1` in the search box is just "1".
-- Up to 100 labels are asked, by how many conversations they hold. A very long message on an
+- Set **Always suggest from label group** to a parent such as `TTL` to reserve a suggestion
+  for the highest-scoring child, even when its score is 0.60 or lower. Low scores are marked “best guess”. A child
+  already on the conversation satisfies the requirement. A suggestion still depends on a
+  successful check and available scores, and is not applied automatically.
+- Up to 100 labels are asked, with required-group children first, then by how many conversations they hold. A very long message on an
   account with many labels may take a second request (labels only, same redacted extract), and
   at most two; labels that fit in neither are skipped for that message.
 - Renaming, adding, deleting or hiding a label makes the next open of an already-checked
@@ -158,8 +163,10 @@ the local caution.
 
 ## Logs
 
-The AI code logs only the HTTP status, OpenRouter's error code, its `metadata.reason` /
-`limit_source`, and the kind of network error, as `eloquawk: jev: …`. It never logs the key,
+The AI code normally logs the HTTP status, OpenRouter's error code, its `metadata.reason` /
+`limit_source`, and the kind of network error, as `eloquawk: jev: …`. Set
+`ELOQUAWK_JEV_DEBUG=1` before launching to also log check decisions, key state and label
+names and scores, including cached scores. Label names may be sensitive. It does not log the key,
 a request or response body, OpenRouter's error message, a subject, an address or a host.
 
 ## Live check (2026-11-02)
@@ -188,7 +195,7 @@ What this shows:
   against 0.99 for the plain fake PayPal message. This is one sample, not the with-and-without
   measurement of SPEC section 15 item 27, and the local caution stays the primary guard.
 - **Label suggestions** picked the obvious label for the receipt and the flight and nothing
-  for the risky messages, all clear of the 0.70 cut-off.
+  for the risky messages, all clear of the original 0.70 cut-off.
 - **A prize offer reads as a scam to Jev**, not as spam. It shows a danger banner rather than
   the spam badge. That is defensible for a "you have been selected" message, but it is one
   example, not a reason to change the thresholds.

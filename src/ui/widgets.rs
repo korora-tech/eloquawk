@@ -2,9 +2,11 @@
 //! an `on_click`.
 
 use gpui::prelude::*;
+use std::sync::Arc;
+
 use gpui::{
-    App, ClickEvent, Div, ElementId, FontWeight, Hsla, SharedString, Stateful, Window, div, px,
-    rgb, transparent_black,
+    App, ClickEvent, Div, ElementId, FontWeight, Hsla, Image, ImageFormat, Render, SharedString,
+    Stateful, Window, div, img, px, rgb, transparent_black,
 };
 
 use super::theme::{Palette, tint};
@@ -15,8 +17,6 @@ pub type OnClick = Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
 pub enum ButtonStyle {
     Primary,
     Secondary,
-    /// Outlined, transparent: the reader's action bar.
-    Toolbar,
 }
 
 /// A button. `on_click: None` renders it disabled.
@@ -29,11 +29,9 @@ pub fn button(
 ) -> Stateful<Div> {
     let enabled = on_click.is_some();
     let (bg, fg, border): (Hsla, u32, u32) = match (style, enabled) {
-        (ButtonStyle::Toolbar, false) => (transparent_black(), p.disabled, p.border),
         (_, false) => (rgb(p.panel).into(), p.disabled, p.border),
         (ButtonStyle::Primary, true) => (rgb(p.accent).into(), p.on_accent, p.accent),
         (ButtonStyle::Secondary, true) => (rgb(p.panel_raised).into(), p.text, p.input_border),
-        (ButtonStyle::Toolbar, true) => (transparent_black(), p.secondary, p.border),
     };
     let el = div()
         .id(id)
@@ -62,6 +60,61 @@ pub fn button(
             .hover(move |s| s.bg(rgb(hover)).text_color(rgb(text)).cursor_pointer())
             .on_click(handler),
         None => el,
+    }
+}
+
+/// An icon action with a tooltip naming its function.
+pub fn icon_button(
+    p: &Palette,
+    id: impl Into<ElementId>,
+    label: &'static str,
+    icon: &'static str,
+    on_click: Option<OnClick>,
+) -> Stateful<Div> {
+    let color = if on_click.is_some() {
+        p.secondary
+    } else {
+        p.disabled
+    };
+    let icon = icon.replace("currentColor", &format!("#{color:06x}"));
+    let svg = format!(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#{color:06x}" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">{icon}</svg>"##
+    );
+    let image = Arc::new(Image::from_bytes(ImageFormat::Svg, svg.into_bytes()));
+    let tip: SharedString = label.into();
+    let el = div()
+        .id(id)
+        .size(px(32.0))
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_md()
+        .tooltip(move |_, cx: &mut App| cx.new(|_| IconTip(tip.clone())).into())
+        .child(img(image).size(px(18.0)));
+    let hover = p.hover;
+    match on_click {
+        Some(handler) => el
+            .hover(move |s| s.bg(rgb(hover)).cursor_pointer())
+            .on_click(handler),
+        None => el,
+    }
+}
+
+struct IconTip(SharedString);
+impl Render for IconTip {
+    fn render(&mut self, _: &mut Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
+        let p = super::theme::palette(cx);
+        div()
+            .rounded_md()
+            .border_1()
+            .border_color(rgb(p.border))
+            .bg(rgb(p.panel_raised))
+            .px(px(8.0))
+            .py(px(4.0))
+            .text_size(px(11.5))
+            .text_color(rgb(p.text))
+            .child(self.0.clone())
     }
 }
 

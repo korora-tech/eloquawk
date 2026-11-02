@@ -27,6 +27,30 @@ use jev::Verdict;
 use openrouter::{AiEndpoints, ApiKey};
 use prompt::AiInput;
 
+/// Whether opt-in Jev diagnostics are enabled.
+pub fn debug_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("ELOQUAWK_JEV_DEBUG").as_deref() == Ok("1"))
+}
+
+/// Diagnostics include label names and scores, but no message contents or credentials.
+pub fn debug(args: fmt::Arguments<'_>) {
+    if debug_enabled() {
+        eprintln!("eloquawk: jev: debug: {args}");
+    }
+}
+
+pub fn key_state_name(state: &KeyState) -> &'static str {
+    match state {
+        KeyState::Unknown => "unknown",
+        KeyState::Missing => "missing",
+        KeyState::Saved { .. } => "saved",
+        KeyState::Locked => "locked",
+        KeyState::Rejected { .. } => "rejected",
+        KeyState::Demo => "demo",
+    }
+}
+
 /// The pinned model; its thresholds are tuned for this version (SPEC 16.1).
 pub const JEV_MODEL: &str = "typesafe/jev-1.13";
 /// The disclosure text's version. Any change to what is sent bumps it, which turns every
@@ -54,6 +78,7 @@ pub struct LabelCandidate {
 #[derive(Clone, PartialEq)]
 pub struct LabelAsk {
     pub fingerprint: u64,
+    pub guidance: String,
     pub candidates: Vec<LabelCandidate>,
 }
 

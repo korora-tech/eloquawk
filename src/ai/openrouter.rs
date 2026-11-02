@@ -153,6 +153,21 @@ pub enum AiError {
 }
 
 impl AiError {
+    /// A fixed diagnostic category; excludes server-provided strings.
+    pub fn kind_name(&self) -> &'static str {
+        match self {
+            Self::Decode => "decode",
+            Self::Invalid => "invalid",
+            Self::KeyRejected => "key_rejected",
+            Self::Busy { .. } => "busy",
+            Self::Credits => "credits",
+            Self::Forbidden(_) => "forbidden",
+            Self::Flagged => "flagged",
+            Self::Unavailable => "unavailable",
+            Self::TooLarge => "too_large",
+            Self::Network(_) => "network",
+        }
+    }
     /// The text the reader and Settings show (SPEC 16.14).
     pub fn user_text(&self) -> String {
         match self {
