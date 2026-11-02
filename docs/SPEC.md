@@ -3012,7 +3012,9 @@ pub enum Kind { Phishing, Scam, Spam }                 // what drives `level`
 | `spam` | `Level::Spam` at ≥ 0.85 | — |
 
 - The level is the highest one reached.
-- When phishing and scam reach the same level, `Kind::Phishing` wins.
+- When phishing and scam reach the same level, the higher score names the kind, and an exact
+  tie goes to `Kind::Phishing`. (Changed after the live run of 2026-11-02: an inheritance scam
+  scored phishing 0.97 and scam 0.99, and the scam advice fits it better.)
 - Spam only produces `Level::Spam`. Spam is a nuisance, not a danger, and the bar is higher
   because a false "spam" on wanted mail is the most visible mistake.
 - The thresholds are `const THRESHOLDS: Thresholds` in `jev.rs`. They are **initial values**,

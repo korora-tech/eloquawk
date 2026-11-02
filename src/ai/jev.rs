@@ -210,7 +210,8 @@ pub const THRESHOLDS: Thresholds = Thresholds {
 };
 
 /// Maps the three scores to a verdict (SPEC 16.7): phishing and scam give Warning or Danger,
-/// phishing wins a tie, and spam alone never goes above `Level::Spam`.
+/// the higher score names the kind when both reach the same level (phishing on an exact tie),
+/// and spam alone never goes above `Level::Spam`.
 pub fn verdict_from(p_phishing: f32, p_scam: f32, p_spam: f32, t: &Thresholds) -> Verdict {
     let level_of = |p: f32| {
         if p >= t.danger {
@@ -222,7 +223,8 @@ pub fn verdict_from(p_phishing: f32, p_scam: f32, p_spam: f32, t: &Thresholds) -
         }
     };
     let (phish, scam) = (level_of(p_phishing), level_of(p_scam));
-    let (level, kind) = if phish >= scam && phish > Level::None {
+    let phish_leads = phish > scam || (phish == scam && p_phishing >= p_scam);
+    let (level, kind) = if phish_leads && phish > Level::None {
         (phish, Kind::Phishing)
     } else if scam > Level::None {
         (scam, Kind::Scam)
@@ -374,9 +376,14 @@ mod tests {
         assert_eq!(level(0.0, 0.0, 0.84).0, Level::None);
         assert_eq!(level(0.0, 0.0, 0.85), (Level::Spam, Kind::Spam));
         assert_eq!(level(0.0, 0.0, 1.0), (Level::Spam, Kind::Spam));
-        // A tie goes to phishing; the higher level wins otherwise.
+        // The higher level wins; at the same level the higher score names it, and an exact
+        // tie goes to phishing. The live inheritance scam scored phishing 0.97, scam 0.99.
         assert_eq!(level(0.9, 0.9, 0.0), (Level::Danger, Kind::Phishing));
         assert_eq!(level(0.6, 0.6, 0.0), (Level::Warning, Kind::Phishing));
+        assert_eq!(level(0.97, 0.99, 0.0), (Level::Danger, Kind::Scam));
+        assert_eq!(level(0.99, 0.97, 0.0), (Level::Danger, Kind::Phishing));
+        assert_eq!(level(0.55, 0.7, 0.0), (Level::Warning, Kind::Scam));
+        assert_eq!(level(0.85, 0.7, 0.0), (Level::Danger, Kind::Phishing));
         assert_eq!(level(0.6, 0.9, 0.0), (Level::Danger, Kind::Scam));
         // Spam never outranks a warning.
         assert_eq!(level(0.55, 0.0, 0.99), (Level::Warning, Kind::Phishing));
