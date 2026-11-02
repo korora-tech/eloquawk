@@ -1276,11 +1276,13 @@ mod tests {
         }
         wait_requests(&server, 1);
         h.send(AiCommand::ClearKey);
-        let evs = wait_for(&rx, |e| matches!(e, AiEvent::Key(KeyState::Missing)));
+        let mut evs = wait_for(&rx, |e| matches!(e, AiEvent::Key(KeyState::Missing)));
+        // A ClearKey read while A1 is in flight drops A1 only once its request returns, after
+        // the Key event, so keep listening.
+        evs.extend(settle(&rx, Duration::from_millis(1500)));
         for s in ["A1", "A2", "B1"] {
             assert!(evs.iter().any(|e| is_dropped(e, s)), "{s}: {evs:?}");
         }
-        settle(&rx, Duration::from_millis(1500));
         assert_eq!(server.requests().len(), 1);
         h.send(AiCommand::Shutdown);
     }
