@@ -98,10 +98,11 @@ fi
 
 # Give the compositor a frame to present the last render.
 sleep 0.3
-id=$(niri msg -j windows | jq -r --arg t "$title" \
-    '.[] | select(.app_id=="korora.tech.Eloquawk" and .title==$t) | .id' | head -1)
+# Matched by pid as well: a running Eloquawk with real mail can share the demo's title.
+id=$(niri msg -j windows | jq -r --arg t "$title" --argjson p "$pid" \
+    '.[] | select(.app_id=="korora.tech.Eloquawk" and .title==$t and .pid==$p) | .id' | head -1)
 if [[ -z "$id" ]]; then
-    echo "screenshot: no niri window titled \"$title\"" >&2
+    echo "screenshot: no niri window titled \"$title\" for pid $pid" >&2
     exit 1
 fi
 niri msg action screenshot-window --id "$id" --path "$shot" --write-to-disk true >/dev/null
