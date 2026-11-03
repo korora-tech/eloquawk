@@ -126,7 +126,7 @@ pub fn classify(status: u16, retry_after: Option<&str>, body: &str, now: Timesta
     match status {
         300..=399 | 404 => AiError::Unavailable,
         401 => AiError::KeyRejected,
-        400 if env.has_code(&AUTH_CODES) => AiError::KeyRejected,
+        400 | 403 if env.has_code(&AUTH_CODES) => AiError::KeyRejected,
         403 => AiError::Forbidden(env.codes()),
         413 => AiError::TooLarge,
         429 if env.allocation_spent() => AiError::Credits,
@@ -261,7 +261,11 @@ mod tests {
             c(400, r#"{"errors":[{"code":5006,"message":"m"}]}"#),
             AiError::Invalid
         );
-        assert_eq!(c(403, auth), AiError::Forbidden("10000".into()));
+        assert_eq!(c(403, auth), AiError::KeyRejected);
+        assert_eq!(
+            c(403, r#"{"errors":[{"code":7003,"message":"m"}]}"#),
+            AiError::Forbidden("7003".into())
+        );
         assert_eq!(c(404, "{}"), AiError::Unavailable);
         assert_eq!(c(302, ""), AiError::Unavailable);
         assert_eq!(c(413, ""), AiError::TooLarge);
