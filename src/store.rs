@@ -2348,6 +2348,10 @@ impl Store {
             } => {
                 let id = (thread.account.clone(), message_id);
                 self.ai.checking.remove(&id);
+                // A failure sent before an opt-out or checker switch shows nothing.
+                if !self.ai_opted_in(&thread.account) {
+                    return;
+                }
                 // A failed labels-only re-ask leaves the stored verdict standing: no failure
                 // caption, and the labels are asked again on the next open.
                 if !self.ai.results.contains_key(&id) {
