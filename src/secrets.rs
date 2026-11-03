@@ -22,6 +22,8 @@ pub(crate) const CLIENT_USER: &str = "google-oauth-client";
 pub(crate) const TOKENS_USER: &str = "google-refresh-tokens";
 /// The OpenRouter API key for the AI message checks (SPEC 16.4).
 pub(crate) const OPENROUTER_USER: &str = "openrouter-api-key";
+/// The key that encrypts the on-disk summary cache (SPEC 7.7), base64.
+pub(crate) const CACHE_KEY_USER: &str = "mail-cache-key";
 
 /// Failure to read or update a stored credential.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -152,6 +154,23 @@ impl Secrets {
         self.store.delete(OPENROUTER_USER)
     }
 
+    /// The cache key, made and saved on first use. An unreadable one is replaced, which only
+    /// makes the old cache files unreadable (they are then discarded).
+    pub fn cache_key(&self) -> Result<[u8; 32], SecretError> {
+        use base64::Engine as _;
+        let engine = base64::engine::general_purpose::STANDARD;
+        if let Some(raw) = self.store.get(CACHE_KEY_USER)?
+            && let Ok(bytes) = engine.decode(raw.trim())
+            && let Ok(key) = <[u8; 32]>::try_from(bytes)
+        {
+            return Ok(key);
+        }
+        let mut key = [0u8; 32];
+        getrandom::fill(&mut key).map_err(|e| SecretError::Unavailable(e.to_string()))?;
+        self.store.set(CACHE_KEY_USER, &engine.encode(key))?;
+        Ok(key)
+    }
+
     /// Loads OAuth client credentials, returning `None` if no client has been saved.
     ///
     /// Returns [`SecretError::Corrupt`] if a stored entry cannot be decoded.
@@ -260,6 +279,7 @@ fn entry(user: &str) -> Result<keyring_core::Entry, SecretError> {
         CLIENT_USER => "Eloquawk: OAuth client",
         TOKENS_USER => "Eloquawk: Google accounts",
         OPENROUTER_USER => "Eloquawk: OpenRouter API key",
+        CACHE_KEY_USER => "Eloquawk: mail cache key",
         _ => "Eloquawk",
     };
     keyring_core::Entry::new_with_modifiers(SERVICE, user, &HashMap::from([("label", label)]))

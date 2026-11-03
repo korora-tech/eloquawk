@@ -34,6 +34,7 @@ use std::time::{Duration, Instant};
 
 use jiff::Timestamp;
 
+use crate::cache::{CachedThread, MailCache, Snapshot};
 use crate::config::Prefs;
 use crate::google::api::{self, ApiError, Endpoints};
 use crate::google::gmail;
@@ -115,17 +116,20 @@ pub fn start_google(
         oauth::builtin_client(),
         Tuning::new(prefs.refresh_secs, prefs.page_size),
         None,
+        MailCache::default_dir(),
     )
 }
 
 /// Starts the worker against `endpoints` with `builtin` as the fallback client, saving
-/// attachments to `downloads` (the user's download folder when `None`).
+/// attachments to `downloads` (the user's download folder when `None`) and the summary cache
+/// to `cache_dir` (no cache when `None`).
 fn start_with(
     secrets: Secrets,
     endpoints: Endpoints,
     builtin: Option<ClientCredentials>,
     tuning: Tuning,
     downloads: Option<PathBuf>,
+    cache_dir: Option<PathBuf>,
 ) -> std::io::Result<(SyncHandle, async_channel::Receiver<SyncEvent>)> {
     let (tx, rx) = mpsc::channel();
     let (etx, erx) = async_channel::unbounded();
@@ -135,6 +139,7 @@ fn start_with(
         .spawn(move || {
             let mut worker = Worker::new(secrets, etx, self_tx, endpoints, builtin, tuning);
             worker.downloads = downloads;
+            worker.cache_dir = cache_dir;
             worker.run(rx)
         })?;
     Ok((SyncHandle::from_sender(tx), erx))
@@ -684,6 +689,10 @@ struct AccountState {
     backoff: Backoff,
     /// The last labels and counts, so a full list keeps the counts while new ones load.
     labels: BTreeMap<String, Label>,
+    /// Page 1 of each label view listed, as the summary cache keeps it (SPEC 7.7).
+    listed: HashMap<ViewKind, Vec<String>>,
+    /// Something the summary cache holds changed since it was last written.
+    dirty: bool,
 }
 
 impl AccountState {
@@ -703,7 +712,59 @@ impl AccountState {
             deferred: Vec::new(),
             backoff: Backoff::default(),
             labels: BTreeMap::new(),
+            listed: HashMap::new(),
+            dirty: false,
         }
+    }
+
+    /// What the summary cache keeps: the labels, page 1 of each listed label view and the
+    /// summaries those pages show.
+    fn snapshot(&self) -> Snapshot {
+        let mut seen = HashSet::new();
+        let threads = self
+            .listed
+            .values()
+            .flatten()
+            .filter(|id| seen.insert(id.as_str()))
+            .filter_map(|id| self.known.get(id))
+            .map(|k| CachedThread {
+                star_target: k.star_target.clone(),
+                summary: k.summary.clone(),
+            })
+            .collect();
+        Snapshot {
+            labels: self.labels.values().cloned().collect(),
+            views: self
+                .listed
+                .iter()
+                .map(|(k, ids)| (k.clone(), ids.clone()))
+                .collect(),
+            threads,
+        }
+    }
+
+    /// Takes a cache snapshot in, unless this session already has newer data.
+    fn restore(&mut self, snapshot: Snapshot) -> bool {
+        if !self.known.is_empty() || !self.labels.is_empty() {
+            return false;
+        }
+        for t in snapshot.threads {
+            self.known.insert(
+                t.summary.key.id.clone(),
+                Known {
+                    history_id: t.summary.history_id,
+                    star_target: t.star_target,
+                    summary: t.summary,
+                },
+            );
+        }
+        self.labels = snapshot
+            .labels
+            .into_iter()
+            .map(|l| (l.id.clone(), l))
+            .collect();
+        self.listed = snapshot.views.into_iter().collect();
+        true
     }
 
     /// Parks a background job until the backoff passes.
@@ -776,6 +837,7 @@ impl AccountState {
         self.known.remove(id);
         self.missing.remove(id);
         self.refused.remove(id);
+        self.dirty = true;
     }
 
     /// SPEC 7.4 step 7, once every changed thread is refetched: the candidates still unread
@@ -804,6 +866,8 @@ impl AccountState {
         self.round_labels.clear();
         self.missing.clear();
         self.refused.clear();
+        self.listed.clear();
+        self.dirty = true;
         self.deferred
             .retain(|j| !matches!(j, Job::FetchMeta(..) | Job::Refetch(_) | Job::History(_)));
     }
@@ -849,6 +913,12 @@ struct Worker {
     /// Where saved attachments go; `None` resolves the user's download folder on each save.
     /// Tests point it at a temporary folder.
     downloads: Option<PathBuf>,
+    /// Where the summary cache lives; `None` (tests, unless set) keeps no cache.
+    cache_dir: Option<PathBuf>,
+    /// Opened once the keyring yields its key.
+    cache: Option<MailCache>,
+    /// The key could not be had; not asked for again this run.
+    cache_failed: bool,
 }
 
 impl Worker {
@@ -882,6 +952,9 @@ impl Worker {
             next_poll: now + tuning.refresh,
             busy: false,
             downloads: None,
+            cache_dir: None,
+            cache: None,
+            cache_failed: false,
         }
     }
 
@@ -925,6 +998,7 @@ impl Worker {
             }
             self.tick(Instant::now());
         }
+        self.persist();
         self.cancel_sign_in();
     }
 
@@ -954,6 +1028,88 @@ impl Worker {
         if self.busy && self.queue.is_empty() {
             self.busy = false;
             self.emit(SyncEvent::Busy(false));
+        }
+        if self.queue.is_empty() {
+            self.persist();
+        }
+    }
+
+    // ----- summary cache (SPEC 7.7) ---------------------------------------------------------
+
+    /// Opens the cache once the keyring is readable. Its key is made on first use.
+    fn open_cache(&mut self) -> Option<&MailCache> {
+        if self.cache.is_none() && !self.cache_failed {
+            let dir = self.cache_dir.clone()?;
+            match self.secrets.cache_key() {
+                Ok(key) => self.cache = Some(MailCache::new(dir, &key)),
+                Err(e) => {
+                    eprintln!("eloquawk: keeping no summary cache: {e}");
+                    self.cache_failed = true;
+                }
+            }
+        }
+        self.cache.as_ref()
+    }
+
+    /// Shows what the cache holds for `email` straight away: its labels and the cached
+    /// pages. The listings that follow reuse the summaries whose history id still matches,
+    /// so only changed threads are fetched.
+    fn restore(&mut self, email: &str) {
+        let Some(snapshot) = self.open_cache().and_then(|c| c.load(email)) else {
+            return;
+        };
+        let Some(account) = self.accounts.get_mut(email) else {
+            return;
+        };
+        if !account.restore(snapshot) {
+            return;
+        }
+        let labels: Vec<Label> = account.labels.values().cloned().collect();
+        let mut pages = Vec::new();
+        for (kind, ids) in &account.listed {
+            let threads: Vec<ThreadSummary> = ids
+                .iter()
+                .filter_map(|id| account.known.get(id).map(|k| k.summary.clone()))
+                .collect();
+            let ids = threads.iter().map(|s| s.key.id.clone()).collect();
+            let view = ViewKey {
+                account: email.to_string(),
+                kind: kind.clone(),
+            };
+            pages.push((view, ids, threads));
+        }
+        if !labels.is_empty() {
+            self.emit(SyncEvent::Labels {
+                account: email.to_string(),
+                labels,
+            });
+        }
+        for (view, ids, threads) in pages {
+            // `Refresh` fills an empty list without ending its loading state, so the real
+            // listing still replaces it; `has_more` waits for that listing too.
+            self.emit(SyncEvent::ThreadPage {
+                view,
+                ids,
+                threads,
+                mode: PageMode::Refresh,
+                has_more: false,
+            });
+        }
+    }
+
+    /// Writes every changed account's snapshot.
+    fn persist(&mut self) {
+        if !self.accounts.values().any(|a| a.dirty) || self.open_cache().is_none() {
+            return;
+        }
+        let Some(cache) = &self.cache else {
+            return;
+        };
+        for (email, account) in self.accounts.iter_mut().filter(|(_, a)| a.dirty) {
+            account.dirty = false;
+            if let Err(e) = cache.save(email, &account.snapshot()) {
+                eprintln!("eloquawk: could not write the summary cache: {}", e.kind());
+            }
         }
     }
 
@@ -1247,6 +1403,7 @@ impl Worker {
         self.report();
         let emails: Vec<AccountId> = self.accounts.keys().cloned().collect();
         for email in emails {
+            self.restore(&email);
             self.queue.push(Job::InitialSync(email));
         }
     }
@@ -1521,6 +1678,11 @@ impl Worker {
             return false;
         };
         self.queue.forget(email);
+        if let Some(cache) = &self.cache
+            && let Err(e) = cache.remove(email)
+        {
+            eprintln!("eloquawk: could not delete the summary cache: {}", e.kind());
+        }
         if matches!(revoke, Revoke::WithGoogle)
             && !oauth::revoke(&self.agent, &self.endpoints.revoke, &account.refresh_token)
         {
@@ -1812,6 +1974,7 @@ impl Worker {
             })
             .collect();
         account.labels = labels.iter().map(|l| (l.id.clone(), l.clone())).collect();
+        account.dirty = true;
         let shown: Vec<String> = labels
             .iter()
             .filter(|l| shown(l))
@@ -1899,6 +2062,11 @@ impl Worker {
                 .pages
                 .insert(view.kind.clone(), page.next_page_token.clone());
         }
+        if !more && !matches!(view.kind, ViewKind::Search(_)) {
+            let ids = page.threads.iter().map(|r| r.id.clone()).collect();
+            account.listed.insert(view.kind.clone(), ids);
+            account.dirty = true;
+        }
         let mut ids = Vec::with_capacity(page.threads.len());
         let mut threads = Vec::new();
         let mut fetch = Vec::new();
@@ -1944,6 +2112,7 @@ impl Worker {
         let account = self.accounts.get_mut(email)?;
         account.missing.remove(&dto.id);
         account.refused.remove(&dto.id);
+        account.dirty = true;
         account.known.insert(
             dto.id.clone(),
             Known {
@@ -1996,6 +2165,7 @@ impl Worker {
                 account.missing.remove(id);
                 account.refused.remove(id);
                 account.known.remove(id);
+                account.dirty = true;
             }
         }
         if !updated.is_empty() {
@@ -2019,6 +2189,7 @@ impl Worker {
                     let label = parse::label(&email.to_string(), &dto);
                     if let Some(account) = self.accounts.get_mut(email) {
                         account.labels.insert(label.id.clone(), label.clone());
+                        account.dirty = true;
                     }
                     counted.push(label);
                 }
@@ -2619,7 +2790,8 @@ mod tests {
     #[test]
     fn no_client_at_all_needs_one_and_pasting_saves_it() {
         let secrets = Secrets::memory();
-        let (handle, rx) = start_with(secrets.clone(), nowhere(), None, fast(), None).unwrap();
+        let (handle, rx) =
+            start_with(secrets.clone(), nowhere(), None, fast(), None, None).unwrap();
         let events = until(&rx, |e| {
             matches!(e, SyncEvent::Auth(AuthState::NeedsClient))
         });
@@ -2662,8 +2834,15 @@ mod tests {
 
     #[test]
     fn builtin_client_starts_ready_without_accounts() {
-        let (handle, rx) =
-            start_with(Secrets::memory(), nowhere(), Some(client()), fast(), None).unwrap();
+        let (handle, rx) = start_with(
+            Secrets::memory(),
+            nowhere(),
+            Some(client()),
+            fast(),
+            None,
+            None,
+        )
+        .unwrap();
         let events = until(&rx, |e| matches!(e, SyncEvent::Auth(_)));
         assert!(matches!(events[0], SyncEvent::Client(None)));
         assert!(
@@ -3331,6 +3510,7 @@ mod tests {
             Some(client()),
             fast(),
             None,
+            None,
         )
         .unwrap();
 
@@ -3707,6 +3887,7 @@ mod tests {
             Some(client()),
             fast(),
             None,
+            None,
         )
         .unwrap();
         let events = until(&rx, |e| matches!(e, SyncEvent::Problem(Some(_))));
@@ -3737,6 +3918,7 @@ mod tests {
                 nowhere(),
                 builtin,
                 fast(),
+                None,
                 None,
             )
             .unwrap();
@@ -4337,6 +4519,7 @@ mod tests {
             Some(client()),
             fast(),
             Some(downloads.clone()),
+            None,
         )
         .unwrap();
         let me = || "me@example.com".to_string();
@@ -4714,5 +4897,130 @@ mod tests {
             SyncEvent::SendFinished { op: o, error } if *o == op => Some(error.clone()),
             _ => None,
         })
+    }
+
+    /// SPEC 7.7: a second launch shows the cached labels and inbox before any request, and
+    /// its listing reuses the cached summaries instead of fetching each thread again.
+    #[test]
+    fn a_relaunch_starts_from_the_summary_cache() {
+        let cache_dir =
+            std::env::temp_dir().join(format!("eloquawk-sync-cache-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&cache_dir);
+        let list = format!(
+            r#"{{"threads":[{{"id":"{A}","historyId":"123450"}},{{"id":"{B}","historyId":"123450"}}]}}"#
+        );
+        let labels: gmail::LabelList = serde_json::from_str(fixtures::LABELS).unwrap();
+        let script = |first: bool| {
+            let mut script = vec![
+                Reply::json(200, TOKEN).for_path("/token"),
+                Reply::json(200, fixtures::PROFILE).for_path("/gmail/profile"),
+                Reply::json(200, fixtures::HISTORY_EMPTY)
+                    .for_path("/gmail/history")
+                    .sticky(),
+                Reply::json(200, fixtures::LABELS).for_path("/gmail/labels"),
+                Reply::json(200, &list).for_path("/gmail/threads"),
+            ];
+            if first {
+                for id in [A, B] {
+                    script.push(
+                        Reply::json(200, &meta(id)).for_path(&format!("/gmail/threads/{id}")),
+                    );
+                }
+            }
+            for l in &labels.labels {
+                script.push(
+                    Reply::json(200, fixtures::LABEL_INBOX.replace("INBOX", &l.id).as_str())
+                        .for_path(&format!("/gmail/labels/{}", l.id))
+                        .sticky(),
+                );
+            }
+            script
+        };
+        // Secrets outlive both runs, as the keyring does, so the cache key is the same.
+        let secrets = Secrets::memory();
+        secrets.set_token("me@example.com", "rt").unwrap();
+        let run = |first: bool| {
+            let server = FakeServer::start(script(first));
+            let (handle, rx) = start_with(
+                secrets.clone(),
+                fake_endpoints(&server),
+                Some(client()),
+                fast(),
+                None,
+                Some(cache_dir.clone()),
+            )
+            .unwrap();
+            let mut events = until(&rx, |e| matches!(e, SyncEvent::Synced(_)));
+            events.extend(until(&rx, |e| matches!(e, SyncEvent::Busy(false))));
+            handle.send(Command::Shutdown);
+            while let Ok(ev) = rx.recv_blocking() {
+                events.push(ev);
+            }
+            (events, server.finish())
+        };
+
+        let (_, requests) = run(true);
+        assert!(
+            requests
+                .iter()
+                .any(|r| r.path() == format!("/gmail/threads/{A}"))
+        );
+
+        let (events, requests) = run(false);
+        let first_request = events
+            .iter()
+            .position(|e| matches!(e, SyncEvent::Busy(true)))
+            .unwrap();
+        let cached = events[..first_request]
+            .iter()
+            .find_map(|e| match e {
+                SyncEvent::ThreadPage {
+                    ids,
+                    threads,
+                    mode: PageMode::Refresh,
+                    ..
+                } => Some((ids.clone(), threads.len())),
+                _ => None,
+            })
+            .expect("the cached inbox comes before any request");
+        assert_eq!(cached, (vec![A.to_string(), B.to_string()], 2));
+        assert!(
+            events[..first_request]
+                .iter()
+                .any(|e| matches!(e, SyncEvent::Labels { labels, .. } if !labels.is_empty()))
+        );
+        let listed = events
+            .iter()
+            .find_map(|e| match e {
+                SyncEvent::ThreadPage {
+                    threads,
+                    mode: PageMode::Replace,
+                    ..
+                } => Some(threads.len()),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(listed, 2, "the listing reuses both cached summaries");
+        assert!(
+            !requests
+                .iter()
+                .any(|r| r.path().starts_with("/gmail/threads/")),
+            "no thread is fetched again"
+        );
+
+        // Signing out deletes the account's cache.
+        let mut w = {
+            let (mut w, _rx) = worker(secrets.clone(), nowhere());
+            w.cache_dir = Some(cache_dir.clone());
+            w.accounts.insert(
+                "me@example.com".into(),
+                AccountState::new("rt".into(), None),
+            );
+            w.open_cache();
+            w.remove_account("me@example.com", Revoke::LocalOnly);
+            w
+        };
+        assert!(w.open_cache().unwrap().load("me@example.com").is_none());
+        let _ = std::fs::remove_dir_all(&cache_dir);
     }
 }

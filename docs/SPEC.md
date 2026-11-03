@@ -27,8 +27,10 @@ built on gpui-kit, whose API differs from the pinned zed gpui.
 - **App id:** `korora.tech.Eloquawk` is used everywhere: Wayland `app_id`, the desktop file
   name, `StartupWMClass`, the hicolor icon name, the notification icon and the keyring service.
 - **Secrets:** refresh tokens and a user-supplied OAuth client live only in the Secret
-  Service. Access tokens live only in worker memory. Mail content is never written to disk or
-  to logs, except an attachment the user explicitly saves. Prefs hold no mail data apart from
+  Service. Access tokens live only in worker memory. Mail content is never written to disk in
+  plaintext or to logs, except an attachment the user explicitly saves. The one exception to
+  "not on disk" is the summary cache (7.7): encrypted, with its key only in the Secret Service,
+  and never holding a message body. Prefs hold no mail data apart from
   the last selected label id. From M16 the OpenRouter API key lives only in the Secret Service
   (item `openrouter-api-key`, 16.4) and in the AI worker's memory.
 - **Mail leaves the machine only for Google and, for accounts the user opted in (16.2), a
@@ -105,6 +107,7 @@ src/...
 | `demo_script.rs` | Pure `parse_steps(&str) -> Vec<Step>` for `--demo-actions` (section 11), with tests. | new |
 | `branding.rs` | `APP_ID` (M1); the embedded SVG icon (`LazyLock<Arc<Image>>`) and `icon(size)` (M14). The PNG is installed but not embedded: with no tray nothing in the app decodes it (M14 change). | copy+adapt |
 | `config.rs` | `Prefs` (section 4.3), XDG path `$XDG_CONFIG_HOME/eloquawk/settings.json`, atomic save, `ephemeral`. `load_from(path)` / `save_to(path)` take the path so tests use a temp dir. | copy+adapt |
+| `cache.rs` | The encrypted on-disk summary cache (7.7): labels, page 1 of label views and their thread summaries, per account. | new |
 | `secrets.rs` | `SecretStore` trait, `KeyringStore`, `MemoryStore`, and the typed `Secrets` API (client, token map). Debug builds honour `ELOQUAWK_SECRETS=memory`. | copy, with the legacy migration removed |
 | `instance.rs` | Single instance: flock on `$XDG_RUNTIME_DIR/eloquawk.lock`, 0600 socket `eloquawk.sock`, JSON-line `hello` / `show` / `compose {mailto}`. `--demo --instance` uses `eloquawk-demo.lock` / `eloquawk-demo.sock`. | extracted from antarctical `dankcal.rs` |
 | `notify.rs` | Pure `new_mail_notes(threads, &mut seen) -> Vec<Note>`, grouping, the body format and markup escaping. `show(note)` calls notify-rust and is only called from `background_spawn`. | new, modelled on `reminders.rs` |
@@ -773,6 +776,28 @@ On the first success after a network failure, clear the `"network"` problem.
 
 Jitter comes from `getrandom`. `Backoff` is a pure struct with an injectable `now`, and it is
 unit-tested.
+
+### 7.7 Summary cache (`cache.rs`)
+
+So a launch does not fetch every inbox thread's metadata again, the worker keeps, per account,
+an encrypted snapshot of what it already knows:
+- **Contents:** the labels with their last counts, page 1 of each label view listed (INBOX,
+  user labels, All Mail; never a search) and the `known` entries (summary, history id, star
+  target) those pages show. Never a body, an attachment or a draft's text.
+- **Format:** `$XDG_CACHE_HOME/eloquawk/<first 12 bytes of sha256(account), hex>.cache`, mode
+  0600 in a 0700 folder, written to a temporary file and renamed. The file is
+  `"ELQCACH1" ‖ 24-byte nonce ‖ XChaCha20-Poly1305(JSON)` with the account email as associated
+  data. The JSON shape is private to `cache.rs` and bumping it means a new magic.
+- **Key:** 32 random bytes in the keyring item `mail-cache-key` (base64), made on first use
+  and read in the same unlock as the refresh tokens. If it is unreadable it is replaced, which
+  only orphans the old files. Without a keyring there is no cache.
+- **Load:** in `load_from_keyring`, before each account's `InitialSync`, emit `Labels` and one
+  `ThreadPage { mode: Refresh, has_more: false }` per cached view. The Store fills an empty
+  list from it but keeps it loading, so the real listing still replaces it. The cached `known`
+  entries then make 7.3 step 3 reuse every summary whose history id is unchanged.
+- **Save:** whenever the queue drains and something cached changed (`dirty`), and at
+  shutdown. `AccountReset` empties the snapshot; removing an account deletes its file.
+- A missing, tampered, foreign-key or old-format file reads as no cache.
 
 ---
 

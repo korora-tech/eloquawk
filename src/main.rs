@@ -8,6 +8,7 @@
 
 mod ai;
 mod branding;
+mod cache;
 mod cli;
 mod config;
 mod demo;
