@@ -41,8 +41,6 @@ already sent SHALL be discarded.
 - **WHEN** the user turns an account off while one of its checks is waiting
 - **THEN** that check is never sent, and any answer already on its way shows nothing
 
-Choosing the checkerClef requests go only to Cloudflare Workers AI
-
 ### Requirement: Choosing the checker
 Settings SHALL offer a checker choice of "Jev (OpenRouter)", "Clef (Cloudflare)" and
 "Clef-flash (Cloudflare)", defaulting to Jev, with the caption "Switching checker turns checks
