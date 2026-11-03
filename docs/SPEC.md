@@ -3833,6 +3833,11 @@ applies its events with `apply_ai`, and gains these steps:
 
 ### 16.16 Sources
 
+Clef (2026-11-03): https://blog.cloudflare.com/clef-decision-models/,
+https://developers.cloudflare.com/workers-ai/models/clef and its `schema-input.json` /
+`schema-output.json` (endpoint, `model` selector, 1-64 questions, answer and `usage` shapes,
+$0.24/M input, ZDR).
+
 Re-read on 2026-10-30:
 - https://openrouter.ai/docs/guides/community/jev.md (model ids, `usage.cost`, input-only
   billing, the ~32,000-byte long-context threshold, 262,144-token context)
@@ -3847,3 +3852,23 @@ Re-read on 2026-10-30:
   token, completion 0, provider TypeSafe)
 - https://docs.typesafe.ai/primitives/noul, https://docs.typesafe.ai/confidence,
   https://docs.typesafe.ai/api/errors (cited by the original addendum; not re-read)
+
+### 16.17 Clef on Workers AI
+
+Behaviour is in `openspec/specs/message-checks`. Implementation:
+- `AiPrefs.backend: AiBackend` (`jev` | `clef` | `clef_flash`, default `jev`) and
+  `AiPrefs.cloudflare_account_id`. Settings clears `ai.accounts` together with a backend
+  change; the store then forgets results and sends `AiCommand::Backend { backend, account_id }`.
+- `ApiKey` carries a `Vendor`; `ApiKey::parse_cloudflare` accepts 32-256 of `[A-Za-z0-9_-]`,
+  hint `…abcd`. `Secrets::ai_key(vendor)` / `set_ai_key` / `clear_ai_key`; Cloudflare's item
+  is `cloudflare-api-token`, label "Eloquawk: Cloudflare API token".
+- `ai/cloudflare.rs`: `body` (state + questions + `model` selector), `post_run` (refuses an
+  account ID that is not 32 lowercase hex before sending), `parse` (unwraps `result`, sets
+  `usage.cost = input_tokens × 0.24e-6`), `classify` (3xx/404 Unavailable; 401 and 400 with
+  codes 6003/6111/9106/9109/10000 KeyRejected; 403 Forbidden; 413 TooLarge; 429 naming an
+  allocation Credits, other 429/5xx Busy; else Invalid). Logs status and `errors[].code` only.
+- `HttpDecider` keeps the route (`Decider::route`) and refuses a key of the other vendor. On
+  `Backend` the worker drops every job, clears the cache, bumps the global epoch, clears the
+  rejected flag and any non-spend pause, and reloads the key once a `Reload` has happened.
+- `AiError::text(backend)` replaces `user_text`. `prompt::MAX_QUESTIONS` = 64 per request for
+  both checkers.

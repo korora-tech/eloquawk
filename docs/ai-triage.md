@@ -1,6 +1,7 @@
-# Message checks with Jev (AI triage)
+# Message checks with Jev or Clef (AI triage)
 
 Eloquawk can ask Jev, TypeSafe's decision model, reached through OpenRouter's Decisions API,
+or Cloudflare's Clef or Clef-flash on Workers AI (see "Using Clef on Cloudflare" below),
 whether a message looks like phishing, a scam or spam, and which of your labels it belongs
 under. It is **off by default** and
 **advisory only**: Eloquawk never moves, labels, archives or reports anything by itself. The
@@ -12,7 +13,8 @@ design is section 16 of [SPEC.md](SPEC.md) and issue
 1. Create a key at <https://openrouter.ai/settings/keys>. Use a **dedicated key**, and check
    that input/output logging and Broadcast are **off** for its account or workspace (see
    "What Eloquawk cannot control" below).
-2. Open Settings (`Ctrl+,`) and scroll to **Message checks (OpenRouter)**. Paste the key and
+2. Open Settings (`Ctrl+,`) and scroll to **Message checks**, with **Jev (OpenRouter)** chosen
+   as the checker (the default). Paste the key and
    press **Save**. The key goes to your system keyring (Secret Service item
    `openrouter-api-key`, service `korora.tech.Eloquawk`) and nowhere else. **Test** makes one
    tiny request with no mail in it and shows the credit left on the key.
@@ -25,6 +27,35 @@ design is section 16 of [SPEC.md](SPEC.md) and issue
 
 Removing the key (**Remove**) deletes it from the keyring, stops every queued check and
 forgets every result.
+
+## Using Clef on Cloudflare
+
+[Clef and Clef-flash](https://blog.cloudflare.com/clef-decision-models/) are Cloudflare's
+open-weight decision models on Workers AI. They take the same questions as Jev, so Eloquawk
+sends them exactly the same redacted extract and label names; only the receiver changes.
+
+1. In the Cloudflare dashboard, copy your **account ID** (32 hexadecimal characters) and
+   create an **API token** with Workers AI access for that account
+   (<https://dash.cloudflare.com/profile/api-tokens>).
+2. In **Message checks**, choose **Clef (Cloudflare)** or **Clef-flash (Cloudflare)**.
+   Switching checker turns every account off and forgets every result of the session, so
+   nothing reaches the new processor before you accept its disclosure.
+3. Paste the account ID and press **Set**; it is saved in Eloquawk's settings file (it is not
+   a secret). Paste the token and press **Save**: it goes to the Secret Service item
+   `cloudflare-api-token`. **Test** asks the model one question with no mail in it.
+4. Turn accounts on again as above.
+
+Requests go to
+`https://api.cloudflare.com/client/v4/accounts/<account ID>/ai/run/@cf/cloudflare/clef`
+(or `clef-flash`) with `{"model": "clef", "state", "questions"}` and no routing options.
+Cloudflare documents Workers AI's Clef as zero data retention and says it does not store or
+train on requests. Clef is billed at $0.24 per million input tokens with no output charge;
+Eloquawk counts each check at that rate (Clef-flash's price is not published yet, so it is
+counted at Clef's, which can only overstate) towards the same session spend limit. Each
+request carries at most 64 questions, Clef's limit.
+
+The thresholds below were tuned on Jev only. Clef uses the same ones until it is calibrated,
+and the reader banner names the model that scored the message ("Clef: very likely").
 
 ## What is sent
 
@@ -206,4 +237,8 @@ The six demo messages above are not a calibration. The thresholds (including the
 suggestion cut-off) still need a labelled sample of real mail, especially legitimate security
 notices, which are the likeliest false positives, and the user's consent to use their own mail
 (SPEC section 15 item 15). Not yet seen live: a request with over 100 label questions, and
-OpenRouter's 402, 403 and "no endpoint" error bodies.
+OpenRouter's 402, 403 and "no endpoint" error bodies. Clef has not been run live from
+Eloquawk yet: the REST envelope (`result`), Cloudflare's error codes and the 429 wording for a
+used-up allocation come from Cloudflare's docs and general API conventions. Run
+`ELOQUAWK_LIVE_CLOUDFLARE_TOKEN=… ELOQUAWK_LIVE_CLOUDFLARE_ACCOUNT=… cargo test live_clef --
+--ignored --nocapture` (add `ELOQUAWK_LIVE_CLEF=clef-flash` for Clef-flash) to check.

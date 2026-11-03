@@ -23,7 +23,7 @@ A native Gmail client for Linux, built with Rust and [GPUI](https://www.gpui.rs/
 - **Attachments:** save them to your download directory with one click.
 - **New-mail notifications:** for unread mail that lands in the inbox, skipping Gmail's Promotions, Social, Updates and Forums categories.
 - **Mail handler:** registers for `mailto:` links and hands them to the running window.
-- **Message checks (optional, off by default):** with your own OpenRouter key, Jev flags likely phishing, scams and spam in the accounts you turn on, and suggests which of your labels a message you open belongs under (`1`, `2`, `3` apply them). See [Message checks](#message-checks).
+- **Message checks (optional, off by default):** with your own OpenRouter key (Jev) or Cloudflare token (Clef), the model flags likely phishing, scams and spam in the accounts you turn on, and suggests which of your labels a message you open belongs under (`1`, `2`, `3` apply them). See [Message checks](#message-checks).
 - **Local credential storage:** refresh tokens stay in your system keyring; mail stays in memory and is never written to disk. No analytics or telemetry.
 
 **Current limits:** Eloquawk does not render HTML mail, edit or sync drafts (Drafts are listed read-only), use send-as aliases or signatures, snooze, schedule sends, manage filters or labels, or delete permanently. There is no offline cache, so mail is fetched again at startup, and no tray icon: closing the last window quits.
@@ -38,7 +38,9 @@ website name, your and the recipients' addresses and recognised one-time codes a
 and attachments, the recipient list and the rest of the thread are never sent. Requests ask
 for zero data retention; your OpenRouter account's own logging and Broadcast settings still
 apply, so use a dedicated key with those off. Each check costs a fraction of a cent, and a
-per-session spend limit (default $1.00) stops them.
+per-session spend limit (default $1.00) stops them. Instead of Jev you can choose Cloudflare's
+Clef or Clef-flash on Workers AI, with your Cloudflare account ID and an API token; the same
+extract then goes to Cloudflare instead. See [docs/ai-triage.md](docs/ai-triage.md).
 
 While label suggestions are on, the names of your labels (up to 100) go with each message you
 open, along with optional label guidance you save in Settings. Use guidance to explain names such as `TTL/M3`; it is stored locally and sent to OpenRouter and TypeSafe with label checks. Suggested labels appear under the subject; press `1`, `2` or `3` for the first three, or click any suggestion to add it, and `z` to undo. Labels scoring above 0.60 are shown; if none do, the highest-scoring labels are offered as best guesses. Risky messages get no suggestions by default. You can set a required label group such as `TTL` in Settings to show its best-scoring child even on risky mail and below the normal threshold; review it before applying it. Results are advisory: a
