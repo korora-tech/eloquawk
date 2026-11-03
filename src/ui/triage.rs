@@ -137,19 +137,20 @@ pub fn title(v: &Verdict) -> &'static str {
     }
 }
 
-/// The banner's right-hand text: qualitative, since the thresholds are not calibrated.
-pub fn strength(v: &Verdict) -> String {
+/// The banner's right-hand text, naming the `model` that scored it: qualitative, since the
+/// thresholds are not calibrated.
+pub fn strength(v: &Verdict, model: &str) -> String {
     let base = match v.level {
-        Level::Danger => "Jev: very likely",
-        Level::Warning => "Jev: possible",
-        _ => "Jev: likely spam",
+        Level::Danger => "very likely",
+        Level::Warning => "possible",
+        _ => "likely spam",
     };
     let also = match v.kind {
         Kind::Phishing if v.p_scam >= 0.5 => " · also possibly a scam",
         Kind::Scam if v.p_phishing >= 0.5 => " · also possibly phishing",
         _ => "",
     };
-    format!("{base}{also}")
+    format!("{model}: {base}{also}")
 }
 
 /// The list badge's text (SPEC 16.12.2).
@@ -195,6 +196,7 @@ impl Render for Tip {
 pub fn banner(
     p: &Palette,
     v: &Verdict,
+    model: &str,
     reasons: &[String],
     report: Option<OnClick>,
     dismiss: OnClick,
@@ -207,7 +209,7 @@ pub fn banner(
     };
     let tip: SharedString = format!("Model score {score:.2}, not a probability of harm").into();
     let reasons = if reasons.is_empty() {
-        "Jev's assessment of the content".to_string()
+        format!("{model}'s assessment of the content")
     } else {
         reasons.join(" \u{b7} ")
     };
@@ -242,7 +244,7 @@ pub fn banner(
                         .text_size(px(12.0))
                         .text_color(rgb(p.secondary))
                         .tooltip(move |_, cx: &mut App| cx.new(|_| Tip(tip.clone())).into())
-                        .child(strength(v)),
+                        .child(strength(v, model)),
                 ),
         )
         .child(
@@ -522,13 +524,14 @@ mod tests {
         assert_eq!(title(&v(0.62, 0.0, 0.0)), "This may be phishing");
         assert_eq!(title(&v(0.0, 0.6, 0.0)), "This may be a scam");
         assert_eq!(title(&v(0.0, 0.0, 0.9)), "This looks like spam");
-        assert_eq!(strength(&v(0.97, 0.0, 0.0)), "Jev: very likely");
+        assert_eq!(strength(&v(0.97, 0.0, 0.0), "Jev"), "Jev: very likely");
         assert_eq!(
-            strength(&v(0.97, 0.55, 0.0)),
+            strength(&v(0.97, 0.55, 0.0), "Jev"),
             "Jev: very likely · also possibly a scam"
         );
-        assert_eq!(strength(&v(0.6, 0.0, 0.0)), "Jev: possible");
-        assert_eq!(strength(&v(0.0, 0.0, 0.9)), "Jev: likely spam");
+        assert_eq!(strength(&v(0.6, 0.0, 0.0), "Jev"), "Jev: possible");
+        assert_eq!(strength(&v(0.0, 0.0, 0.9), "Jev"), "Jev: likely spam");
+        assert_eq!(strength(&v(0.97, 0.0, 0.0), "Clef"), "Clef: very likely");
         assert_eq!(badge_text(Level::Danger, Kind::Scam), Some("Scam"));
         assert_eq!(badge_text(Level::Danger, Kind::Phishing), Some("Phishing"));
         assert_eq!(badge_text(Level::Warning, Kind::Scam), Some("Suspicious"));

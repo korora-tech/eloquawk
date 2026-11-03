@@ -2,8 +2,8 @@
 //! the message checks (SPEC 16.12.4). It replaces the panes in the main window; escape or ✕
 //! closes it.
 //!
-//! The OpenRouter key is write-only too: it goes to the AI worker, which alone touches the
-//! keyring. Its field is masked and cleared on Save, on Remove and when Settings closes, and
+//! The checker's key (an OpenRouter key or a Cloudflare API token) is write-only too: it goes
+//! to the AI worker, which alone touches the keyring. Its field is masked and cleared on Save, on Remove and when Settings closes, and
 //! the UI only ever shows the key's hint.
 //!
 //! The client secret is write-only from the UI's point of view: it goes to the worker, which
@@ -24,8 +24,9 @@ use super::widgets::{
     ButtonStyle, OnClick, body_text, button, caption, card, checkbox_row, ghost_button, segment,
     segments,
 };
-use crate::ai::openrouter::{ApiKey, KEY_INVALID};
-use crate::ai::{AiCommand, DISCLOSURE_VERSION, KeyState};
+use crate::ai::cloudflare::{ACCOUNT_INVALID, valid_account_id};
+use crate::ai::openrouter::{ApiKey, Vendor};
+use crate::ai::{AiBackend, AiCommand, DISCLOSURE_VERSION, KeyState};
 use crate::config::{SPEND_LIMIT_CENTS_MAX, SPEND_LIMIT_CENTS_MIN, ThemePref};
 use crate::google::oauth;
 use crate::protocol::{AuthState, Command};
@@ -58,8 +59,14 @@ const SIGN_IN_PENDING: &str =
 
 /// Where OpenRouter keys are made.
 const KEYS_URL: &str = "https://openrouter.ai/settings/keys";
+/// Where Cloudflare API tokens are made.
+const CLOUDFLARE_TOKENS_URL: &str = "https://dash.cloudflare.com/profile/api-tokens";
 const OPENROUTER_PRIVACY: &str = "https://openrouter.ai/privacy";
 const TYPESAFE_PRIVACY: &str = "https://typesafe.ai/legal/privacy-policy";
+const CLOUDFLARE_PRIVACY: &str = "https://www.cloudflare.com/privacypolicy/";
+const SWITCH_CAPTION: &str =
+    "Switching checker turns checks off for every account until you turn them on again.";
+const NO_ACCOUNT: &str = "Add your Cloudflare account ID first";
 const AI_INTRO: &str = concat!(
     "Uses TypeSafe's Jev model through OpenRouter to flag phishing, scams and spam, and to ",
     "suggest labels. Off until ",
@@ -67,6 +74,11 @@ const AI_INTRO: &str = concat!(
     "Broadcast settings apply to these requests, so a dedicated key with those off is best.",
 );
 const AI_DEMO: &str = "Demo mode uses a built-in offline checker. Nothing is sent.";
+const CLEF_BACKGROUND_CAPTION: &str = concat!(
+    "Sends each new inbox message in the accounts you've turned on to Cloudflare as it ",
+    "arrives, including ones you never open, and each is billed to your Cloudflare account. ",
+    "Warnings then show in the list before you open a message.",
+);
 const BACKGROUND_CAPTION: &str = concat!(
     "Sends each new inbox message in the accounts you've turned on to OpenRouter as it ",
     "arrives, including ones you never open, and uses credit for each. Warnings then show in ",
@@ -110,6 +122,60 @@ const DISCLOSURE: [&str; 4] = [
         "when they reach the spend limit you set.",
     ),
 ];
+
+/// The disclosure's last paragraph for Clef: who keeps what, and the cost.
+const CLEF_RETENTION: &str = concat!(
+    "Requests go to Workers AI in your Cloudflare account. Cloudflare says it does not store ",
+    "these requests or train on them. Each check is billed to your Cloudflare account (about ",
+    "$0.24 per million input tokens), and checks stop for the session when they reach the ",
+    "spend limit you set.",
+);
+
+/// The card's intro for `backend`.
+fn ai_intro(backend: AiBackend) -> String {
+    match backend.vendor() {
+        Vendor::OpenRouter => AI_INTRO.into(),
+        Vendor::Cloudflare => format!(
+            "Uses Cloudflare's {} model on Workers AI to flag phishing, scams and spam, and to \
+             suggest labels. Off until you add your Cloudflare account ID and an API token with \
+             Workers AI access, and turn it on for an account.",
+            backend.model_name()
+        ),
+    }
+}
+
+/// The disclosure shown before an account is turned on, for `backend`.
+fn disclosure_text(backend: AiBackend) -> [String; 4] {
+    match backend.vendor() {
+        Vendor::OpenRouter => DISCLOSURE.map(String::from),
+        Vendor::Cloudflare => [
+            format!(
+                "When you open a message in this account, Eloquawk sends part of it to \
+                 Cloudflare, whose {} model checks it for phishing, scams and spam and suggests \
+                 labels. If you also turn on background checks, new inbox mail in this account \
+                 is sent as it arrives, including messages you never open.",
+                backend.model_name()
+            ),
+            DISCLOSURE[1].into(),
+            DISCLOSURE[2].into(),
+            CLEF_RETENTION.into(),
+        ],
+    }
+}
+
+/// Who label guidance is sent to.
+fn guidance_caption(backend: AiBackend) -> &'static str {
+    match backend.vendor() {
+        Vendor::OpenRouter => {
+            "Saved on this device and sent to OpenRouter and TypeSafe with label suggestions. \
+             Avoid secrets and private information."
+        }
+        Vendor::Cloudflare => {
+            "Saved on this device and sent to Cloudflare with label suggestions. Avoid secrets \
+             and private information."
+        }
+    }
+}
 
 /// A dollar amount typed for the spend limit, in cents: digits with an optional `.` and up to
 /// two decimals, an optional leading `$`, within $0.10 to $100.00.
@@ -182,8 +248,13 @@ pub struct SettingsView {
     store: Entity<Store>,
     client_id: Entity<TextInput>,
     client_secret: Entity<TextInput>,
-    /// The OpenRouter key being typed; masked, never pre-filled.
+    /// The checker's key being typed; masked, never pre-filled.
     ai_key: Entity<TextInput>,
+    /// The Cloudflare account ID, for Clef.
+    ai_account: Entity<TextInput>,
+    /// The account ID last copied into its field, so typing is not overwritten.
+    shown_account: Option<String>,
+    account_error: bool,
     /// The session spend limit in dollars.
     spend: Entity<TextInput>,
     label_guidance: Entity<TextInput>,
@@ -217,6 +288,7 @@ impl SettingsView {
         let label_guidance =
             cx.new(|cx| TextInput::new("e.g. TTL/M3: keep for three months", false, 5, cx));
         let required_label_group = cx.new(|cx| TextInput::new("e.g. TTL", false, 6, cx));
+        let ai_account = cx.new(|cx| TextInput::new("32 hexadecimal characters", false, 7, cx));
         let subscription = cx.observe(&store, |this, _, cx| {
             this.sync_from_store(cx);
             cx.notify();
@@ -230,6 +302,9 @@ impl SettingsView {
             client_id,
             client_secret,
             ai_key,
+            ai_account,
+            shown_account: None,
+            account_error: false,
             spend,
             label_guidance,
             shown_guidance: None,
@@ -252,14 +327,24 @@ impl SettingsView {
     /// When the stored client changes (loaded, saved, removed), reflect it in the fields; the
     /// same for the key's hint and the spend limit.
     fn sync_from_store(&mut self, cx: &mut Context<Self>) {
-        let (key, limit) = {
+        let (key, limit, vendor) = {
             let s = self.store.read(cx);
-            (s.ai.key.clone(), s.prefs.ai.spend_limit_cents)
+            (
+                s.ai.key.clone(),
+                s.prefs.ai.spend_limit_cents,
+                s.prefs.ai.backend.vendor(),
+            )
         };
         let placeholder = match key {
             KeyState::Saved { hint } | KeyState::Rejected { hint } => hint,
+            _ if vendor == Vendor::Cloudflare => "Cloudflare API token".to_string(),
             _ => "sk-or-…".to_string(),
         };
+        let account = self.store.read(cx).prefs.ai.cloudflare_account_id.clone();
+        if self.shown_account.as_ref() != Some(&account) {
+            self.shown_account = Some(account.clone());
+            self.ai_account.update(cx, |i, cx| i.set_text(account, cx));
+        }
         self.ai_key
             .update(cx, |i, cx| i.set_placeholder(placeholder, cx));
         if self.shown_spend != Some(limit) {
@@ -340,31 +425,68 @@ impl SettingsView {
         self.clear_key_field(cx);
     }
 
+    fn vendor(&self, cx: &Context<Self>) -> Vendor {
+        self.store.read(cx).prefs.ai.backend.vendor()
+    }
+
     fn save_key(&mut self, cx: &mut Context<Self>) {
         let typed = self.ai_key.read(cx).text().to_string();
         if typed.trim().is_empty() {
             return;
         }
-        match ApiKey::parse(&typed) {
+        let vendor = self.vendor(cx);
+        match ApiKey::parse_for(vendor, &typed) {
             Ok(key) => {
                 self.key_error = None;
                 self.store.read(cx).send_ai(AiCommand::SaveKey(key));
                 self.clear_key_field(cx);
             }
-            Err(_) => self.key_error = Some(KEY_INVALID),
+            Err(e) => self.key_error = Some(e.text(vendor)),
         }
         cx.notify();
     }
 
+    /// Picks the checker: every account's consent goes with the old one (SPEC 16.2).
+    fn set_backend(&mut self, backend: AiBackend, cx: &mut Context<Self>) {
+        if self.store.read(cx).prefs.ai.backend == backend {
+            return;
+        }
+        self.disclosing = None;
+        self.key_error = None;
+        self.clear_key_field(cx);
+        self.store.update(cx, |s, cx| {
+            s.change_prefs(|p| {
+                p.ai.backend = backend;
+                p.ai.accounts.clear();
+            });
+            cx.notify();
+        });
+    }
+
+    fn save_account(&mut self, cx: &mut Context<Self>) {
+        let typed = self.ai_account.read(cx).text().trim().to_ascii_lowercase();
+        if !valid_account_id(&typed) {
+            self.account_error = true;
+            cx.notify();
+            return;
+        }
+        self.account_error = false;
+        self.store.update(cx, |s, cx| {
+            s.change_prefs(|p| p.ai.cloudflare_account_id = typed.clone());
+            cx.notify();
+        });
+    }
+
     fn test_key(&mut self, cx: &mut Context<Self>) {
         let typed = self.ai_key.read(cx).text().to_string();
+        let vendor = self.vendor(cx);
         let key = if typed.trim().is_empty() {
             None
         } else {
-            match ApiKey::parse(&typed) {
+            match ApiKey::parse_for(vendor, &typed) {
                 Ok(k) => Some(k),
-                Err(_) => {
-                    self.key_error = Some(KEY_INVALID);
+                Err(e) => {
+                    self.key_error = Some(e.text(vendor));
                     cx.notify();
                     return;
                 }
@@ -422,6 +544,8 @@ impl SettingsView {
     fn submit(&mut self, window: &Window, cx: &mut Context<Self>) {
         if self.ai_key.focus_handle(cx).is_focused(window) {
             self.save_key(cx);
+        } else if self.ai_account.focus_handle(cx).is_focused(window) {
+            self.save_account(cx);
         } else if self.spend.focus_handle(cx).is_focused(window) {
             self.save_spend(cx);
         } else if self.label_guidance.focus_handle(cx).is_focused(window) {
@@ -807,14 +931,46 @@ impl SettingsView {
     fn ai_card(&self, p: &Palette, store: &Store, cx: &Context<Self>) -> Div {
         let demo = store.mode == Mode::Demo;
         let key = &store.ai.key;
-        let mut c = card(p, "Message checks (OpenRouter)")
-            .child(body_text(p, AI_INTRO))
+        let backend = store.prefs.ai.backend;
+        let cloudflare = backend.vendor() == Vendor::Cloudflare;
+        let checker_row = segments(
+            p,
+            AiBackend::ALL.into_iter().map(|b| {
+                segment(
+                    p,
+                    SharedString::from(format!("ai-backend-{}", b.model_name())),
+                    b.label(),
+                    backend == b,
+                    self.click(cx, move |this, _, cx| this.set_backend(b, cx)),
+                )
+            }),
+        );
+        let keys_url = if cloudflare {
+            CLOUDFLARE_TOKENS_URL
+        } else {
+            KEYS_URL
+        };
+        let mut c = card(p, "Message checks")
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(caption(p, "CHECKER"))
+                    .child(checker_row)
+                    .child(caption(p, SWITCH_CAPTION)),
+            )
+            .child(body_text(p, ai_intro(backend)))
             .child(div().flex().child(button(
                 p,
                 "ai-keys",
-                "Get a key",
+                if cloudflare {
+                    "Get a token"
+                } else {
+                    "Get a key"
+                },
                 ButtonStyle::Secondary,
-                Some(Box::new(|_, _, cx| cx.open_url(KEYS_URL))),
+                Some(Box::new(move |_, _, cx| cx.open_url(keys_url))),
             )));
         if demo {
             c = c.child(body_text(p, AI_DEMO));
@@ -825,11 +981,42 @@ impl SettingsView {
                 KeyState::Saved { hint } => format!("Saved ({hint})"),
                 KeyState::Missing => "No key saved".into(),
                 KeyState::Locked => "The keyring is locked".into(),
+                KeyState::Rejected { .. } if cloudflare => "Cloudflare rejected this token".into(),
                 KeyState::Rejected { .. } => "OpenRouter rejected this key".into(),
                 KeyState::Unknown => "Checking the keyring…".into(),
                 KeyState::Demo => String::new(),
             };
             let ok = matches!(key, KeyState::Saved { .. });
+            if cloudflare {
+                c = c
+                    .child(
+                        div()
+                            .flex()
+                            .items_end()
+                            .gap_2()
+                            .child(div().flex_1().child(Self::field(
+                                p,
+                                "ACCOUNT ID",
+                                "From the Cloudflare dashboard; saved in Eloquawk's settings",
+                                self.ai_account.clone(),
+                            )))
+                            .child(div().pb(px(22.0)).child(button(
+                                p,
+                                "ai-save-account",
+                                "Set",
+                                ButtonStyle::Secondary,
+                                Some(self.click(cx, |this, _, cx| this.save_account(cx))),
+                            ))),
+                    )
+                    .when(self.account_error, |d| {
+                        d.child(
+                            div()
+                                .text_size(px(11.5))
+                                .text_color(rgb(p.red_text))
+                                .child(ACCOUNT_INVALID),
+                        )
+                    });
+            }
             c = c
                 .child(
                     div()
@@ -838,7 +1025,7 @@ impl SettingsView {
                         .gap_2()
                         .child(div().flex_1().child(Self::field(
                             p,
-                            "API KEY",
+                            if cloudflare { "API TOKEN" } else { "API KEY" },
                             "Stored only in your system keyring",
                             self.ai_key.clone(),
                         )))
@@ -916,12 +1103,15 @@ impl SettingsView {
                 });
         }
         // Per-account consent.
+        let account_ready = store.ai_account_ready();
         let toggles_on = demo
-            || matches!(
-                key,
-                KeyState::Saved { .. } | KeyState::Rejected { .. } | KeyState::Demo
-            );
+            || account_ready
+                && matches!(
+                    key,
+                    KeyState::Saved { .. } | KeyState::Rejected { .. } | KeyState::Demo
+                );
         let disabled_why = match key {
+            _ if !account_ready => NO_ACCOUNT,
             KeyState::Missing => "Add a key first",
             KeyState::Locked => "The keyring is locked",
             _ => "Checking the keyring…",
@@ -984,7 +1174,7 @@ impl SettingsView {
             .child(
                 div().flex().flex_col().gap_2()
                     .child(Self::field(p, "LABEL GUIDANCE", "Explain what your labels mean (up to 500 characters)", self.label_guidance.clone()))
-                    .child(caption(p, "Saved on this device and sent to OpenRouter and TypeSafe with label suggestions. Avoid secrets and private information."))
+                    .child(caption(p, guidance_caption(backend)))
                     .child(button(p, "ai-save-label-guidance", "Save guidance", ButtonStyle::Secondary, Some(self.click(cx, |this, _, cx| this.save_label_guidance(cx)))))
             )
             .child(
@@ -1004,7 +1194,14 @@ impl SettingsView {
                         prefs.background,
                         self.pref(cx, |p| p.ai.background = !p.ai.background),
                     ))
-                    .child(div().pl(px(30.0)).child(caption(p, BACKGROUND_CAPTION))),
+                    .child(div().pl(px(30.0)).child(caption(
+                        p,
+                        if cloudflare {
+                            CLEF_BACKGROUND_CAPTION
+                        } else {
+                            BACKGROUND_CAPTION
+                        },
+                    ))),
             )
             .child(
                 div()
@@ -1083,6 +1280,37 @@ impl SettingsView {
     /// The inline disclosure under an account's toggle (SPEC 16.2).
     fn disclosure(&self, p: &Palette, email: &str, cx: &Context<Self>) -> Div {
         let target = email.to_string();
+        let backend = self.store.read(cx).prefs.ai.backend;
+        let privacy = |id: &'static str, label: &'static str, url: &'static str| {
+            div()
+                .id(id)
+                .text_size(px(12.0))
+                .text_color(rgb(p.link))
+                .underline()
+                .cursor_pointer()
+                .on_click(move |_, _, cx| cx.open_url(url))
+                .child(label)
+        };
+        let links = match backend.vendor() {
+            Vendor::OpenRouter => div()
+                .flex()
+                .gap_3()
+                .child(privacy(
+                    "ai-privacy-openrouter",
+                    "OpenRouter privacy",
+                    OPENROUTER_PRIVACY,
+                ))
+                .child(privacy(
+                    "ai-privacy-typesafe",
+                    "TypeSafe privacy",
+                    TYPESAFE_PRIVACY,
+                )),
+            Vendor::Cloudflare => div().flex().gap_3().child(privacy(
+                "ai-privacy-cloudflare",
+                "Cloudflare privacy",
+                CLOUDFLARE_PRIVACY,
+            )),
+        };
         div()
             .ml(px(30.0))
             .flex()
@@ -1093,32 +1321,12 @@ impl SettingsView {
             .border_color(rgb(p.border))
             .bg(rgb(p.panel_raised))
             .p_3()
-            .children(DISCLOSURE.iter().map(|para| body_text(p, *para)))
-            .child(
-                div()
-                    .flex()
-                    .gap_3()
-                    .child(
-                        div()
-                            .id("ai-privacy-openrouter")
-                            .text_size(px(12.0))
-                            .text_color(rgb(p.link))
-                            .underline()
-                            .cursor_pointer()
-                            .on_click(|_, _, cx| cx.open_url(OPENROUTER_PRIVACY))
-                            .child("OpenRouter privacy"),
-                    )
-                    .child(
-                        div()
-                            .id("ai-privacy-typesafe")
-                            .text_size(px(12.0))
-                            .text_color(rgb(p.link))
-                            .underline()
-                            .cursor_pointer()
-                            .on_click(|_, _, cx| cx.open_url(TYPESAFE_PRIVACY))
-                            .child("TypeSafe privacy"),
-                    ),
+            .children(
+                disclosure_text(backend)
+                    .into_iter()
+                    .map(|para| body_text(p, para)),
             )
+            .child(links)
             .child(
                 div()
                     .flex()
@@ -1253,6 +1461,27 @@ mod tests {
         ));
         assert!(!text.contains("with every check"));
         assert!(AI_INTRO.contains("phishing, scams and spam, and to suggest labels"));
+    }
+
+    #[test]
+    fn clef_texts_name_cloudflare_not_openrouter() {
+        for b in [AiBackend::Clef, AiBackend::ClefFlash] {
+            let text = disclosure_text(b).concat() + &ai_intro(b) + guidance_caption(b);
+            assert!(
+                text.contains("Cloudflare") && text.contains(b.model_name()),
+                "{text}"
+            );
+            assert!(
+                !text.contains("OpenRouter") && !text.contains("TypeSafe"),
+                "{text}"
+            );
+            assert_eq!(disclosure_text(b)[1], DISCLOSURE[1]);
+        }
+        assert_eq!(
+            disclosure_text(AiBackend::Jev),
+            DISCLOSURE.map(String::from)
+        );
+        assert!(!CLEF_BACKGROUND_CAPTION.contains("OpenRouter"));
     }
 
     #[test]

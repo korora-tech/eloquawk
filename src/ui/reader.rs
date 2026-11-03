@@ -727,6 +727,7 @@ impl ReaderView {
             rows.push(triage::banner(
                 p,
                 &v,
+                store.prefs.ai.backend.model_name(),
                 &triage::reasons(target),
                 report,
                 dismiss,
