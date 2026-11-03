@@ -643,7 +643,13 @@ impl Worker {
             .labels
             .as_ref()
             .map_or("", |ask| ask.guidance.as_str());
-        let plan = super::prompt::fit_with_guidance(input, verdict, candidates, guidance);
+        let plan = super::prompt::fit_with_guidance(
+            input,
+            verdict,
+            candidates,
+            guidance,
+            self.backend.max_questions(),
+        );
         let first = plan.first_request(verdict);
         self.in_flight = Some(job.id());
         super::debug(format_args!(

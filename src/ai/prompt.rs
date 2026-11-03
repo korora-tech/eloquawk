@@ -46,8 +46,8 @@ pub const MAX_LABELS: usize = 100;
 const LABEL_NAME_CHARS: usize = 100;
 /// At most this many requests per check: the triage one and one more for labels.
 pub const MAX_REQUESTS_PER_CHECK: usize = 2;
-/// Questions per request: Clef's limit, kept for Jev too so both split checks alike. Two
-/// requests hold the triage questions and [`MAX_LABELS`] labels.
+/// Questions per Clef request (Jev has no such limit). Two requests hold the triage questions
+/// and [`MAX_LABELS`] labels.
 pub const MAX_QUESTIONS: usize = 64;
 /// Even the worst-case message still asks about this many labels in total.
 #[cfg(test)]
@@ -806,7 +806,7 @@ impl Plan {
 /// A labels-only check (`triage` false) keeps at least one label in the first request.
 #[cfg(test)]
 pub fn fit(input: AiInput, triage: bool, labels: &[LabelCandidate]) -> Plan {
-    fit_with_guidance(input, triage, labels, "")
+    fit_with_guidance(input, triage, labels, "", MAX_QUESTIONS)
 }
 
 pub fn fit_with_guidance(
@@ -814,6 +814,7 @@ pub fn fit_with_guidance(
     triage: bool,
     labels: &[LabelCandidate],
     guidance: &str,
+    max_questions: usize,
 ) -> Plan {
     let guidance = cut_chars(
         strip_controls(guidance).trim(),
@@ -834,7 +835,7 @@ pub fn fit_with_guidance(
             .len()
     };
     let keep = usize::from(!triage);
-    let room = MAX_QUESTIONS - if triage { TRIAGE.len() } else { 0 };
+    let room = max_questions.saturating_sub(if triage { TRIAGE.len() } else { 0 });
     // 2. Move labels into the second request.
     while first.len() > keep
         && (first.len() > room || size(&input, &first, triage) > REQUEST_BUDGET)
@@ -870,7 +871,7 @@ pub fn fit_with_guidance(
         second.remove(0);
     }
     while !second.is_empty()
-        && (second.len() > MAX_QUESTIONS || size2(&input, &first, &second) > REQUEST_BUDGET)
+        && (second.len() > max_questions || size2(&input, &first, &second) > REQUEST_BUDGET)
     {
         second.pop();
     }
@@ -1319,7 +1320,7 @@ mod tests {
     fn guidance_follows_label_requests_and_fits_the_budget() {
         let labels = ascii_labels(100);
         let guidance = "TTL/M3 means keep for three months. ".repeat(40);
-        let plan = fit_with_guidance(typical(), true, &labels, &guidance);
+        let plan = fit_with_guidance(typical(), true, &labels, &guidance, MAX_QUESTIONS);
         assert_eq!(
             plan.guidance.chars().count(),
             crate::config::LABEL_GUIDANCE_MAX_CHARS
@@ -1334,7 +1335,8 @@ mod tests {
             .expect("100 labels require a second request");
         assert_eq!(second.state["recipient_label_guidance"], plan.guidance);
         assert!(second.to_bytes().len() <= REQUEST_BUDGET);
-        let triage = fit_with_guidance(typical(), true, &[], &guidance).first_request(true);
+        let triage =
+            fit_with_guidance(typical(), true, &[], &guidance, MAX_QUESTIONS).first_request(true);
         assert!(triage.state.get("recipient_label_guidance").is_none());
         let labels = [user_label("ttl", "TTL/M3", 1)];
         assert_ne!(
@@ -1450,6 +1452,15 @@ mod tests {
             assert!(second.questions.len() <= MAX_QUESTIONS);
             assert_eq!(plan.labels_asked(), MAX_LABELS);
         }
+        // Jev has no question limit: short labels all fit in one request.
+        let plan = fit_with_guidance(
+            AiInput::from_message(&m, &Redact::default()),
+            true,
+            &labels,
+            "",
+            usize::MAX,
+        );
+        assert!(plan.second_request().is_none());
     }
 
     #[test]

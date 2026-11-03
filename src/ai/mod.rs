@@ -107,6 +107,14 @@ impl AiBackend {
         format!("{} ({})", self.model_name(), self.vendor_name())
     }
 
+    /// The most questions one request may ask.
+    pub fn max_questions(self) -> usize {
+        match self {
+            AiBackend::Jev => usize::MAX,
+            AiBackend::Clef | AiBackend::ClefFlash => prompt::MAX_QUESTIONS,
+        }
+    }
+
     /// Workers AI's model selector, for Clef only.
     pub fn clef_selector(self) -> Option<&'static str> {
         match self {
