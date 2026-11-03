@@ -3870,5 +3870,8 @@ Behaviour is in `openspec/specs/message-checks`. Implementation:
 - `HttpDecider` keeps the route (`Decider::route`) and refuses a key of the other vendor. On
   `Backend` the worker drops every job, clears the cache, bumps the global epoch, clears the
   rejected flag and any non-spend pause, and reloads the key once a `Reload` has happened.
-- `AiError::text(backend)` replaces `user_text`. `prompt::MAX_QUESTIONS` = 64 per request for
-  both checkers.
+- `AiError::text(backend)` replaces `user_text`. `fit_with_guidance` takes the checker's
+  question limit: `prompt::MAX_QUESTIONS` (64) for Clef, none for Jev.
+- `AiPrefs.consent_backend` / `consent_account_id` record the route `accounts` consented to;
+  `Prefs::clamped` (on load and on every change) clears `accounts` when the route differs.
+- The store drops a `Failed` for an account that is no longer opted in, as it does `Checked`.

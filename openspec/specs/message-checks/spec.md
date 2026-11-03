@@ -46,7 +46,10 @@ Settings SHALL offer a checker choice of "Jev (OpenRouter)", "Clef (Cloudflare)"
 "Clef-flash (Cloudflare)", defaulting to Jev, with the caption "Switching checker turns checks
 off for every account until you turn them on again." Choosing a different checker SHALL turn
 every account off, drop every queued and retrying check, forget every result of the session,
-lift any pause, and show the chosen checker's key status. Only the chosen checker SHALL ever
+lift any pause except the session spend limit's, and show the chosen checker's key status.
+Consent SHALL hold only for the checker, and for Clef the Cloudflare account ID, it was given
+under, however the settings changed: setting a different account ID SHALL also turn every
+account off. Only the chosen checker SHALL ever
 receive a request. Texts that name the processor or the model SHALL name the chosen one: the
 card intro, the disclosure and its privacy links, the key status, the Get a key link, errors,
 the Test result, the reader banner, and the label guidance caption.
@@ -60,6 +63,11 @@ the Test result, the reader banner, and the label guidance caption.
 - **THEN** the account's toggle is off, no earlier banner or badge remains, and nothing is
   sent until the user accepts the Clef disclosure
 
+#### Scenario: Settings file edited by hand
+- **WHEN** the app starts with accounts opted in under Jev and a settings file whose checker
+  was changed to Clef outside the app
+- **THEN** every account is off and nothing is sent to Cloudflare
+
 #### Scenario: Disclosure names Cloudflare
 - **WHEN** Clef is chosen and the user ticks "Check messages in <email>"
 - **THEN** the disclosure names Cloudflare and Clef and links to Cloudflare's privacy policy
@@ -67,8 +75,8 @@ the Test result, the reader banner, and the label guidance caption.
 ### Requirement: Clef requests go only to Cloudflare Workers AI
 With a Clef checker every check SHALL go to
 `https://api.cloudflare.com/client/v4/accounts/<account id>/ai/run/@cf/cloudflare/clef`, or
-`.../clef-flash` for Clef-flash, with the selector `clef` or `clef-flash` in the body and
-no other routing options. The account ID SHALL be 32 lowercase hexadecimal characters, saved
+`.../clef-flash` for Clef-flash, with the selector `clef` or `clef-flash` in the body,
+no other routing options and at most 64 questions per request. The account ID SHALL be 32 lowercase hexadecimal characters, saved
 in the settings file with Set, and refused with "That doesn't look like a Cloudflare account
 ID (32 hexadecimal characters)" otherwise. Without a valid account ID the account toggles SHALL be
 disabled with "Add your Cloudflare account ID first". Each check's cost SHALL be counted as

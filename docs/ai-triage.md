@@ -52,7 +52,8 @@ Cloudflare documents Workers AI's Clef as zero data retention and says it does n
 train on requests. Clef is billed at $0.24 per million input tokens with no output charge;
 Eloquawk counts each check at that rate (Clef-flash's price is not published yet, so it is
 counted at Clef's, which can only overstate) towards the same session spend limit. Each
-request carries at most 64 questions, Clef's limit.
+Clef request carries at most 64 questions, Clef's limit, so a check with many labels may take
+two requests where Jev needs one. Changing the account ID also turns every account off.
 
 The thresholds below were tuned on Jev only. Clef uses the same ones until it is calibrated,
 and the reader banner names the model that scored the message ("Clef: very likely").
