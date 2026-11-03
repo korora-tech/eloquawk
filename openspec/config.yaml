@@ -2,8 +2,10 @@ schema: spec-driven
 
 context: |
   Eloquawk is a native Gmail client for Linux, written in Rust with GPUI.
-  docs/SPEC.md is still the implementation contract; capabilities move into
-  openspec/specs/ one at a time, the first time a change touches them.
+  openspec/specs/ holds one spec per capability and is the source of truth for
+  behaviour. docs/SPEC.md remains the reference for implementation detail (types,
+  protocol, module layout, file formats); where the two disagree, the spec in
+  openspec/specs/ wins and SPEC.md should be corrected.
 
   Ground rules (docs/SPEC.md section 1):
   - Single bin crate, edition 2024, stable toolchain. gpui and gpui_platform are
