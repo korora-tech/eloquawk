@@ -61,11 +61,8 @@ impl MailCache {
             .map(|p| p.join("eloquawk"))
     }
 
-    /// The account's file; named by a hash so the address is not in the file name.
     fn path(&self, account: &str) -> PathBuf {
-        let hash = sha2::Sha256::digest(account.as_bytes());
-        let name: String = hash[..12].iter().map(|b| format!("{b:02x}")).collect();
-        self.dir.join(format!("{name}.cache"))
+        path_in(&self.dir, account)
     }
 
     /// The account's snapshot, or `None` when there is none it can read.
@@ -88,14 +85,6 @@ impl MailCache {
         let tmp = path.with_extension("tmp");
         write_private(&tmp, &sealed)?;
         std::fs::rename(&tmp, &path)
-    }
-
-    /// Deletes the account's snapshot; succeeds when there is none.
-    pub fn remove(&self, account: &str) -> std::io::Result<()> {
-        match std::fs::remove_file(self.path(account)) {
-            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
-            _ => Ok(()),
-        }
     }
 
     fn seal(&self, account: &str, plain: &[u8]) -> std::io::Result<Vec<u8>> {
@@ -133,6 +122,22 @@ impl MailCache {
                 },
             )
             .ok()
+    }
+}
+
+/// The account's file in `dir`; named by a hash so the address is not in the file name.
+fn path_in(dir: &Path, account: &str) -> PathBuf {
+    let hash = sha2::Sha256::digest(account.as_bytes());
+    let name: String = hash[..12].iter().map(|b| format!("{b:02x}")).collect();
+    dir.join(format!("{name}.cache"))
+}
+
+/// Deletes the account's snapshot in `dir`; succeeds when there is none. Needs no key, so
+/// signing out clears it even when the keyring never gave one.
+pub fn remove(dir: &Path, account: &str) -> std::io::Result<()> {
+    match std::fs::remove_file(path_in(dir, account)) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+        _ => Ok(()),
     }
 }
 
@@ -385,8 +390,9 @@ mod tests {
         raw[last] ^= 1;
         std::fs::write(cache.path(ME), raw).unwrap();
         assert_eq!(cache.load(ME), None);
-        cache.remove(ME).unwrap();
-        cache.remove(ME).unwrap();
+        remove(&d, ME).unwrap();
+        remove(&d, ME).unwrap();
+        assert!(!cache.path(ME).exists());
         let _ = std::fs::remove_dir_all(d);
     }
 

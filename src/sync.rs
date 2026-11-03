@@ -1678,8 +1678,8 @@ impl Worker {
             return false;
         };
         self.queue.forget(email);
-        if let Some(cache) = &self.cache
-            && let Err(e) = cache.remove(email)
+        if let Some(dir) = &self.cache_dir
+            && let Err(e) = crate::cache::remove(dir, email)
         {
             eprintln!("eloquawk: could not delete the summary cache: {}", e.kind());
         }
@@ -5008,19 +5008,17 @@ mod tests {
             "no thread is fetched again"
         );
 
-        // Signing out deletes the account's cache.
-        let mut w = {
-            let (mut w, _rx) = worker(secrets.clone(), nowhere());
-            w.cache_dir = Some(cache_dir.clone());
-            w.accounts.insert(
-                "me@example.com".into(),
-                AccountState::new("rt".into(), None),
-            );
-            w.open_cache();
-            w.remove_account("me@example.com", Revoke::LocalOnly);
-            w
-        };
-        assert!(w.open_cache().unwrap().load("me@example.com").is_none());
+        // Signing out deletes the account's cache, even before the cache was opened.
+        let files = || std::fs::read_dir(&cache_dir).unwrap().count();
+        assert_eq!(files(), 1);
+        let (mut w, _rx) = worker(secrets.clone(), nowhere());
+        w.cache_dir = Some(cache_dir.clone());
+        w.accounts.insert(
+            "me@example.com".into(),
+            AccountState::new("rt".into(), None),
+        );
+        w.remove_account("me@example.com", Revoke::LocalOnly);
+        assert_eq!(files(), 0);
         let _ = std::fs::remove_dir_all(&cache_dir);
     }
 }
