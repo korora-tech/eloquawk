@@ -3,7 +3,7 @@
 ## Purpose
 Let the user change Eloquawk's preferences on a Settings screen, keep them between launches
 and pick a light, dark or system-following theme. Implementation detail lives in docs/SPEC.md
-sections 4.3, 8.3 and 8.4 and milestone M9. The "Message checks (OpenRouter)" card belongs to
+sections 4.3, 8.3 and 8.4 and milestone M9. The "Message checks" card belongs to
 the message-checks capability, and the reader's message-order option to the reader capability.
 The OAuth client and Accounts cards are described here as screens; what signing in, saving a
 client and removing an account do belongs to the accounts-and-signin capability.
@@ -13,8 +13,8 @@ client and removing an account do belongs to the accounts-and-signin capability.
 ### Requirement: Settings screen
 The app SHALL show Settings in the main window when the user presses ctrl-, , clicks the
 header's Settings button or picks Settings in the command palette. Settings SHALL hold the
-cards "Google OAuth client", "Accounts", "Preferences" and "Message checks (OpenRouter)", and
-Escape or ✕ SHALL return to the mail view.
+cards "Google OAuth client", "Accounts", "Preferences" and "Message checks", and Escape or ✕
+SHALL return to the mail view.
 
 #### Scenario: Open and close
 - **WHEN** the user presses ctrl-, in the mail view

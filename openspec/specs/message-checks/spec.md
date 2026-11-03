@@ -1,30 +1,31 @@
 # message-checks Specification
 
 ## Purpose
-Flag phishing, scams and spam with TypeSafe's Jev model through OpenRouter, for accounts the
-user opts in, while keeping what leaves the machine small and redacted, and give every
+Flag phishing, scams and spam with TypeSafe's Jev model through OpenRouter, or Cloudflare's
+Clef or Clef-flash on Workers AI, for accounts the user opts in, while keeping what leaves the machine small and redacted, and give every
 account a local caution and link guard that need no network. Checks are advisory only.
-Implementation detail lives in docs/SPEC.md section 16 (except 16.8) and milestone M16, and
-in docs/ai-triage.md. Label suggestions belong to their own capability.
+Implementation detail lives in docs/SPEC.md section 16 (except 16.8, with Clef in 16.17) and
+milestone M16, and in docs/ai-triage.md. Label suggestions belong to their own capability.
 
 ## Requirements
 
 ### Requirement: Off until a key and per-account consent, revocable at once
-The app SHALL send nothing to OpenRouter unless an OpenRouter key is saved and the account
-has accepted the current disclosure. Settings SHALL offer one "Check messages in <email>"
-toggle per account; turning it on SHALL first open an inline disclosure of what is sent,
-with Turn on and Cancel, and links to the OpenRouter and TypeSafe privacy policies. When
-what is sent changes, every account SHALL count as off and SHALL show "What Eloquawk sends
-has changed. Review and turn on again." until the user accepts again. Without a key the
-toggles SHALL be disabled with the caption "Add a key first".
-Turning an account off, removing it, Gmail resetting its history, an outdated disclosure and
-removing the key SHALL drop every queued and retrying check they cover before another
-request starts, and SHALL forget their results. An answer to a request already sent SHALL be
-discarded.
+The app SHALL send nothing to the chosen checker unless its key is saved (and, for Clef, a
+valid account ID is set) and the account has accepted the current disclosure. Settings SHALL
+offer one "Check messages in <email>" toggle per account; turning it on SHALL first open an
+inline disclosure of what is sent, with Turn on and Cancel, and links to the privacy policies
+of the processors involved: OpenRouter and TypeSafe for Jev, Cloudflare for Clef. When what
+is sent changes, every account SHALL count as off and SHALL show "What Eloquawk sends has
+changed. Review and turn on again." until the user accepts again. Without a key the toggles
+SHALL be disabled with the caption "Add a key first".
+Turning an account off, removing it, Gmail resetting its history, an outdated disclosure,
+switching checker and removing the key SHALL drop every queued and retrying check they cover
+before another request starts, and SHALL forget their results. An answer to a request
+already sent SHALL be discarded.
 
 #### Scenario: No account opted in
 - **WHEN** a key is saved, no account is opted in, and the user opens messages
-- **THEN** no check is sent to OpenRouter
+- **THEN** no check is sent
 
 #### Scenario: Turning an account on
 - **WHEN** the user ticks "Check messages in <email>" for the first time
@@ -40,27 +41,37 @@ discarded.
 - **WHEN** the user turns an account off while one of its checks is waiting
 - **THEN** that check is never sent, and any answer already on its way shows nothing
 
-### Requirement: The OpenRouter key lives only in the Secret Service and can be tested
-The key SHALL be stored only in the Secret Service, as item `openrouter-api-key` under the
-service `korora.tech.Eloquawk`, labelled "Eloquawk: OpenRouter API key". The key field
-SHALL be masked and cleared on Save, on Remove and when Settings closes; afterwards the app
-SHALL show only a hint such as "sk-or-…abcd". A key that does not start with `sk-or-`, is
-not 20 to 256 characters, or contains whitespace or control characters SHALL be refused
-with "That doesn't look like an OpenRouter key (it should start with sk-or-)" and not saved.
-The keyring SHALL NOT be read for the key until the app's own first keyring access has
-settled. Remove SHALL delete the key, drop every queued check and forget every result.
-Test SHALL check the typed key, or the saved one when the field is empty, by reading the
-key's remaining credit and asking Jev one synthetic question that contains no mail. Success
-SHALL read "Key works · Jev answered in <n> s", followed by "· $<x> left on this key" when
-the key has a credit limit, and "· Save it to use it" for a typed, unsaved key. Failure SHALL
-show the error's user-facing text.
+Choosing the checkerClef requests go only to Cloudflare Workers AI
+
+### Requirement: Checker keys live only in the Secret Service and can be tested
+Keys SHALL be stored only in the Secret Service under the service `korora.tech.Eloquawk`: the
+OpenRouter key as item `openrouter-api-key` labelled "Eloquawk: OpenRouter API key", and the
+Cloudflare API token as item `cloudflare-api-token` labelled "Eloquawk: Cloudflare API
+token". The key field SHALL be masked and cleared on Save, on Remove and when Settings
+closes; afterwards the app SHALL show only a hint such as "sk-or-…abcd" or "…abcd". An
+OpenRouter key that does not start with `sk-or-`, is not 20 to 256 characters, or contains
+whitespace or control characters SHALL be refused with "That doesn't look like an OpenRouter
+key (it should start with sk-or-)". A Cloudflare token that is not 32 to 256 letters, digits,
+`_` or `-` SHALL be refused with "That doesn't look like a Cloudflare API token". A refused
+key SHALL NOT be saved. The keyring SHALL NOT be read for a key until the app's own first
+keyring access has settled. Remove SHALL delete the chosen checker's key, drop every queued
+check and forget every result.
+Test SHALL check the typed key, or the saved one when the field is empty, by asking the
+chosen model one synthetic question that contains no mail, after reading the key's remaining
+credit for OpenRouter. Success SHALL read "Key works · <model> answered in <n> s", followed by
+"· $<x> left on this key" when an OpenRouter key has a credit limit, and "· Save it to use
+it" for a typed, unsaved key. Failure SHALL show the error's user-facing text.
 
 #### Scenario: Saving a key
-- **WHEN** the user pastes a valid key and presses Save
+- **WHEN** Jev is chosen and the user pastes a valid key and presses Save
 - **THEN** the field empties and the status reads "Saved (sk-or-…<last four>)"
 
+#### Scenario: Saving a Cloudflare token
+- **WHEN** Clef is chosen and the user pastes a valid token and presses Save
+- **THEN** the field empties and the status reads "Saved (…<last four>)"
+
 #### Scenario: Invalid key
-- **WHEN** the user saves "hello"
+- **WHEN** Jev is chosen and the user saves "hello"
 - **THEN** the inline error asks for a key starting with sk-or- and nothing is stored
 
 #### Scenario: Key status before the keyring answers
@@ -101,8 +112,8 @@ SHALL be sent as written, and the disclosure SHALL say so.
 - **WHEN** a link's display text is itself a URL
 - **THEN** only that text's host is sent as the display text
 
-### Requirement: Requests go only to OpenRouter, without retention
-Every check SHALL go to OpenRouter's Decisions API with the pinned model
+### Requirement: Jev requests go only to OpenRouter, without retention
+With Jev chosen every check SHALL go to OpenRouter's Decisions API with the pinned model
 `typesafe/jev-1.13` and SHALL ask for zero data retention, no data collection and a prompt
 price of at most $0.42 per million tokens, so routing fails rather than reach any other
 endpoint. Redirects SHALL never be followed, and no setting, flag or environment variable
@@ -156,15 +167,16 @@ show a "safe" or "verified" mark.
 The reader SHALL show a banner below the subject for a warning, danger or spam verdict on
 the open thread's checked message. Its title SHALL be "This looks like phishing" or "This
 looks like a scam" (danger), "This may be phishing" or "This may be a scam" (warning), or
-"This looks like spam". The right-hand text SHALL be qualitative ("Jev: very likely", "Jev:
-possible" or "Jev: likely spam"), adding "· also possibly a scam" or "· also possibly
-phishing" when the other score is at least 0.50, with a tooltip "Model score <n>, not a
-probability of harm". The reasons line SHALL hold up to three of Eloquawk's own observations
-(a failed DMARC, or SPF or DKIM when DMARC is unknown; the first link whose text names
-another host; a Reply-To in another domain; a risky attachment type), or "Jev's assessment
-of the content" when there are none, with every host in its ASCII (punycode) form. The
-banner SHALL offer Report spam, which is undoable, and Dismiss, which hides it for the
-session. The app SHALL never act on a verdict by itself.
+"This looks like spam". The right-hand text SHALL be qualitative ("<model>: very likely",
+"<model>: possible" or "<model>: likely spam", where the model is Jev, Clef or Clef-flash),
+adding "· also possibly a scam" or "· also possibly phishing" when the other score is at
+least 0.50, with a tooltip "Model score <n>, not a probability of harm". The reasons line
+SHALL hold up to three of Eloquawk's own observations (a failed DMARC, or SPF or DKIM when
+DMARC is unknown; the first link whose text names another host; a Reply-To in another
+domain; a risky attachment type), or "<model>'s assessment of the content" when there are
+none, with every host in its ASCII (punycode) form. The banner SHALL offer Report spam, which
+is undoable, and Dismiss, which hides it for the session. The app SHALL never act on a
+verdict by itself.
 
 #### Scenario: Phishing banner
 - **WHEN** the user opens a fake PayPal message that failed DMARC and links "www.paypal.com"
@@ -181,6 +193,10 @@ session. The app SHALL never act on a verdict by itself.
 - **WHEN** the user clicks Dismiss
 - **THEN** the banner stays hidden for that message for the rest of the session
 
+#### Scenario: Clef wording
+- **WHEN** Clef is chosen and scores a message as phishing danger
+- **THEN** the banner's right-hand text reads "Clef: very likely"
+
 ### Requirement: Thread-row badge
 A thread checked this session SHALL show a pill on its row: "Phishing" or "Scam" for danger,
 "Suspicious" for a warning, and "Spam" for spam except in the Spam view. Clean and unchecked
@@ -194,14 +210,17 @@ threads SHALL show no badge.
 After a failed check of an opted-in message with no banner, the reader SHALL show the muted
 caption "Couldn't check this message", with "· Retry" when a retry may help. Busy and network
 errors SHALL be retried with backoff (at most two retries on open) before failing. A rejected
-key, no credit, a key or budget limit, an unavailable endpoint and the spend limit SHALL
-pause all checks for the session: the reader SHALL show "Paused: <reason>" and Settings
-"Checks are paused: <reason>" with Try again. A rejected key SHALL stay paused until a key is
-saved or the saved key passes Test, and Try again SHALL NOT be offered for it. Mail sync SHALL
-never be affected.
+key, no credit or allocation, a key, budget or permission limit, an unavailable endpoint and
+the spend limit SHALL pause all checks for the session: the reader SHALL show "Paused:
+<reason>" and Settings "Checks are paused: <reason>" with Try again. A rejected key SHALL
+stay paused until a key is saved or the saved key passes Test, and Try again SHALL NOT be
+offered for it. Mail sync SHALL never be affected. With Clef the reasons SHALL read
+"Cloudflare rejected this token", "Your Workers AI allocation has run out", "Cloudflare
+refused the request (token permissions or account ID)", "Clef isn't available on Workers AI
+right now" and "Couldn't reach Cloudflare".
 
 #### Scenario: Retryable failure
-- **WHEN** OpenRouter stays busy through every attempt of a check on open
+- **WHEN** the checker stays busy through every attempt of a check on open
 - **THEN** the reader shows "Couldn't check this message · Retry"
 - **AND** Retry sends the check again
 
@@ -214,6 +233,10 @@ never be affected.
 - **WHEN** OpenRouter rejects the key
 - **THEN** the key status reads "OpenRouter rejected this key" and the key is not sent again
   until a key is saved
+
+#### Scenario: Rejected Cloudflare token
+- **WHEN** Clef is chosen and Cloudflare answers 401
+- **THEN** the key status reads "Cloudflare rejected this token" and checks pause
 
 ### Requirement: Session spend limit and usage
 Settings SHALL hold a per-session spend limit, default $1.00, accepting $0.10 to $100 on
@@ -283,21 +306,23 @@ is best effort: a click before Jev answers SHALL be guarded only by the local ca
 - **THEN** the notice shows the `xn--` form of the host
 
 ### Requirement: Logs carry no mail or key
-Message-check logs SHALL be limited to the HTTP status, OpenRouter's error code, its
-`metadata.reason` or `limit_source`, the network error kind and keyring failures, prefixed
-`eloquawk: jev:`. With `ELOQUAWK_JEV_DEBUG=1` the app MAY also log check decisions, the key
-state and label names and scores. No log SHALL contain the key, a request or response body,
-OpenRouter's error message, a subject, an address or a host.
+Message-check logs SHALL be limited to the HTTP status, the checker's error code (with
+OpenRouter also its `metadata.reason` or `limit_source`), the network error kind and keyring
+failures, prefixed `eloquawk: jev:`. With `ELOQUAWK_JEV_DEBUG=1` the app MAY also log check
+decisions, the key state and label names and scores. No log SHALL contain the key, the
+account ID, a request or response body, the checker's error message, a subject, an address or
+a host.
 
 #### Scenario: Failed request
 - **WHEN** a check fails with a 402
 - **THEN** stderr shows the status and error code and no message text
 
 ### Requirement: Demo mode is offline
-In demo mode checks SHALL run through a built-in offline checker: no network request and no
-keyring access. Both demo accounts SHALL start opted in with background checks on, Settings
-SHALL replace the key row with "Demo mode uses a built-in offline checker. Nothing is sent.",
-and Test SHALL answer "Demo mode: the checker is offline".
+In demo mode checks SHALL run through a built-in offline checker whatever checker is chosen:
+no network request and no keyring access. Both demo accounts SHALL start opted in with
+background checks on, Settings SHALL replace the key row with "Demo mode uses a built-in
+offline checker. Nothing is sent.", and Test SHALL answer "Demo mode: the checker is
+offline".
 
 #### Scenario: Demo phishing message
 - **WHEN** the user opens "Your account will be suspended" in `--demo`

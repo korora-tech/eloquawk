@@ -2,7 +2,7 @@
 
 ## Purpose
 Offer up to a few of the account's own labels as one-key next actions when the user opens a
-message, using the same Jev check as message checks, without ever filing mail by itself.
+message, using the same check as message checks, without ever filing mail by itself.
 Implementation detail lives in docs/SPEC.md section 16.8, the label parts of 16.2, 16.6,
 16.10 and 16.12.3, milestone M17, and the "Suggested labels" section of docs/ai-triage.md.
 
@@ -44,10 +44,11 @@ are sent with each check of a message the user opens.
 
 ### Requirement: Label guidance
 Settings SHALL offer a "LABEL GUIDANCE" field, up to 500 characters, saved on the device with
-Save guidance and captioned "Saved on this device and sent to OpenRouter and TypeSafe with
-label suggestions. Avoid secrets and private information." The guidance SHALL be sent, with
-control characters stripped and without redaction, only with label questions, never with a
-check that asks no labels. Changing it SHALL ask about the open message's labels again.
+Save guidance and captioned "Saved on this device and sent to <processors> with label
+suggestions. Avoid secrets and private information.", where the processors are "OpenRouter
+and TypeSafe" for Jev and "Cloudflare" for Clef. The guidance SHALL be sent, with control
+characters stripped and without redaction, only with label questions, never with a check
+that asks no labels. Changing it SHALL ask about the open message's labels again.
 
 #### Scenario: Guidance only with labels
 - **WHEN** guidance is saved and suggestions are turned off
