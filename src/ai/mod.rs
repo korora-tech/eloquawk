@@ -1,12 +1,14 @@
-//! AI triage (SPEC 16): Jev, TypeSafe's decision model, reached through OpenRouter's Decisions
-//! API, flags phishing, scams and spam. Advisory only: nothing here moves or labels mail.
+//! AI triage (SPEC 16): a decision model flags phishing, scams and spam. The checker is Jev,
+//! TypeSafe's model reached through OpenRouter's Decisions API, or Cloudflare's Clef or
+//! Clef-flash on Workers AI ([`AiBackend`]). Advisory only: nothing here moves or labels mail.
 //!
 //! The UI builds a small, redacted [`prompt::AiInput`] and sends it as a [`AiCommand::Check`]
-//! to the `eloquawk-ai` thread ([`worker`]), which owns the OpenRouter key, the HTTP calls,
+//! to the `eloquawk-ai` thread ([`worker`]), which owns the checker's key, the HTTP calls,
 //! retries, pauses and the spend limit, and answers with [`AiEvent`]s. Demo mode runs the same
 //! worker with an offline checker ([`fake`]) and never touches the network or the keyring.
 
 pub mod cache;
+pub mod cloudflare;
 pub mod fake;
 pub mod jev;
 #[cfg(test)]
@@ -18,13 +20,15 @@ pub mod worker;
 use std::fmt;
 use std::sync::mpsc;
 
+use serde::{Deserialize, Serialize};
+
 use crate::config::Prefs;
 use crate::model::{AccountId, ThreadKey};
 use crate::secrets::Secrets;
 use crate::store::Mode;
 
 use jev::Verdict;
-use openrouter::{AiEndpoints, ApiKey};
+use openrouter::{AiEndpoints, ApiKey, Vendor};
 use prompt::AiInput;
 
 /// Whether opt-in Jev diagnostics are enabled.
@@ -57,6 +61,61 @@ pub const JEV_MODEL: &str = "typesafe/jev-1.13";
 /// account off until the user accepts again (SPEC 16.2). Version 2 (M17) adds the label
 /// names sent with each check of a message you open.
 pub const DISCLOSURE_VERSION: u32 = 2;
+
+/// The decision model that checks messages, and so who receives them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AiBackend {
+    /// TypeSafe's Jev through OpenRouter.
+    #[default]
+    Jev,
+    /// Cloudflare's Clef on Workers AI.
+    Clef,
+    /// Cloudflare's Clef-flash on Workers AI.
+    ClefFlash,
+}
+
+impl AiBackend {
+    pub const ALL: [AiBackend; 3] = [AiBackend::Jev, AiBackend::Clef, AiBackend::ClefFlash];
+
+    pub fn vendor(self) -> Vendor {
+        match self {
+            AiBackend::Jev => Vendor::OpenRouter,
+            AiBackend::Clef | AiBackend::ClefFlash => Vendor::Cloudflare,
+        }
+    }
+
+    /// The model's name as the UI shows it.
+    pub fn model_name(self) -> &'static str {
+        match self {
+            AiBackend::Jev => "Jev",
+            AiBackend::Clef => "Clef",
+            AiBackend::ClefFlash => "Clef-flash",
+        }
+    }
+
+    /// Who the requests go to.
+    pub fn vendor_name(self) -> &'static str {
+        match self.vendor() {
+            Vendor::OpenRouter => "OpenRouter",
+            Vendor::Cloudflare => "Cloudflare",
+        }
+    }
+
+    /// "Jev (OpenRouter)": the checker choice in Settings.
+    pub fn label(self) -> String {
+        format!("{} ({})", self.model_name(), self.vendor_name())
+    }
+
+    /// Workers AI's model selector, for Clef only.
+    pub fn clef_selector(self) -> Option<&'static str> {
+        match self {
+            AiBackend::Jev => None,
+            AiBackend::Clef => Some("clef"),
+            AiBackend::ClefFlash => Some("clef-flash"),
+        }
+    }
+}
 
 /// Which lane a check runs in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -110,6 +169,12 @@ pub enum AiCommand {
     ResumePaused,
     /// The session spend limit changed, in cents.
     SpendLimit(u32),
+    /// The checker or the Cloudflare account ID changed: drop everything, forget every result
+    /// and load the new checker's key.
+    Backend {
+        backend: AiBackend,
+        account_id: String,
+    },
     Shutdown,
 }
 
@@ -223,7 +288,7 @@ pub fn start(
     secrets: Option<Secrets>,
     prefs: &Prefs,
 ) -> std::io::Result<(AiHandle, async_channel::Receiver<AiEvent>)> {
-    worker::start_with(mode, secrets, prefs, AiEndpoints::openrouter())
+    worker::start_with(mode, secrets, prefs, AiEndpoints::production())
 }
 
 #[cfg(test)]

@@ -12,6 +12,7 @@ use std::time::Duration;
 use jiff::Timestamp;
 use serde::Deserialize;
 
+use super::AiBackend;
 use crate::google::api::{NetKind, net_kind, parse_retry_after};
 
 /// The request timeout, also the agent's global one.
@@ -22,33 +23,54 @@ pub const BODY_LIMIT: u64 = 1024 * 1024;
 const REFERER: &str = "https://github.com/korora-tech/eloquawk";
 const TITLE: &str = "Eloquawk";
 
-/// Where the AI worker sends its requests. Only [`AiEndpoints::openrouter`] exists outside
+/// Where the AI worker sends its requests. Only [`AiEndpoints::production`] exists outside
 /// tests: no variable, pref or flag can redirect the key or the mail.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AiEndpoints {
     decisions: String,
     key: String,
+    /// Cloudflare's API base, before `/accounts/<id>/ai/run/…`.
+    pub(super) cloudflare: String,
 }
 
 impl AiEndpoints {
-    pub fn openrouter() -> Self {
+    pub fn production() -> Self {
         Self {
             decisions: "https://openrouter.ai/api/alpha/decisions".into(),
             key: "https://openrouter.ai/api/v1/key".into(),
+            cloudflare: "https://api.cloudflare.com/client/v4".into(),
         }
     }
 
     /// Endpoints on a loopback test server.
     #[cfg(test)]
     pub fn new(decisions: String, key: String) -> Self {
-        Self { decisions, key }
+        Self {
+            decisions,
+            key,
+            cloudflare: String::new(),
+        }
+    }
+
+    /// Cloudflare's API on a loopback test server.
+    #[cfg(test)]
+    pub fn with_cloudflare(mut self, base: String) -> Self {
+        self.cloudflare = base;
+        self
     }
 }
 
-/// An OpenRouter API key. `Debug` and `Display` show only its last four characters, it is not
-/// `Clone`, and its bytes are overwritten with zeros when it is dropped (best effort: earlier
-/// reallocations of the input are not covered).
-pub struct ApiKey(String);
+/// Who issued a key.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Vendor {
+    OpenRouter,
+    Cloudflare,
+}
+
+/// An OpenRouter API key or a Cloudflare API token. `Debug` and `Display` show only its last
+/// four characters, it is not `Clone`, and its bytes are overwritten with zeros when it is
+/// dropped (best effort: earlier reallocations of the input are not covered).
+pub struct ApiKey(String, Vendor);
 
 /// Why a typed key was refused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -67,6 +89,18 @@ impl fmt::Display for KeyError {
 /// The inline error Settings shows for a key that fails [`ApiKey::parse`].
 pub const KEY_INVALID: &str =
     "That doesn't look like an OpenRouter key (it should start with sk-or-)";
+/// The inline error Settings shows for a token that fails [`ApiKey::parse_cloudflare`].
+pub const TOKEN_INVALID: &str = "That doesn't look like a Cloudflare API token";
+
+impl KeyError {
+    /// The inline error for a key of `vendor`.
+    pub fn text(self, vendor: Vendor) -> &'static str {
+        match vendor {
+            Vendor::OpenRouter => KEY_INVALID,
+            Vendor::Cloudflare => TOKEN_INVALID,
+        }
+    }
+}
 
 impl ApiKey {
     /// Validates a typed or stored key: trimmed, starting `sk-or-`, 20 to 256 characters, with
@@ -82,12 +116,43 @@ impl ApiKey {
         if key.chars().any(|c| c.is_whitespace() || c.is_control()) {
             return Err(KeyError::Characters);
         }
-        Ok(Self(key.to_string()))
+        Ok(Self(key.to_string(), Vendor::OpenRouter))
     }
 
-    /// `sk-or-…abcd`: all the UI ever holds of a key.
+    /// Validates a typed or stored Cloudflare API token: trimmed, 32 to 256 letters, digits,
+    /// `_` or `-`.
+    pub fn parse_cloudflare(raw: &str) -> Result<Self, KeyError> {
+        let token = raw.trim();
+        if !(32..=256).contains(&token.len()) {
+            return Err(KeyError::Length);
+        }
+        if !token
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+        {
+            return Err(KeyError::Characters);
+        }
+        Ok(Self(token.to_string(), Vendor::Cloudflare))
+    }
+
+    /// Validates a key of `vendor`.
+    pub fn parse_for(vendor: Vendor, raw: &str) -> Result<Self, KeyError> {
+        match vendor {
+            Vendor::OpenRouter => Self::parse(raw),
+            Vendor::Cloudflare => Self::parse_cloudflare(raw),
+        }
+    }
+
+    pub fn vendor(&self) -> Vendor {
+        self.1
+    }
+
+    /// `sk-or-…abcd` or `…abcd`: all the UI ever holds of a key.
     pub fn hint(&self) -> String {
-        format!("sk-or-…{}", self.last4())
+        match self.1 {
+            Vendor::OpenRouter => format!("sk-or-…{}", self.last4()),
+            Vendor::Cloudflare => format!("…{}", self.last4()),
+        }
     }
 
     fn last4(&self) -> &str {
@@ -168,18 +233,28 @@ impl AiError {
             Self::Network(_) => "network",
         }
     }
-    /// The text the reader and Settings show (SPEC 16.14).
-    pub fn user_text(&self) -> String {
+    /// The text the reader and Settings show (SPEC 16.14), naming `backend`'s vendor.
+    pub fn text(&self, backend: AiBackend) -> String {
+        let cloudflare = backend.vendor() == Vendor::Cloudflare;
         match self {
+            AiError::KeyRejected if cloudflare => "Cloudflare rejected this token".into(),
             AiError::KeyRejected => "OpenRouter rejected this key".into(),
+            AiError::Credits if cloudflare => "Your Workers AI allocation has run out".into(),
             AiError::Credits => "Your OpenRouter credit has run out".into(),
+            AiError::Forbidden(_) if cloudflare => {
+                "Cloudflare refused the request (token permissions or account ID)".into()
+            }
             AiError::Forbidden(_) => "OpenRouter refused the request (key or budget limit)".into(),
+            AiError::Unavailable if cloudflare => format!(
+                "{} isn't available on Workers AI right now",
+                backend.model_name()
+            ),
             AiError::Unavailable => {
                 "Jev isn't available with zero data retention within Eloquawk's price limit \
                  right now"
                     .into()
             }
-            AiError::Network(_) => "Couldn't reach OpenRouter".into(),
+            AiError::Network(_) => format!("Couldn't reach {}", backend.vendor_name()),
             AiError::Decode
             | AiError::Invalid
             | AiError::Busy { .. }
@@ -332,8 +407,21 @@ pub fn agent() -> ureq::Agent {
 
 type Response = ureq::http::Response<ureq::Body>;
 
-/// Reads a response within [`BODY_LIMIT`]: the body of a 2xx, or the classified error.
+/// Turns a non-2xx status, `Retry-After` and body into an error.
+pub(super) type Classify = fn(u16, Option<&str>, &str, Timestamp) -> AiError;
+
+/// Reads an OpenRouter response within [`BODY_LIMIT`].
 fn read(result: Result<Response, ureq::Error>) -> Result<Vec<u8>, AiError> {
+    read_with(result, classify, log_failure)
+}
+
+/// Reads a response within [`BODY_LIMIT`]: the body of a 2xx, or the error `classify` makes of
+/// it after `log` has logged it.
+pub(super) fn read_with(
+    result: Result<Response, ureq::Error>,
+    classify: Classify,
+    log: fn(u16, &str),
+) -> Result<Vec<u8>, AiError> {
     let mut resp = result.map_err(|e| {
         let kind = net_kind(&e);
         eprintln!("eloquawk: jev: network error: {kind}");
@@ -366,7 +454,7 @@ fn read(result: Result<Response, ureq::Error>) -> Result<Vec<u8>, AiError> {
         return Ok(body);
     }
     let text = String::from_utf8_lossy(&body);
-    log_failure(status, &text);
+    log(status, &text);
     Err(classify(
         status,
         retry_after.as_deref(),
@@ -545,8 +633,20 @@ mod tests {
         assert!(!AiError::Flagged.pauses() && !AiError::Invalid.pauses());
         assert!(AiError::Network(NetKind::Timeout).retryable());
         assert_eq!(
-            AiError::Network(NetKind::Io).user_text(),
+            AiError::Network(NetKind::Io).text(AiBackend::Jev),
             "Couldn't reach OpenRouter"
+        );
+        assert_eq!(
+            AiError::Network(NetKind::Io).text(AiBackend::ClefFlash),
+            "Couldn't reach Cloudflare"
+        );
+        assert_eq!(
+            AiError::Unavailable.text(AiBackend::ClefFlash),
+            "Clef-flash isn't available on Workers AI right now"
+        );
+        assert_eq!(
+            AiError::KeyRejected.text(AiBackend::Clef),
+            "Cloudflare rejected this token"
         );
     }
 
@@ -585,6 +685,29 @@ mod tests {
     }
 
     #[test]
+    fn cloudflare_tokens_are_validated() {
+        let token = "AbCdEfGh0123456789_-abcdefghWXYZ0123456";
+        let t = ApiKey::parse_cloudflare(&format!(" {token}\n")).unwrap();
+        assert_eq!((t.expose(), t.vendor()), (token, Vendor::Cloudflare));
+        assert_eq!(t.hint(), "…3456");
+        assert!(!format!("{t:?}").contains("0123456789"));
+        assert_eq!(
+            ApiKey::parse_cloudflare("short").unwrap_err(),
+            KeyError::Length
+        );
+        assert_eq!(
+            ApiKey::parse_cloudflare(&format!("{token} x")).unwrap_err(),
+            KeyError::Characters
+        );
+        assert_eq!(
+            ApiKey::parse_cloudflare(&format!("{token}/..")).unwrap_err(),
+            KeyError::Characters
+        );
+        assert!(ApiKey::parse_for(Vendor::OpenRouter, token).is_err());
+        assert_eq!(KeyError::Length.text(Vendor::Cloudflare), TOKEN_INVALID);
+    }
+
+    #[test]
     fn backoff_schedule_cap_and_jitter() {
         assert_eq!(Backoff::delay(0, None, 0), Duration::from_secs(1));
         assert_eq!(Backoff::delay(1, None, 250), Duration::from_millis(2250));
@@ -619,7 +742,7 @@ mod tests {
         assert_eq!(a.config().max_redirects(), 0);
         assert!(!a.config().http_status_as_error());
         assert_eq!(
-            AiEndpoints::openrouter().decisions,
+            AiEndpoints::production().decisions,
             "https://openrouter.ai/api/alpha/decisions"
         );
     }

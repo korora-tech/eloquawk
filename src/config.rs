@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::ai::AiBackend;
 use crate::model::AccountId;
 
 /// The colour scheme the user picked.
@@ -48,6 +49,10 @@ pub struct AiPrefs {
     pub background: bool,
     /// Checks stop for the session at this much spend, in cents, clamped to 10..=10_000.
     pub spend_limit_cents: u32,
+    /// Which model checks messages, and so who receives them.
+    pub backend: AiBackend,
+    /// The Cloudflare account Clef requests name; not a secret. Only a valid ID is used.
+    pub cloudflare_account_id: String,
 }
 
 impl Default for AiPrefs {
@@ -59,6 +64,8 @@ impl Default for AiPrefs {
             required_label_group: String::new(),
             background: false,
             spend_limit_cents: 100,
+            backend: AiBackend::Jev,
+            cloudflare_account_id: String::new(),
         }
     }
 }
@@ -246,6 +253,8 @@ mod tests {
                 required_label_group: "TTL".into(),
                 background: true,
                 spend_limit_cents: 250,
+                backend: AiBackend::ClefFlash,
+                cloudflare_account_id: "0123456789abcdef0123456789abcdef".into(),
             },
             ephemeral: false,
         };

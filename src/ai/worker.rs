@@ -18,9 +18,11 @@ use super::fake::FakeDecider;
 use super::jev::{
     DecisionsRequest, DecisionsResponse, Question, THRESHOLDS, validate, verdict_from,
 };
-use super::openrouter::{self, AiEndpoints, AiError, ApiKey, BACKOFF_CAP, Backoff};
+use super::openrouter::{self, AiEndpoints, AiError, ApiKey, BACKOFF_CAP, Backoff, Vendor};
 use super::prompt::{label_question_id, shrink};
-use super::{AiCommand, AiEvent, AiHandle, CheckRequest, KeyState, Outcome, Priority};
+use super::{
+    AiBackend, AiCommand, AiEvent, AiHandle, CheckRequest, KeyState, Outcome, Priority, cloudflare,
+};
 use crate::config::Prefs;
 use crate::model::AccountId;
 use crate::secrets::{SecretError, Secrets};
@@ -35,8 +37,10 @@ const IDLE: Duration = Duration::from_secs(30);
 /// What an unknown `usage.cost` counts as towards the spend limit (SPEC 16.11).
 pub const UNKNOWN_COST: f64 = 0.001;
 
-/// Answers a decision request: OpenRouter, or the offline checker.
+/// Answers a decision request: OpenRouter, Cloudflare, or the offline checker.
 pub trait Decider: Send {
+    /// Where requests go from now on.
+    fn route(&mut self, _backend: AiBackend, _account_id: &str) {}
     fn decide(
         &mut self,
         key: Option<&ApiKey>,
@@ -46,10 +50,12 @@ pub trait Decider: Send {
     fn credit(&mut self, key: &ApiKey) -> Result<Option<f64>, AiError>;
 }
 
-/// OpenRouter over ureq.
+/// OpenRouter or Cloudflare over ureq.
 pub struct HttpDecider {
     agent: ureq::Agent,
     endpoints: AiEndpoints,
+    backend: AiBackend,
+    account_id: String,
 }
 
 impl HttpDecider {
@@ -57,23 +63,55 @@ impl HttpDecider {
         Self {
             agent: openrouter::agent(),
             endpoints,
+            backend: AiBackend::Jev,
+            account_id: String::new(),
         }
     }
 }
 
 impl Decider for HttpDecider {
+    fn route(&mut self, backend: AiBackend, account_id: &str) {
+        self.backend = backend;
+        self.account_id = account_id.to_string();
+    }
+
     fn decide(
         &mut self,
         key: Option<&ApiKey>,
         req: &DecisionsRequest,
     ) -> Result<DecisionsResponse, AiError> {
         let key = key.ok_or(AiError::KeyRejected)?;
-        let body = openrouter::post_decisions(&self.agent, &self.endpoints, key, &req.to_bytes())?;
-        serde_json::from_slice(&body).map_err(|_| AiError::Decode)
+        // A key never goes to the other vendor, whatever the order of commands.
+        if key.vendor() != self.backend.vendor() {
+            return Err(AiError::KeyRejected);
+        }
+        match self.backend.vendor() {
+            Vendor::OpenRouter => {
+                let body =
+                    openrouter::post_decisions(&self.agent, &self.endpoints, key, &req.to_bytes())?;
+                serde_json::from_slice(&body).map_err(|_| AiError::Decode)
+            }
+            Vendor::Cloudflare => {
+                let body = cloudflare::body(req, self.backend).ok_or(AiError::Invalid)?;
+                let resp = cloudflare::post_run(
+                    &self.agent,
+                    &self.endpoints,
+                    &self.account_id,
+                    self.backend,
+                    key,
+                    &body,
+                )?;
+                cloudflare::parse(&resp)
+            }
+        }
     }
 
+    /// Workers AI has no credit to read.
     fn credit(&mut self, key: &ApiKey) -> Result<Option<f64>, AiError> {
-        openrouter::get_key(&self.agent, &self.endpoints, key)
+        match key.vendor() {
+            Vendor::OpenRouter => openrouter::get_key(&self.agent, &self.endpoints, key),
+            Vendor::Cloudflare => Ok(None),
+        }
     }
 }
 
@@ -104,18 +142,21 @@ pub(super) fn start_with(
         Mode::Google => Box::new(HttpDecider::new(endpoints)),
     };
     let secrets = if mode == Mode::Demo { None } else { secrets };
-    spawn(mode, secrets, decider, prefs.ai.spend_limit_cents)
+    spawn(mode, secrets, decider, prefs)
 }
 
 fn spawn(
     mode: Mode,
     secrets: Option<Secrets>,
     decider: Box<dyn Decider>,
-    limit_cents: u32,
+    prefs: &Prefs,
 ) -> std::io::Result<(AiHandle, async_channel::Receiver<AiEvent>)> {
     let (tx, rx) = mpsc::channel();
     let (etx, erx) = async_channel::unbounded();
-    let worker = Worker::new(mode, secrets, decider, etx, rx, limit_cents);
+    let mut worker = Worker::new(mode, secrets, decider, etx, rx, prefs.ai.spend_limit_cents);
+    worker.backend = prefs.ai.backend;
+    worker.account_id = prefs.ai.cloudflare_account_id.clone();
+    worker.decider.route(worker.backend, &worker.account_id);
     std::thread::Builder::new()
         .name("eloquawk-ai".into())
         .spawn(move || worker.run())?;
@@ -143,8 +184,13 @@ struct Worker {
     decider: Box<dyn Decider>,
     events: async_channel::Sender<AiEvent>,
     rx: mpsc::Receiver<AiCommand>,
+    /// The checker, and the Cloudflare account its requests name.
+    backend: AiBackend,
+    account_id: String,
     key: Option<ApiKey>,
-    /// OpenRouter refused the saved key (401).
+    /// A `Reload` has read the keyring.
+    key_loaded: bool,
+    /// The checker refused the saved key (401).
     rejected: bool,
     paused: Option<String>,
     /// The pause is the spend limit's, which "Try again" lifts by another limit.
@@ -181,7 +227,10 @@ impl Worker {
             decider,
             events,
             rx,
+            backend: AiBackend::Jev,
+            account_id: String::new(),
             key: None,
+            key_loaded: false,
             rejected: false,
             paused: None,
             spend_paused: false,
@@ -287,6 +336,10 @@ impl Worker {
                     self.spend_pause();
                 }
             }
+            AiCommand::Backend {
+                backend,
+                account_id,
+            } => self.set_backend(backend, account_id),
             AiCommand::Shutdown => self.shutdown = true,
         }
     }
@@ -295,6 +348,7 @@ impl Worker {
 
     fn load_key(&mut self) {
         super::debug(format_args!("loading key"));
+        self.key_loaded = true;
         if self.demo() {
             self.emit(AiEvent::Key(KeyState::Demo));
             return;
@@ -303,7 +357,7 @@ impl Worker {
             self.emit(AiEvent::Key(KeyState::Missing));
             return;
         };
-        let state = match secrets.openrouter_key() {
+        let state = match secrets.ai_key(self.backend.vendor()) {
             Ok(Some(key)) => {
                 let hint = key.hint();
                 self.key = Some(key);
@@ -337,7 +391,11 @@ impl Worker {
         let Some(secrets) = &self.secrets else {
             return;
         };
-        match secrets.set_openrouter_key(&key) {
+        // A key typed for the checker that was just switched away from.
+        if key.vendor() != self.backend.vendor() {
+            return;
+        }
+        match secrets.set_ai_key(&key) {
             Ok(()) => {
                 let hint = key.hint();
                 self.key = Some(key);
@@ -361,13 +419,38 @@ impl Worker {
         self.global_epoch += 1;
         self.retry_at = None;
         if let Some(secrets) = &self.secrets
-            && secrets.clear_openrouter_key().is_err()
+            && secrets.clear_ai_key(self.backend.vendor()).is_err()
         {
             eprintln!("eloquawk: jev: the key could not be removed from the keyring");
         }
         self.key = None;
         self.rejected = false;
         self.emit(AiEvent::Key(KeyState::Missing));
+    }
+
+    /// A new checker or account ID: nothing queued, cached or on the wire under the old one
+    /// is kept, and the new checker's key is loaded.
+    fn set_backend(&mut self, backend: AiBackend, account_id: String) {
+        if (backend, account_id.as_str()) == (self.backend, self.account_id.as_str()) {
+            return;
+        }
+        self.backend = backend;
+        self.account_id = account_id;
+        self.decider.route(self.backend, &self.account_id);
+        self.drop_all();
+        self.cache.clear();
+        self.global_epoch += 1;
+        self.retry_at = None;
+        self.rejected = false;
+        // The spend limit covers the session, whatever the checker.
+        if !self.spend_paused {
+            self.clear_pause();
+        }
+        self.key = None;
+        // Before the first `Reload` the keyring is not touched (SPEC 16.4).
+        if self.key_loaded {
+            self.load_key();
+        }
     }
 
     // ----- pauses ----------------------------------------------------------------------------
@@ -687,7 +770,7 @@ impl Worker {
             let hint = self.key.as_ref().map(ApiKey::hint).unwrap_or_default();
             self.emit(AiEvent::Key(KeyState::Rejected { hint }));
         }
-        self.pause(e.user_text());
+        self.pause(e.text(self.backend));
     }
 
     fn failed(&mut self, mut job: Job, interactive: bool, e: AiError) {
@@ -701,7 +784,7 @@ impl Worker {
             w.emit(AiEvent::Failed {
                 thread: job.req.thread.clone(),
                 message_id: job.req.message_id.clone(),
-                error: e.user_text(),
+                error: e.text(self.backend),
                 retryable,
             })
         };
@@ -771,7 +854,11 @@ impl Worker {
         match result {
             Ok((credit, took, cost)) => {
                 self.record_usage(cost, false);
-                let mut text = format!("Key works · Jev answered in {:.1} s", took.as_secs_f64());
+                let mut text = format!(
+                    "Key works · {} answered in {:.1} s",
+                    self.backend.model_name(),
+                    took.as_secs_f64()
+                );
                 if let Some(left) = credit {
                     text.push_str(&format!(" · ${left:.2} left on this key"));
                 }
@@ -789,7 +876,7 @@ impl Worker {
                 }
                 self.emit(AiEvent::TestResult(Ok(text)));
             }
-            Err(e) => self.emit(AiEvent::TestResult(Err(e.user_text()))),
+            Err(e) => self.emit(AiEvent::TestResult(Err(e.text(self.backend)))),
         }
     }
 }
@@ -957,6 +1044,186 @@ mod tests {
             .as_str()
             .unwrap_or_default()
             .to_string()
+    }
+
+    const CF_TOKEN: &str = "cfTestToken0123456789abcdefghijWXYZ";
+    const CF_ACCOUNT: &str = "0123456789abcdef0123456789abcdef";
+
+    fn clef_path(model: &str) -> String {
+        format!("/client/v4/accounts/{CF_ACCOUNT}/ai/run/@cf/cloudflare/{model}")
+    }
+
+    fn clef_ok(model: &str, p_phishing: f64) -> Reply {
+        let body = format!(
+            r#"{{"result":{{"model":"{model}","answers":{{"phishing":{{"type":"noul","noul":{p_phishing}}},"scam":{{"type":"noul","noul":0.02}},"spam":{{"type":"noul","noul":0.05}},"test":{{"type":"noul","noul":0.99}}}},"usage":{{"input_tokens":1000,"output_tokens":0}}}},"success":true,"errors":[],"messages":[]}}"#
+        );
+        Reply::json(200, &body).for_path(&clef_path(model))
+    }
+
+    fn all_endpoints(server: &FakeServer) -> AiEndpoints {
+        endpoints(server).with_cloudflare(server.url("/client/v4"))
+    }
+
+    /// A Google-mode Clef worker with the test token saved and loaded.
+    fn clef(
+        server: &FakeServer,
+        backend: AiBackend,
+    ) -> (AiHandle, async_channel::Receiver<AiEvent>) {
+        let secrets = Secrets::memory();
+        secrets
+            .set_ai_key(&ApiKey::parse_cloudflare(CF_TOKEN).unwrap())
+            .unwrap();
+        let mut p = prefs();
+        p.ai.backend = backend;
+        p.ai.cloudflare_account_id = CF_ACCOUNT.into();
+        let (h, rx) = start_with(Mode::Google, Some(secrets), &p, all_endpoints(server)).unwrap();
+        h.send(AiCommand::Reload);
+        wait_for(
+            &rx,
+            |e| matches!(e, AiEvent::Key(KeyState::Saved { hint }) if hint == "…WXYZ"),
+        );
+        (h, rx)
+    }
+
+    #[test]
+    fn fake_cloudflare_check() {
+        let server = FakeServer::start(vec![clef_ok("clef-flash", 0.97)]);
+        let (h, rx) = clef(&server, AiBackend::ClefFlash);
+        h.send(check("a@x", "phish", Priority::Interactive));
+        let evs = wait_for(&rx, checked("phish"));
+        let Some(AiEvent::Checked { outcome, .. }) = evs.last() else {
+            unreachable!()
+        };
+        assert_eq!(
+            outcome.verdict.unwrap().level,
+            crate::ai::jev::Level::Danger
+        );
+        let Some(AiEvent::Usage {
+            checks,
+            cost_usd,
+            cost_unknown,
+        }) = evs.iter().find(|e| matches!(e, AiEvent::Usage { .. }))
+        else {
+            panic!("{evs:?}")
+        };
+        assert_eq!((*checks, *cost_unknown), (1, 0));
+        assert!((cost_usd - 0.00024).abs() < 1e-12, "{cost_usd}");
+        let reqs = server.finish();
+        assert_eq!(reqs.len(), 1);
+        let r = &reqs[0];
+        assert_eq!(r.path(), clef_path("clef-flash"));
+        assert_eq!(
+            r.header("authorization").as_deref(),
+            Some(format!("Bearer {CF_TOKEN}").as_str())
+        );
+        assert_eq!(r.header("x-openrouter-title"), None);
+        let body: serde_json::Value = serde_json::from_slice(&r.body).unwrap();
+        assert_eq!(body["model"], "clef-flash");
+        assert!(body.get("provider").is_none(), "{body}");
+        assert_eq!(body["state"]["subject"], "phish");
+        drop(h);
+    }
+
+    #[test]
+    fn fake_cloudflare_rejected_token_pauses() {
+        let server = FakeServer::start(vec![
+            Reply::json(
+                401,
+                r#"{"success":false,"errors":[{"code":10000,"message":"Authentication error"}]}"#,
+            )
+            .for_path(&clef_path("clef")),
+            keep_open(),
+        ]);
+        let (h, rx) = clef(&server, AiBackend::Clef);
+        h.send(check("a@x", "one", Priority::Interactive));
+        let evs = wait_for(&rx, |e| matches!(e, AiEvent::Paused(Some(_))));
+        assert!(
+            evs.iter()
+                .any(|e| matches!(e, AiEvent::Key(KeyState::Rejected { .. })))
+        );
+        let Some(AiEvent::Paused(Some(reason))) = evs.last() else {
+            unreachable!()
+        };
+        assert_eq!(reason, "Cloudflare rejected this token");
+        drop(h);
+    }
+
+    #[test]
+    fn fake_backend_switch_moves_every_request() {
+        let server = FakeServer::start(vec![
+            ok(0.97),
+            clef_ok("clef", 0.10),
+            Reply::json(200, &ok_body(0.97, Some(0.00002))).for_path(DECISIONS),
+            keep_open(),
+        ]);
+        let secrets = Secrets::memory();
+        secrets.set_openrouter_key(&api_key()).unwrap();
+        secrets
+            .set_ai_key(&ApiKey::parse_cloudflare(CF_TOKEN).unwrap())
+            .unwrap();
+        let (h, rx) = start_with(
+            Mode::Google,
+            Some(secrets),
+            &prefs(),
+            all_endpoints(&server),
+        )
+        .unwrap();
+        // Before the first Reload a switch reads no key.
+        h.send(AiCommand::Backend {
+            backend: AiBackend::Jev,
+            account_id: CF_ACCOUNT.into(),
+        });
+        assert!(
+            !settle(&rx, Duration::from_millis(100))
+                .iter()
+                .any(|e| matches!(e, AiEvent::Key(_)))
+        );
+        h.send(AiCommand::Reload);
+        wait_for(
+            &rx,
+            |e| matches!(e, AiEvent::Key(KeyState::Saved { hint }) if hint.starts_with("sk-or-")),
+        );
+        h.send(check("a@x", "same", Priority::Interactive));
+        wait_for(&rx, checked("same"));
+        // Switching forgets the cached answer and loads the Cloudflare token.
+        h.send(AiCommand::Backend {
+            backend: AiBackend::Clef,
+            account_id: CF_ACCOUNT.into(),
+        });
+        wait_for(
+            &rx,
+            |e| matches!(e, AiEvent::Key(KeyState::Saved { hint }) if hint == "…WXYZ"),
+        );
+        // A key typed for the old checker is not saved under the new one.
+        h.send(AiCommand::SaveKey(api_key()));
+        h.send(check("a@x", "same", Priority::Interactive));
+        let evs = wait_for(&rx, checked("same"));
+        assert!(
+            evs.iter().any(|e| matches!(e, AiEvent::Checking { .. })),
+            "{evs:?}"
+        );
+        assert!(!evs.iter().any(|e| matches!(e, AiEvent::Key(_))), "{evs:?}");
+        // And back again.
+        h.send(AiCommand::Backend {
+            backend: AiBackend::Jev,
+            account_id: CF_ACCOUNT.into(),
+        });
+        h.send(check("a@x", "same", Priority::Interactive));
+        wait_for(&rx, checked("same"));
+        let paths: Vec<String> = server
+            .finish()
+            .iter()
+            .map(|r| r.path().to_string())
+            .collect();
+        assert_eq!(
+            paths,
+            [
+                DECISIONS.to_string(),
+                clef_path("clef"),
+                DECISIONS.to_string()
+            ]
+        );
+        drop(h);
     }
 
     #[test]
@@ -1350,7 +1617,7 @@ mod tests {
         let Some(AiEvent::Paused(Some(reason))) = evs.last() else {
             unreachable!()
         };
-        assert_eq!(reason, &AiError::Unavailable.user_text());
+        assert_eq!(reason, &AiError::Unavailable.text(AiBackend::Jev));
         assert_eq!(server.finish().len(), 1);
         std::thread::sleep(Duration::from_millis(200));
         assert!(elsewhere.requests().is_empty());
@@ -1642,7 +1909,13 @@ mod tests {
     fn fake_openrouter_event_invariant() {
         let secrets = Secrets::memory();
         secrets.set_openrouter_key(&api_key()).unwrap();
-        let (h, rx) = spawn(Mode::Google, Some(secrets), Box::new(Script), 100).unwrap();
+        let (h, rx) = spawn(
+            Mode::Google,
+            Some(secrets),
+            Box::new(Script),
+            &Prefs::default(),
+        )
+        .unwrap();
         h.send(AiCommand::Reload);
         // Slot replacement.
         for i in 0..6 {

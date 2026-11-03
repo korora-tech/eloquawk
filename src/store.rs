@@ -676,6 +676,18 @@ impl Store {
             if ai_before.spend_limit_cents != self.prefs.ai.spend_limit_cents {
                 self.send_ai(AiCommand::SpendLimit(self.prefs.ai.spend_limit_cents));
             }
+            if (ai_before.backend, &ai_before.cloudflare_account_id)
+                != (self.prefs.ai.backend, &self.prefs.ai.cloudflare_account_id)
+            {
+                if ai_before.backend != self.prefs.ai.backend && self.mode != Mode::Demo {
+                    self.ai.key = KeyState::Unknown;
+                }
+                self.ai.forget_all();
+                self.send_ai(AiCommand::Backend {
+                    backend: self.prefs.ai.backend,
+                    account_id: self.prefs.ai.cloudflare_account_id.clone(),
+                });
+            }
             // An already open message needs a check when consent or label suggestions are
             // enabled; waiting for the user to reopen it makes the feature appear inert.
             if let Some(key) = self.open.clone()
@@ -1817,8 +1829,15 @@ impl Store {
 
     /// A key is usable (or this is the demo) and nothing is paused.
     fn ai_ready(&self) -> bool {
-        (self.mode == Mode::Demo || matches!(self.ai.key, KeyState::Saved { .. }))
+        (self.mode == Mode::Demo
+            || matches!(self.ai.key, KeyState::Saved { .. }) && self.ai_account_ready())
             && self.ai.paused.is_none()
+    }
+
+    /// Jev needs no account; Clef needs a valid Cloudflare account ID.
+    pub fn ai_account_ready(&self) -> bool {
+        self.prefs.ai.backend.clef_selector().is_none()
+            || crate::ai::cloudflare::valid_account_id(&self.prefs.ai.cloudflare_account_id)
     }
 
     /// The message a thread's verdict is about (SPEC 16.6.3).

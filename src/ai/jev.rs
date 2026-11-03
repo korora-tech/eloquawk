@@ -160,7 +160,8 @@ pub fn validate(resp: &DecisionsResponse, asked: &[&str]) -> Result<Answers, AiE
         };
         probs.insert(id.to_string(), p as f32);
     }
-    if !resp.model.starts_with(JEV_MODEL) && !MODEL_LOGGED.swap(true, Ordering::Relaxed) {
+    let known = resp.model.starts_with(JEV_MODEL) || resp.model.contains("clef");
+    if !known && !MODEL_LOGGED.swap(true, Ordering::Relaxed) {
         eprintln!("eloquawk: jev: unexpected model");
     }
     Ok(Answers {

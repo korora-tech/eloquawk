@@ -1,14 +1,23 @@
-//! The live check against OpenRouter (SPEC 16.15): the demo's AI threads go through the real
-//! request builder, client, validation and verdict code. Ignored by default and skipped
-//! without `ELOQUAWK_LIVE_OPENROUTER_KEY`, so `cargo test` never touches the network; run it
-//! with `cargo test live_ -- --ignored --nocapture`. Prints only ids, scores and costs.
+//! The live checks against OpenRouter and Cloudflare (SPEC 16.15): the demo's AI threads go
+//! through the real request builder, client, validation and verdict code. Ignored by default
+//! and skipped without `ELOQUAWK_LIVE_OPENROUTER_KEY`, or `ELOQUAWK_LIVE_CLOUDFLARE_TOKEN`
+//! and `ELOQUAWK_LIVE_CLOUDFLARE_ACCOUNT` (optionally `ELOQUAWK_LIVE_CLEF=clef-flash`), so
+//! `cargo test` never touches the network; run them with
+//! `cargo test live_ -- --ignored --nocapture`. Prints only ids, scores and costs.
 
-use super::jev::{THRESHOLDS, select_suggestions, validate, verdict_from};
-use super::openrouter::{AiEndpoints, ApiKey, agent, get_key, post_decisions};
+use super::AiBackend;
+use super::cloudflare;
+use super::jev::{
+    DecisionsRequest, DecisionsResponse, THRESHOLDS, select_suggestions, validate, verdict_from,
+};
+use super::openrouter::{AiEndpoints, AiError, ApiKey, agent, get_key, post_decisions};
 use super::prompt::{AiInput, Redact, fit, label_candidates, target};
 use crate::demo_data::{self, PERSONAL, WORK};
 
 const KEY_VAR: &str = "ELOQUAWK_LIVE_OPENROUTER_KEY";
+const TOKEN_VAR: &str = "ELOQUAWK_LIVE_CLOUDFLARE_TOKEN";
+const ACCOUNT_VAR: &str = "ELOQUAWK_LIVE_CLOUDFLARE_ACCOUNT";
+const CLEF_VAR: &str = "ELOQUAWK_LIVE_CLEF";
 
 const THREADS: [&str; 6] = [
     "p-ai-phish",
@@ -28,10 +37,43 @@ fn live_jev_checks_the_demo_threads() {
         return;
     }
     let key = ApiKey::parse(&raw).expect("a valid key");
-    let (agent, endpoints) = (agent(), AiEndpoints::openrouter());
+    let (agent, endpoints) = (agent(), AiEndpoints::production());
     let credit = get_key(&agent, &endpoints, &key).expect("the key endpoint answers");
     eprintln!("key ok, limit_remaining={credit:?}");
+    check_demo_threads(|req| {
+        let body = post_decisions(&agent, &endpoints, &key, &req.to_bytes())?;
+        serde_json::from_slice(&body).map_err(|_| AiError::Decode)
+    });
+}
 
+#[test]
+#[ignore = "calls Cloudflare; needs ELOQUAWK_LIVE_CLOUDFLARE_TOKEN and _ACCOUNT"]
+fn live_clef_checks_the_demo_threads() {
+    let (raw, account) = (
+        std::env::var(TOKEN_VAR).unwrap_or_default(),
+        std::env::var(ACCOUNT_VAR).unwrap_or_default(),
+    );
+    if raw.is_empty() || account.is_empty() {
+        eprintln!("{TOKEN_VAR} or {ACCOUNT_VAR} is not set; skipping");
+        return;
+    }
+    let backend = match std::env::var(CLEF_VAR).as_deref() {
+        Ok("clef-flash") => AiBackend::ClefFlash,
+        _ => AiBackend::Clef,
+    };
+    let key = ApiKey::parse_cloudflare(&raw).expect("a valid token");
+    assert!(cloudflare::valid_account_id(&account), "a valid account ID");
+    let (agent, endpoints) = (agent(), AiEndpoints::production());
+    eprintln!("checking with {}", backend.model_name());
+    check_demo_threads(|req| {
+        let body = cloudflare::body(req, backend).expect("a Clef body");
+        let resp = cloudflare::post_run(&agent, &endpoints, &account, backend, &key, &body)?;
+        cloudflare::parse(&resp)
+    });
+}
+
+/// Checks the demo's AI threads through `decide`, printing scores, suggestions and cost.
+fn check_demo_threads(decide: impl Fn(&DecisionsRequest) -> Result<DecisionsResponse, AiError>) {
     let own = vec![PERSONAL.to_string(), WORK.to_string()];
     let labels = label_candidates(&demo_data::label_defs(PERSONAL));
     let mailbox = demo_data::generate(jiff::Timestamp::now());
@@ -50,9 +92,7 @@ fn live_jev_checks_the_demo_threads() {
         let mut verdict = None;
         for (n, req) in requests.iter().enumerate() {
             let asked: Vec<&str> = req.questions.keys().map(String::as_str).collect();
-            let body = post_decisions(&agent, &endpoints, &key, &req.to_bytes())
-                .unwrap_or_else(|e| panic!("{id}: request {n} failed: {e:?}"));
-            let resp = serde_json::from_slice(&body).expect("a decisions response");
+            let resp = decide(req).unwrap_or_else(|e| panic!("{id}: request {n} failed: {e:?}"));
             let answers = validate(&resp, &asked).expect("every question answered");
             total += answers.cost.unwrap_or(0.0);
             let p = |q: &str| answers.probs.get(q).copied().unwrap_or(0.0);

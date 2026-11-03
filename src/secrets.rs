@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 
-use crate::ai::openrouter::ApiKey;
+use crate::ai::openrouter::{ApiKey, Vendor};
 use crate::google::oauth::ClientCredentials;
 
 /// Secret Service name used for all Eloquawk keyring items.
@@ -22,6 +22,8 @@ pub(crate) const CLIENT_USER: &str = "google-oauth-client";
 pub(crate) const TOKENS_USER: &str = "google-refresh-tokens";
 /// The OpenRouter API key for the AI message checks (SPEC 16.4).
 pub(crate) const OPENROUTER_USER: &str = "openrouter-api-key";
+/// The Cloudflare API token for checks with Clef on Workers AI.
+pub(crate) const CLOUDFLARE_USER: &str = "cloudflare-api-token";
 /// The key that encrypts the on-disk summary cache (SPEC 7.7), base64.
 pub(crate) const CACHE_KEY_USER: &str = "mail-cache-key";
 
@@ -105,7 +107,8 @@ impl Secrets {
     }
 
     /// Fills the store from a seed: `{"client": {"client_id", "client_secret"}, "tokens":
-    /// {"email": "refresh token"}, "openrouter_key": "sk-or-…"}`, every key optional.
+    /// {"email": "refresh token"}, "openrouter_key": "sk-or-…", "cloudflare_token": "…"}`, every
+    /// key optional.
     #[cfg(any(test, debug_assertions))]
     pub fn seed(&self, raw: &str) -> Result<(), String> {
         #[derive(Deserialize)]
@@ -114,6 +117,7 @@ impl Secrets {
             #[serde(default)]
             tokens: BTreeMap<String, String>,
             openrouter_key: Option<String>,
+            cloudflare_token: Option<String>,
         }
         let seed: Seed = serde_json::from_str(raw).map_err(|e| describe(&e))?;
         if let Some(c) = seed.client {
@@ -130,28 +134,56 @@ impl Secrets {
             let key = ApiKey::parse(&raw).map_err(|e| e.to_string())?;
             self.set_openrouter_key(&key).map_err(|e| e.to_string())?;
         }
+        if let Some(raw) = seed.cloudflare_token {
+            let key = ApiKey::parse_cloudflare(&raw).map_err(|e| e.to_string())?;
+            self.set_ai_key(&key).map_err(|e| e.to_string())?;
+        }
         Ok(())
     }
 
+    #[cfg(test)]
     /// Loads the OpenRouter API key, `None` when none is saved. A stored value that is not a
     /// valid key is [`SecretError::Corrupt`], and the error never quotes it.
     pub fn openrouter_key(&self) -> Result<Option<ApiKey>, SecretError> {
-        match self.store.get(OPENROUTER_USER)? {
-            None => Ok(None),
-            Some(raw) => ApiKey::parse(&raw)
-                .map(Some)
-                .map_err(|_| SecretError::Corrupt("the OpenRouter key is not a valid key".into())),
-        }
+        self.ai_key(Vendor::OpenRouter)
     }
 
     /// Saves or replaces the OpenRouter API key.
     pub fn set_openrouter_key(&self, key: &ApiKey) -> Result<(), SecretError> {
-        self.store.set(OPENROUTER_USER, key.expose())
+        self.set_ai_key(key)
     }
 
+    #[cfg(test)]
     /// Removes the OpenRouter API key; succeeds if it was already absent.
     pub fn clear_openrouter_key(&self) -> Result<(), SecretError> {
-        self.store.delete(OPENROUTER_USER)
+        self.clear_ai_key(Vendor::OpenRouter)
+    }
+
+    /// Loads `vendor`'s key, `None` when none is saved. A stored value that is not a valid key
+    /// is [`SecretError::Corrupt`], and the error never quotes it.
+    pub fn ai_key(&self, vendor: Vendor) -> Result<Option<ApiKey>, SecretError> {
+        match self.store.get(ai_user(vendor))? {
+            None => Ok(None),
+            Some(raw) => ApiKey::parse_for(vendor, &raw).map(Some).map_err(|_| {
+                SecretError::Corrupt(
+                    match vendor {
+                        Vendor::OpenRouter => "the OpenRouter key is not a valid key",
+                        Vendor::Cloudflare => "the Cloudflare token is not a valid token",
+                    }
+                    .into(),
+                )
+            }),
+        }
+    }
+
+    /// Saves or replaces the key of the key's vendor.
+    pub fn set_ai_key(&self, key: &ApiKey) -> Result<(), SecretError> {
+        self.store.set(ai_user(key.vendor()), key.expose())
+    }
+
+    /// Removes `vendor`'s key; succeeds if it was already absent.
+    pub fn clear_ai_key(&self, vendor: Vendor) -> Result<(), SecretError> {
+        self.store.delete(ai_user(vendor))
     }
 
     /// The cache key, made and saved on first use. An unreadable one is replaced, which only
@@ -273,12 +305,20 @@ fn ensure_default_store() -> Result<(), SecretError> {
     Ok(())
 }
 
+fn ai_user(vendor: Vendor) -> &'static str {
+    match vendor {
+        Vendor::OpenRouter => OPENROUTER_USER,
+        Vendor::Cloudflare => CLOUDFLARE_USER,
+    }
+}
+
 fn entry(user: &str) -> Result<keyring_core::Entry, SecretError> {
     ensure_default_store()?;
     let label = match user {
         CLIENT_USER => "Eloquawk: OAuth client",
         TOKENS_USER => "Eloquawk: Google accounts",
         OPENROUTER_USER => "Eloquawk: OpenRouter API key",
+        CLOUDFLARE_USER => "Eloquawk: Cloudflare API token",
         CACHE_KEY_USER => "Eloquawk: mail cache key",
         _ => "Eloquawk",
     };
@@ -454,6 +494,30 @@ mod tests {
         assert_eq!(s.tokens().unwrap()["me@x"], "rt");
         assert_eq!(s.client().unwrap(), Some(client("b")));
         s.clear_openrouter_key().unwrap();
+    }
+
+    #[test]
+    fn cloudflare_token_is_a_separate_item() {
+        const TOKEN: &str = "cfTokenAbcdefghij0123456789_-wxyz";
+        let s = Secrets::memory();
+        s.set_openrouter_key(&ApiKey::parse(KEY).unwrap()).unwrap();
+        assert!(s.ai_key(Vendor::Cloudflare).unwrap().is_none());
+        s.seed(&format!(r#"{{"cloudflare_token":"{TOKEN}"}}"#))
+            .unwrap();
+        let t = s.ai_key(Vendor::Cloudflare).unwrap().unwrap();
+        assert_eq!((t.expose(), t.vendor()), (TOKEN, Vendor::Cloudflare));
+        s.clear_ai_key(Vendor::Cloudflare).unwrap();
+        assert!(s.ai_key(Vendor::Cloudflare).unwrap().is_none());
+        assert_eq!(s.openrouter_key().unwrap().unwrap().expose(), KEY);
+        // An OpenRouter key is not a Cloudflare token.
+        let store = Arc::new(MemoryStore::default());
+        store
+            .set(CLOUDFLARE_USER, "has spaces secretpart xxxxxxxxxxxxxxx")
+            .unwrap();
+        let Err(SecretError::Corrupt(m)) = Secrets::new(store).ai_key(Vendor::Cloudflare) else {
+            panic!("expected Corrupt");
+        };
+        assert!(!m.contains("secretpart"), "{m}");
     }
 
     #[test]
