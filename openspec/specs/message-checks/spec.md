@@ -43,6 +43,48 @@ already sent SHALL be discarded.
 
 Choosing the checkerClef requests go only to Cloudflare Workers AI
 
+### Requirement: Choosing the checker
+Settings SHALL offer a checker choice of "Jev (OpenRouter)", "Clef (Cloudflare)" and
+"Clef-flash (Cloudflare)", defaulting to Jev, with the caption "Switching checker turns checks
+off for every account until you turn them on again." Choosing a different checker SHALL turn
+every account off, drop every queued and retrying check, forget every result of the session,
+lift any pause, and show the chosen checker's key status. Only the chosen checker SHALL ever
+receive a request. Texts that name the processor or the model SHALL name the chosen one: the
+card intro, the disclosure and its privacy links, the key status, the Get a key link, errors,
+the Test result, the reader banner, and the label guidance caption.
+
+#### Scenario: Default checker
+- **WHEN** the app starts with no saved checker
+- **THEN** Jev (OpenRouter) is chosen and behaves as before
+
+#### Scenario: Switching to Clef
+- **WHEN** an account is opted in with Jev and the user chooses Clef (Cloudflare)
+- **THEN** the account's toggle is off, no earlier banner or badge remains, and nothing is
+  sent until the user accepts the Clef disclosure
+
+#### Scenario: Disclosure names Cloudflare
+- **WHEN** Clef is chosen and the user ticks "Check messages in <email>"
+- **THEN** the disclosure names Cloudflare and Clef and links to Cloudflare's privacy policy
+
+### Requirement: Clef requests go only to Cloudflare Workers AI
+With a Clef checker every check SHALL go to
+`https://api.cloudflare.com/client/v4/accounts/<account id>/ai/run/@cf/cloudflare/clef`, or
+`.../clef-flash` for Clef-flash, with the selector `clef` or `clef-flash` in the body and
+no other routing options. The account ID SHALL be 32 lowercase hexadecimal characters, saved
+in the settings file with Set, and refused with "That doesn't look like a Cloudflare account
+ID (32 hexadecimal characters)" otherwise. Without a valid account ID the account toggles SHALL be
+disabled with "Add your Cloudflare account ID first". Each check's cost SHALL be counted as
+its reported input tokens at $0.24 per million. Redirects SHALL never be followed, and no
+setting, flag or environment variable SHALL change the host.
+
+#### Scenario: Account ID refused
+- **WHEN** the user sets the account ID "../../evil"
+- **THEN** the inline error shows and the saved account ID is unchanged
+
+#### Scenario: Cost from tokens
+- **WHEN** Clef answers a check with 1,000 input tokens
+- **THEN** the session usage grows by $0.00024
+
 ### Requirement: Checker keys live only in the Secret Service and can be tested
 Keys SHALL be stored only in the Secret Service under the service `korora.tech.Eloquawk`: the
 OpenRouter key as item `openrouter-api-key` labelled "Eloquawk: OpenRouter API key", and the
