@@ -594,6 +594,7 @@ fn candidate_name(name: &str) -> String {
 /// The labels a check asks about (SPEC 16.8): the account's visible user labels, by thread
 /// count then name, at most [`MAX_LABELS`]. It does not look at the thread, so labels already
 /// on it are asked about too and filtered out when the suggestions are shown.
+#[cfg(test)]
 pub fn label_candidates(account_labels: &[Label]) -> Vec<LabelCandidate> {
     let mut all = candidate_labels(account_labels);
     all.truncate(MAX_LABELS);
@@ -711,6 +712,7 @@ pub fn label_questions(labels: &[LabelCandidate], start: usize) -> BTreeMap<Stri
 
 /// One request of a check: the triage questions when `triage`, and the label questions of
 /// `labels`, numbered from `start`. The state gains the nesting note when labels are asked.
+#[cfg(test)]
 pub fn request(
     input: &AiInput,
     triage: bool,
@@ -799,6 +801,7 @@ impl Plan {
 ///    the second drops labels from its tail until it fits.
 ///
 /// A labels-only check (`triage` false) keeps at least one label in the first request.
+#[cfg(test)]
 pub fn fit(input: AiInput, triage: bool, labels: &[LabelCandidate]) -> Plan {
     fit_with_guidance(input, triage, labels, "")
 }
