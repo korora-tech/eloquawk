@@ -31,7 +31,8 @@ use super::{
     GoAllMail, GoDrafts, GoInbox, GoSent, GoStarred, MarkRead, MarkUnread, NextAccount,
     NextMessage, NextThread, OpenCommandPalette, OpenLabelPicker, OpenSettings, OpenThread,
     PrevAccount, PrevMessage, PrevThread, Quit, Refresh, Reply, ReplyAll, ReportSpam,
-    ScrollReaderDown, ScrollReaderUp, ToggleHelp, ToggleSelect, ToggleStar, Trash, Undo,
+    ScrollReaderDown, ScrollReaderUp, ToggleHelp, ToggleSelect, ToggleSidebar, ToggleStar, Trash,
+    Undo,
 };
 use crate::ai::jev::{Kind, Level};
 use crate::branding;
@@ -367,6 +368,7 @@ impl MainView {
             PaletteCommand::Forward => self.compose_reply(ComposeKind::Forward, cx),
             PaletteCommand::Refresh => self.store.read(cx).refresh(),
             PaletteCommand::Settings => self.open_settings(window, cx),
+            PaletteCommand::Sidebar => self.toggle_sidebar(&ToggleSidebar, window, cx),
             PaletteCommand::Help => self.set_help(true, window, cx),
         }
     }
@@ -460,6 +462,20 @@ impl MainView {
 
     fn toggle_help(&mut self, _: &ToggleHelp, window: &mut Window, cx: &mut Context<Self>) {
         self.set_help(!self.help_open, window, cx);
+    }
+
+    pub(super) fn toggle_sidebar(
+        &mut self,
+        _: &ToggleSidebar,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.store.update(cx, |s, cx| {
+            s.prefs.sidebar_collapsed = !s.prefs.sidebar_collapsed;
+            s.prefs.save();
+            cx.notify();
+        });
+        self.focus_mail(window, cx);
     }
 
     fn next_message(&mut self, _: &NextMessage, _: &mut Window, cx: &mut Context<Self>) {
@@ -1345,6 +1361,7 @@ impl Render for MainView {
                             .on_action(cx.listener(unless_help(Self::expand_all)))
                             .on_action(cx.listener(unless_help(Self::collapse_all)))
                             .on_action(cx.listener(Self::toggle_help))
+                            .on_action(cx.listener(unless_help(Self::toggle_sidebar)))
                             .on_action(cx.listener(unless_help(|this, _: &GoInbox, window, cx| {
                                 this.go_label(labels::INBOX, window, cx)
                             })))

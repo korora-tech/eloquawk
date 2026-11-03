@@ -79,6 +79,8 @@ pub struct Prefs {
     pub collapsed_accounts: BTreeSet<AccountId>,
     /// Collapsed user label trees, keyed by account and Gmail label id.
     pub collapsed_labels: BTreeSet<(AccountId, String)>,
+    /// The sidebar is folded to a narrow rail of icons.
+    pub sidebar_collapsed: bool,
     /// The AI message checks (M16).
     pub ai: AiPrefs,
     /// Demo mode and tests: never written to disk.
@@ -98,6 +100,7 @@ impl Default for Prefs {
             last_view: None,
             collapsed_accounts: BTreeSet::new(),
             collapsed_labels: BTreeSet::new(),
+            sidebar_collapsed: false,
             ai: AiPrefs::default(),
             ephemeral: false,
         }
@@ -231,6 +234,7 @@ mod tests {
             last_view: Some(("you@example.com".into(), "Label_7".into())),
             collapsed_accounts: ["you@work.example".to_string()].into(),
             collapsed_labels: [("you@example.com".into(), "Label_7".into())].into(),
+            sidebar_collapsed: true,
             ai: AiPrefs {
                 accounts: [("you@example.com".to_string(), 1)].into(),
                 suggest_labels: false,

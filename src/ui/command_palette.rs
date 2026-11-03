@@ -29,6 +29,7 @@ pub enum Command {
     Forward,
     Refresh,
     Settings,
+    Sidebar,
     Help,
 }
 
@@ -51,6 +52,7 @@ const COMMANDS: &[(Command, &str, &str)] = &[
     (Command::Forward, "Forward", "f"),
     (Command::Refresh, "Refresh", "Ctrl R"),
     (Command::Settings, "Settings", "Ctrl ,"),
+    (Command::Sidebar, "Fold or unfold the sidebar", "Ctrl B"),
     (Command::Help, "Keyboard shortcuts", "?"),
 ];
 

@@ -203,6 +203,8 @@ pub const HEADER_H: f32 = 56.0;
 /// The header's app icon.
 pub const ICON_SLOT: f32 = 28.0;
 pub const SIDEBAR_W: f32 = 240.0;
+/// The sidebar folded to its rail of icons.
+pub const SIDEBAR_RAIL_W: f32 = 56.0;
 pub const LIST_W: f32 = 420.0;
 /// One thread row; fixed, because the list is a `uniform_list`.
 pub const ROW_H: f32 = 68.0;

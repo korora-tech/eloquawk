@@ -87,6 +87,12 @@ pub const SHORTCUTS: &[Shortcut] = &[
     row(&["g p"], "PrevAccount", "Mail", "Previous account"),
     row(&["?"], "ToggleHelp", "Mail", "Keyboard shortcuts"),
     row(
+        &["ctrl-b"],
+        "ToggleSidebar",
+        "Mail",
+        "Fold or unfold the sidebar",
+    ),
+    row(
         &["1"],
         "ApplySuggestion1",
         "Mail",

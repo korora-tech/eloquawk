@@ -1,14 +1,16 @@
 //! The sidebar (SPEC 8.2): Compose, one collapsible section per account with its labels and
-//! unread counts, and the account footer.
+//! unread counts, and the account footer. Folded (`prefs.sidebar_collapsed`, Ctrl+B) it is a
+//! rail of icons for the current account's main views.
 
 use gpui::prelude::*;
 use gpui::{ClickEvent, Context, Div, FontWeight, SharedString, div, px, rgb};
 use jiff::tz::TimeZone;
 
+use super::ToggleSidebar;
 use super::format;
 use super::main_view::MainView;
-use super::theme::{LABEL_ROW_H, Palette, SIDEBAR_W, palette};
-use super::widgets::{ButtonStyle, badge, button};
+use super::theme::{LABEL_ROW_H, Palette, SIDEBAR_RAIL_W, SIDEBAR_W, palette};
+use super::widgets::{ButtonStyle, OnClick, badge, button, icon_button};
 use crate::model::{ViewKey, ViewKind, labels};
 use crate::protocol::AuthState;
 use crate::store::{Mode, Store};
@@ -16,6 +18,9 @@ use crate::store::{Mode, Store};
 impl MainView {
     pub(super) fn sidebar(&self, store: &Store, cx: &Context<Self>) -> Div {
         let p = palette(cx);
+        if store.prefs.sidebar_collapsed {
+            return self.rail(p, store, cx);
+        }
         let accounts = div()
             .id("accounts")
             .flex_1()
@@ -44,19 +49,104 @@ impl MainView {
             .border_r_1()
             .border_color(rgb(p.border))
             .child(
-                button(
-                    p,
-                    "compose",
-                    "Compose",
-                    ButtonStyle::Primary,
-                    Some(Box::new(cx.listener(
-                        |this, _: &gpui::ClickEvent, _, cx| this.compose_new(cx),
-                    ))),
-                )
-                .h(px(34.0)),
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .child(
+                        button(
+                            p,
+                            "compose",
+                            "Compose",
+                            ButtonStyle::Primary,
+                            Some(Box::new(cx.listener(
+                                |this, _: &gpui::ClickEvent, _, cx| this.compose_new(cx),
+                            ))),
+                        )
+                        .flex_1()
+                        .h(px(34.0)),
+                    )
+                    .child(fold_button(p, true, cx)),
             )
             .child(accounts)
             .child(self.account_box(p, store))
+    }
+
+    /// The folded sidebar: unfold, compose, then the current account's main views with the
+    /// inbox's unread count.
+    fn rail(&self, p: &Palette, store: &Store, cx: &Context<Self>) -> Div {
+        let account = store
+            .view
+            .as_ref()
+            .map(|v| v.account.clone())
+            .or_else(|| store.accounts.first().cloned());
+        let mut rail = div()
+            .w(px(SIDEBAR_RAIL_W))
+            .flex_shrink_0()
+            .h_full()
+            .flex()
+            .flex_col()
+            .items_center()
+            .gap(px(6.0))
+            .pt(px(12.0))
+            .bg(rgb(p.sidebar))
+            .border_r_1()
+            .border_color(rgb(p.border))
+            .child(fold_button(p, false, cx))
+            .child(icon_button(
+                p,
+                "rail-compose",
+                "Compose",
+                r#"<path d="M4 20h4L19 9l-4-4L4 16z"/><path d="m13.5 6.5 4 4"/>"#,
+                Some(Box::new(cx.listener(|this, _: &ClickEvent, _, cx| {
+                    this.compose_new(cx)
+                }))),
+            ))
+            .child(div().h(px(6.0)));
+        let Some(account) = account else {
+            return rail;
+        };
+        for (id, name, icon) in RAIL_VIEWS {
+            let kind = match *id {
+                "ALL_MAIL" => ViewKind::AllMail,
+                id => ViewKind::Label(id.to_string()),
+            };
+            let view = ViewKey {
+                account: account.clone(),
+                kind,
+            };
+            let active = store.view.as_ref() == Some(&view);
+            let count = (*id == labels::INBOX)
+                .then(|| store.unread_badge(&account, labels::INBOX))
+                .flatten();
+            let on_click: OnClick =
+                Box::new(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                    let view = view.clone();
+                    this.store.update(cx, |s, cx| {
+                        s.set_view(view);
+                        cx.notify();
+                    });
+                    this.focus_mail(window, cx);
+                }));
+            let button = icon_button(
+                p,
+                SharedString::from(format!("rail-{id}")),
+                name,
+                icon,
+                Some(on_click),
+            )
+            .when(active, |d| d.bg(rgb(p.selected)));
+            rail = rail.child(div().relative().child(button).when_some(count, |d, n| {
+                d.child(
+                    div()
+                        .absolute()
+                        .top(px(-4.0))
+                        .right(px(-8.0))
+                        .child(badge(p, n, true)),
+                )
+            }));
+        }
+        rail
     }
 
     fn account_section(
@@ -288,4 +378,61 @@ impl MainView {
                 )
             })
     }
+}
+
+/// The rail's views: the label id (`ALL_MAIL` for All Mail), its name and its icon.
+const RAIL_VIEWS: &[(&str, &str, &str)] = &[
+    (
+        labels::INBOX,
+        "Inbox",
+        r#"<path d="M3 13h5l1.5 3h5L16 13h5"/><path d="M5 5h14l2 8v6H3v-6z"/>"#,
+    ),
+    (
+        labels::STARRED,
+        "Starred",
+        r#"<path d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2L12 17.3l-5.6 2.9 1.1-6.2L3 9.6l6.2-.9z"/>"#,
+    ),
+    (
+        labels::SENT,
+        "Sent",
+        r#"<path d="M21 3 3 10.5l7 2.5 2.5 7z"/><path d="m10 13 4-4"/>"#,
+    ),
+    (
+        labels::DRAFT,
+        "Drafts",
+        r#"<path d="M6 3h8l4 4v14H6z"/><path d="M14 3v4h4M9 12h6M9 16h4"/>"#,
+    ),
+    (
+        "ALL_MAIL",
+        "All Mail",
+        r#"<rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3 7 9 6 9-6"/>"#,
+    ),
+];
+
+/// Folds (`fold`) or unfolds the sidebar.
+fn fold_button(p: &Palette, fold: bool, cx: &Context<MainView>) -> gpui::Stateful<Div> {
+    let (label, icon) = if fold {
+        (
+            "Fold the sidebar (Ctrl B)",
+            r#"<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16m6-5-3-3 3-3"/>"#,
+        )
+    } else {
+        (
+            "Unfold the sidebar (Ctrl B)",
+            r#"<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16m3-11 3 3-3 3"/>"#,
+        )
+    };
+    icon_button(
+        p,
+        if fold {
+            "sidebar-fold"
+        } else {
+            "sidebar-unfold"
+        },
+        label,
+        icon,
+        Some(Box::new(cx.listener(|this, _: &ClickEvent, window, cx| {
+            this.toggle_sidebar(&ToggleSidebar, window, cx)
+        }))),
+    )
 }

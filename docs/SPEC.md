@@ -349,6 +349,7 @@ pub struct Prefs {
     pub page_size: u32,                 // default 50, clamped to 10..=100
     pub last_view: Option<(AccountId, String)>,  // label id; restored at start
     pub collapsed_accounts: BTreeSet<AccountId>,
+    pub sidebar_collapsed: bool,        // the sidebar folded to its icon rail (8.2)
     pub ai: AiPrefs,                    // M16: consent, toggles, spend limit (16.9)
     #[serde(skip)] pub ephemeral: bool,
 }
@@ -1180,6 +1181,7 @@ keep their shift and work.
 | `g a` | GoAllMail | Mail | |
 | `g n` / `g p` | NextAccount / PrevAccount | Mail | Switches to that account's inbox. |
 | `?` | ToggleHelp | Mail | |
+| `ctrl-b` | ToggleSidebar | Mail | Folds the sidebar to a 56 px rail (fold, Compose, Inbox with its unread count, Starred, Sent, Drafts, All Mail of the current account) and back; remembered in `sidebar_collapsed`. |
 | `1` / `2` / `3` | ApplySuggestion1 / ApplySuggestion2 / ApplySuggestion3 | Mail | M17: applies the open thread's nth suggested label (16.12.3); no-op when there is none. |
 | `ctrl-c` / `ctrl-a` | Copy / SelectAll | ReadOnlyText | |
 | `escape` / `up` / `down` | ClosePicker / PickerUp / PickerDown | LabelPicker | |

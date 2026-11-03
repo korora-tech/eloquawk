@@ -88,6 +88,8 @@ actions!(
         NextAccount,
         PrevAccount,
         ToggleHelp,
+        /// Folds the sidebar to a rail of icons, or unfolds it.
+        ToggleSidebar,
         /// Closes the label picker.
         ClosePicker,
         /// Moves the label picker's highlight up.
@@ -162,6 +164,7 @@ pub fn bindings() -> Vec<KeyBinding> {
         KeyBinding::new("g n", NextAccount, mail),
         KeyBinding::new("g p", PrevAccount, mail),
         KeyBinding::new("?", ToggleHelp, mail),
+        KeyBinding::new("ctrl-b", ToggleSidebar, mail),
         KeyBinding::new("1", ApplySuggestion1, mail),
         KeyBinding::new("2", ApplySuggestion2, mail),
         KeyBinding::new("3", ApplySuggestion3, mail),
