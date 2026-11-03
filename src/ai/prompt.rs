@@ -46,6 +46,9 @@ pub const MAX_LABELS: usize = 100;
 const LABEL_NAME_CHARS: usize = 100;
 /// At most this many requests per check: the triage one and one more for labels.
 pub const MAX_REQUESTS_PER_CHECK: usize = 2;
+/// Questions per request: Clef's limit, kept for Jev too so both split checks alike. Two
+/// requests hold the triage questions and [`MAX_LABELS`] labels.
+pub const MAX_QUESTIONS: usize = 64;
 /// Even the worst-case message still asks about this many labels in total.
 #[cfg(test)]
 pub const LABEL_FLOOR: usize = 30;
@@ -831,8 +834,11 @@ pub fn fit_with_guidance(
             .len()
     };
     let keep = usize::from(!triage);
+    let room = MAX_QUESTIONS - if triage { TRIAGE.len() } else { 0 };
     // 2. Move labels into the second request.
-    while first.len() > keep && size(&input, &first, triage) > REQUEST_BUDGET {
+    while first.len() > keep
+        && (first.len() > room || size(&input, &first, triage) > REQUEST_BUDGET)
+    {
         if let Some(l) = first.pop() {
             second.insert(0, l);
         }
@@ -857,13 +863,15 @@ pub fn fit_with_guidance(
     while let Some(next) = second.first() {
         let mut more = first.clone();
         more.push(next.clone());
-        if size(&input, &more, triage) > REQUEST_BUDGET {
+        if more.len() > room || size(&input, &more, triage) > REQUEST_BUDGET {
             break;
         }
         first = more;
         second.remove(0);
     }
-    while !second.is_empty() && size2(&input, &first, &second) > REQUEST_BUDGET {
+    while !second.is_empty()
+        && (second.len() > MAX_QUESTIONS || size2(&input, &first, &second) > REQUEST_BUDGET)
+    {
         second.pop();
     }
     while first.len() > keep && size(&input, &first, triage) > REQUEST_BUDGET {
@@ -1415,6 +1423,33 @@ mod tests {
         assert_eq!(plan.label_id(n), Some(labels[n].id.as_str()));
         assert_eq!(plan.label_id(99), Some("Label_99"));
         assert_eq!(plan.label_id(100), None);
+    }
+
+    #[test]
+    fn fit_keeps_requests_within_the_question_limit() {
+        let m = message("Short body.", BodySource::Plain);
+        let labels: Vec<LabelCandidate> = (0..MAX_LABELS)
+            .map(|i| LabelCandidate {
+                id: format!("Label_{i}"),
+                name: format!("L{i}"),
+            })
+            .collect();
+        for triage in [true, false] {
+            let plan = fit(
+                AiInput::from_message(&m, &Redact::default()),
+                triage,
+                &labels,
+            );
+            let first = plan.first_request(triage);
+            let second = plan.second_request().expect("100 labels need two requests");
+            assert!(
+                first.questions.len() <= MAX_QUESTIONS,
+                "{}",
+                first.questions.len()
+            );
+            assert!(second.questions.len() <= MAX_QUESTIONS);
+            assert_eq!(plan.labels_asked(), MAX_LABELS);
+        }
     }
 
     #[test]
