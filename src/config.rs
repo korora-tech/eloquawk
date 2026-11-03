@@ -53,6 +53,10 @@ pub struct AiPrefs {
     pub backend: AiBackend,
     /// The Cloudflare account Clef requests name; not a secret. Only a valid ID is used.
     pub cloudflare_account_id: String,
+    /// The checker and Cloudflare account `accounts` consented to. Consent never carries over
+    /// to another checker or account, however the prefs changed.
+    pub consent_backend: AiBackend,
+    pub consent_account_id: String,
 }
 
 impl Default for AiPrefs {
@@ -66,6 +70,8 @@ impl Default for AiPrefs {
             spend_limit_cents: 100,
             backend: AiBackend::Jev,
             cloudflare_account_id: String::new(),
+            consent_backend: AiBackend::Jev,
+            consent_account_id: String::new(),
         }
     }
 }
@@ -185,6 +191,19 @@ impl Prefs {
             .ai
             .spend_limit_cents
             .clamp(SPEND_LIMIT_CENTS_MIN, SPEND_LIMIT_CENTS_MAX);
+        let ai = &mut self.ai;
+        let clef = ai.backend.clef_selector().is_some();
+        if ai.consent_backend != ai.backend
+            || clef && ai.consent_account_id != ai.cloudflare_account_id
+        {
+            ai.accounts.clear();
+        }
+        ai.consent_backend = ai.backend;
+        ai.consent_account_id = if clef {
+            ai.cloudflare_account_id.clone()
+        } else {
+            String::new()
+        };
         self
     }
 }
@@ -192,6 +211,37 @@ impl Prefs {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn consent_is_dropped_with_another_checker_or_account() {
+        let consented = |backend, account: &str| {
+            let mut p = Prefs::default();
+            p.ai.accounts.insert("you@example.com".into(), 2);
+            p.ai.backend = backend;
+            p.ai.cloudflare_account_id = account.into();
+            p.clamped()
+        };
+        // Existing Jev consent survives; a hand-edited checker does not inherit it.
+        let jev = consented(AiBackend::Jev, "");
+        assert_eq!(jev.ai.accounts.len(), 1);
+        let mut edited = jev.clone();
+        edited.ai.backend = AiBackend::Clef;
+        assert!(edited.clamped().ai.accounts.is_empty());
+        // Within Clef, a new account ID also drops it; Jev ignores the account ID.
+        let mut clef = jev.clone();
+        clef.ai.backend = AiBackend::Clef;
+        clef.ai.cloudflare_account_id = "a".repeat(32);
+        let mut clef = clef.clamped();
+        clef.ai.accounts.insert("you@example.com".into(), 2);
+        let clef = clef.clamped();
+        assert_eq!(clef.ai.accounts.len(), 1);
+        let mut moved = clef.clone();
+        moved.ai.cloudflare_account_id = "b".repeat(32);
+        assert!(moved.clamped().ai.accounts.is_empty());
+        let mut jev_acct = jev;
+        jev_acct.ai.cloudflare_account_id = "b".repeat(32);
+        assert_eq!(jev_acct.clamped().ai.accounts.len(), 1);
+    }
 
     /// A fresh directory under the system temp dir, removed when dropped.
     struct TempDir(PathBuf);
@@ -255,6 +305,8 @@ mod tests {
                 spend_limit_cents: 250,
                 backend: AiBackend::ClefFlash,
                 cloudflare_account_id: "0123456789abcdef0123456789abcdef".into(),
+                consent_backend: AiBackend::ClefFlash,
+                consent_account_id: "0123456789abcdef0123456789abcdef".into(),
             },
             ephemeral: false,
         };
