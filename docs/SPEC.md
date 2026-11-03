@@ -344,6 +344,7 @@ pub struct Prefs {
     pub theme: ThemePref,               // System | Light | Dark (default System)
     pub clock_24h: bool,                // default true
     pub mark_read_on_open: bool,        // default true
+    pub newest_first: bool,             // default true: the reader shows the latest message on top
     pub notifications: bool,           // default true
     pub refresh_secs: u64,              // default 60, clamped to 30..=900
     pub page_size: u32,                 // default 50, clamped to 10..=100
@@ -963,6 +964,8 @@ Navigation:
     - Expanded cards show the sender name and address, "to …" details, the date, a "Copy"
       ghost button, then the body, then the attachments.
     - By default, unread messages and the last message are expanded. Click a header to toggle.
+    - Cards run newest first (`prefs.newest_first`, a Settings checkbox), else oldest first.
+      `n`/`p` and the focused card index count in the order shown.
       `;` expands all and `:` collapses all.
   - **Body rendering: selectable text.** gpui at this rev has no selectable static text
     (`StyledText` / `InteractiveText` have no selection), so Eloquawk builds its own:

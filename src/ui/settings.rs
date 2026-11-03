@@ -786,6 +786,13 @@ impl SettingsView {
                     ))
                     .child(checkbox_row(
                         p,
+                        "pref-newest-first",
+                        "Show the latest message first",
+                        prefs.newest_first,
+                        self.pref(cx, |p| p.newest_first = !p.newest_first),
+                    ))
+                    .child(checkbox_row(
+                        p,
                         "pref-notify",
                         "Notify about new mail",
                         prefs.notifications,

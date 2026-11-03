@@ -81,6 +81,8 @@ pub struct Prefs {
     pub collapsed_labels: BTreeSet<(AccountId, String)>,
     /// The sidebar is folded to a narrow rail of icons.
     pub sidebar_collapsed: bool,
+    /// The reader shows a conversation's latest message at the top.
+    pub newest_first: bool,
     /// The AI message checks (M16).
     pub ai: AiPrefs,
     /// Demo mode and tests: never written to disk.
@@ -101,6 +103,7 @@ impl Default for Prefs {
             collapsed_accounts: BTreeSet::new(),
             collapsed_labels: BTreeSet::new(),
             sidebar_collapsed: false,
+            newest_first: true,
             ai: AiPrefs::default(),
             ephemeral: false,
         }
@@ -235,6 +238,7 @@ mod tests {
             collapsed_accounts: ["you@work.example".to_string()].into(),
             collapsed_labels: [("you@example.com".into(), "Label_7".into())].into(),
             sidebar_collapsed: true,
+            newest_first: false,
             ai: AiPrefs {
                 accounts: [("you@example.com".to_string(), 1)].into(),
                 suggest_labels: false,

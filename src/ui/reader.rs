@@ -54,6 +54,16 @@ fn expand_new(seen: &mut HashSet<String>, expanded: &mut HashSet<String>, messag
     }
 }
 
+/// A conversation's messages in reading order: the latest at the top when `newest_first`,
+/// otherwise as Gmail sends them (oldest first). Card indices count in this order.
+fn in_order(messages: &[Message], newest_first: bool) -> Vec<&Message> {
+    let mut ordered: Vec<&Message> = messages.iter().collect();
+    if newest_first {
+        ordered.reverse();
+    }
+    ordered
+}
+
 /// Bodies longer than this are cut in the reader (SPEC 8.2).
 pub const MAX_BODY: usize = 200 * 1024;
 
@@ -132,6 +142,7 @@ struct Fingerprint {
     /// A mutation on the open thread is waiting for the worker.
     pending: bool,
     clock_24h: bool,
+    newest_first: bool,
     /// The open thread's AI revision and the global one (SPEC 16.10).
     ai: (u64, u64),
 }
@@ -182,6 +193,7 @@ impl Fingerprint {
             user_labels,
             view: store.view.as_ref().map(|v| v.kind.clone()),
             clock_24h: store.prefs.clock_24h,
+            newest_first: store.prefs.newest_first,
         }
     }
 }
@@ -397,7 +409,10 @@ impl ReaderView {
             return Vec::new();
         };
         match self.store.read(cx).details.get(key) {
-            Some(DetailState::Loaded(d)) => d.messages.iter().map(|m| m.id.clone()).collect(),
+            Some(DetailState::Loaded(d)) => in_order(&d.messages, self.last.newest_first)
+                .into_iter()
+                .map(|m| m.id.clone())
+                .collect(),
             _ => Vec::new(),
         }
     }
@@ -1270,7 +1285,10 @@ impl Render for ReaderView {
                     now,
                     gmail_url: summary.as_ref().map(gmail_url),
                 };
-                for (i, m) in detail.messages.iter().enumerate() {
+                for (i, m) in in_order(&detail.messages, self.last.newest_first)
+                    .into_iter()
+                    .enumerate()
+                {
                     scroll = scroll.child(self.card(p, i, m, &at, window, cx));
                 }
             }
@@ -1419,6 +1437,20 @@ mod tests {
         m.to.clear();
         m.cc.clear();
         assert_eq!(recipients_line(&m), "to undisclosed recipients");
+    }
+
+    #[test]
+    fn newest_first_reverses_the_reading_order_only() {
+        let messages = vec![message("a", false), message("b", false), message("c", true)];
+        let ids = |newest| -> Vec<&str> {
+            in_order(&messages, newest)
+                .iter()
+                .map(|m| m.id.as_str())
+                .collect()
+        };
+        assert_eq!(ids(true), ["c", "b", "a"]);
+        assert_eq!(ids(false), ["a", "b", "c"]);
+        assert_eq!(messages[2].id, "c", "the thread itself keeps Gmail's order");
     }
 
     #[test]
