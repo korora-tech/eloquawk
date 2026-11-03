@@ -1,0 +1,36 @@
+schema: spec-driven
+
+context: |
+  Eloquawk is a native Gmail client for Linux, written in Rust with GPUI.
+  docs/SPEC.md is still the implementation contract; capabilities move into
+  openspec/specs/ one at a time, the first time a change touches them.
+
+  Ground rules (docs/SPEC.md section 1):
+  - Single bin crate, edition 2024, stable toolchain. gpui and gpui_platform are
+    pinned to one zed git rev with default features off.
+  - tokio is never in the host dependency tree: `cargo tree -i tokio` prints nothing.
+    HTTP is blocking ureq on dedicated worker threads; UI <-> worker is std mpsc and
+    async_channel.
+  - The app id `korora.tech.Eloquawk` is used everywhere (Wayland app_id, desktop
+    file, icon, notifications, keyring service).
+  - Refresh tokens, the OAuth client, the cache key and the OpenRouter key live only
+    in the Secret Service. Mail is never written to disk in plaintext or to logs,
+    except an attachment the user saves.
+  - Mail leaves the machine only for Google and, for opted-in accounts, a redacted
+    extract for OpenRouter.
+  - Where a spec says nothing, follow korora-tech/antarctical.
+
+rules:
+  proposal:
+    - Say which capability specs the change touches.
+    - Call out any new dependency, and confirm `cargo tree -i tokio` stays empty.
+    - Call out anything that sends mail data off the machine or writes it to disk.
+  specs:
+    - Describe behaviour a user or a demo script can observe, not Rust types or modules.
+    - Prefer scenarios a headless test or a `--demo-actions` script can check.
+  design:
+    - Module names, types, protocol messages and file formats go here, not in specs.
+  tasks:
+    - One task per small conventional commit, each green on its own.
+    - End with the checks that apply - cargo test, clippy, the tokio check, and
+      niri screenshots for UI changes.
