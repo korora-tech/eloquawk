@@ -13,7 +13,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 jiff = "0.2.38"
 # Blocking HTTPS with rustls (ring, webpki-roots); no tokio. Runs on the sync worker thread.
-ureq = { version = "=3.5.0", default-features = false, features = ["rustls", "json"] }
+ureq = { version = "=3.5.1", default-features = false, features = ["rustls", "json"] }
 url = "2.5"
 # PKCE code challenge for the loopback OAuth sign-in.
 sha2 = "0.11.1"
