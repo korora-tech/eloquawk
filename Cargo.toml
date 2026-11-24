@@ -33,6 +33,9 @@ raw-window-handle = "0.6"
 wayland-backend = { version = "0.3", features = ["client_system"] }
 wayland-client = "0.31"
 wayland-protocols = { version = "0.32", features = ["client", "staging"] }
+# Tray icon (StatusNotifierItem) for background mode; on zbus with async-io, like notify-rust,
+# so it adds no async runtime.
+ksni = { version = "0.3", default-features = false, features = ["async-io", "blocking"] }
 # Opens links and the OAuth consent page in the user's browser.
 open = "5.4"
 # Grapheme-aware cursor movement in the text inputs.

@@ -83,6 +83,9 @@ pub struct Prefs {
     pub clock_24h: bool,
     pub mark_read_on_open: bool,
     pub notifications: bool,
+    /// Closing the last window keeps Eloquawk running behind a tray icon, so new-mail
+    /// notifications continue. Only honoured while the tray icon is actually showing.
+    pub run_in_background: bool,
     /// Seconds between history polls, clamped to 30..=900.
     pub refresh_secs: u64,
     /// Threads per list page, clamped to 10..=100.
@@ -110,6 +113,7 @@ impl Default for Prefs {
             clock_24h: true,
             mark_read_on_open: true,
             notifications: true,
+            run_in_background: true,
             refresh_secs: 60,
             page_size: 50,
             last_view: None,
@@ -271,7 +275,7 @@ mod tests {
     fn unknown_and_missing_fields_fall_back_to_defaults() {
         let p: Prefs = serde_json::from_str(r#"{"theme":"dark","future":1}"#).unwrap();
         assert_eq!(p.theme, ThemePref::Dark);
-        assert!(p.clock_24h && p.mark_read_on_open && p.notifications);
+        assert!(p.clock_24h && p.mark_read_on_open && p.notifications && p.run_in_background);
         assert_eq!((p.refresh_secs, p.page_size), (60, 50));
         assert!(!p.ephemeral);
         // A settings file from before M16 has no `ai`: checks are off, with the defaults.
@@ -289,6 +293,7 @@ mod tests {
             clock_24h: false,
             mark_read_on_open: false,
             notifications: false,
+            run_in_background: false,
             refresh_secs: 300,
             page_size: 25,
             last_view: Some(("you@example.com".into(), "Label_7".into())),

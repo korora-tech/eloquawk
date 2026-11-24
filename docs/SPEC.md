@@ -153,7 +153,7 @@ src/...
 | `ai/*`, `mail/auth.rs`, `mail/quote.rs`, `ui/triage.rs` | AI triage (M16, M17): see the module table in 16.3. `ui/settings.rs` gains a fourth card and `secrets.rs` the OpenRouter key item. | new |
 
 Delete or never create: `layout.rs`, `calendar_views.rs`, `tray.rs`, `tray_view.rs`,
-`reminders.rs`, `dankcal.rs`. **There is no tray in v1.** Closing the last window quits.
+`reminders.rs`, `dankcal.rs`. Background mode later added `tray.rs`: closing the last window keeps the app running behind a StatusNotifier tray icon when one is showing, and quits otherwise.
 
 ### 2.2 Cargo dependencies
 
@@ -2261,7 +2261,7 @@ client and worker`, `feat(ui): show triage banner and list badges`.
 
 - Rendering HTML mail.
 - Loading remote images. They are never loaded at all.
-- A tray icon or background service.
+- A systemd background service. (A tray icon keeps the app running after its last window closes.)
 - Offline mail cache on disk.
 - Editing and syncing drafts. The Drafts label lists them read-only, and opening one shows it.
 - Send-as aliases and signatures.

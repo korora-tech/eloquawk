@@ -4,7 +4,8 @@
 //! the main window,
 //! notifies about new mail, opens compose windows for `mailto:` links and, in demo mode, runs
 //! a `--demo-actions` script. Quits when the last window closes, telling the worker to shut
-//! down.
+//! down, unless background mode is on and the tray icon is showing: then the app keeps
+//! running (and notifying) behind the icon, which reopens the window or quits.
 
 mod ai;
 mod branding;
@@ -23,6 +24,7 @@ mod protocol;
 mod secrets;
 mod store;
 mod sync;
+mod tray;
 mod ui;
 
 use std::cell::RefCell;
@@ -217,15 +219,61 @@ fn main() {
                 listener.serve(tx)
             });
 
+            // Background mode: the tray icon keeps the app alive without windows. A demo never
+            // runs in the background, so scripted runs still end when their window closes.
+            let tray: Rc<RefCell<Option<tray::Tray>>> = Rc::new(RefCell::new(None));
+            if mode == Mode::Google {
+                let (tx, rx) = async_channel::unbounded();
+                let tray = tray.clone();
+                let store = store.clone();
+                cx.spawn(async move |cx| {
+                    // Registering blocks on D-Bus, so it stays off the UI thread.
+                    match cx
+                        .background_spawn(async move { tray::Tray::start(tx) })
+                        .await
+                    {
+                        Ok(started) => *tray.borrow_mut() = Some(started),
+                        Err(e) => {
+                            eprintln!("eloquawk: no tray icon, closing the window will quit ({e})");
+                            return;
+                        }
+                    }
+                    while let Ok(event) = rx.recv().await {
+                        cx.update(|cx| match event {
+                            tray::Event::Show(token) => {
+                                ui::windows::raise_main_window(&store, token.as_deref(), cx)
+                            }
+                            tray::Event::Quit => cx.quit(),
+                            tray::Event::Gone => {
+                                if cx.windows().is_empty() {
+                                    ui::windows::show_main_window(&store, cx);
+                                }
+                            }
+                        });
+                    }
+                })
+                .detach();
+            }
+
             // Edited compose windows ask before the app quits.
             cx.on_action(|_: &ui::Quit, cx| cx.defer(ui::compose::request_quit));
-            cx.on_window_closed(|cx, _| {
-                if cx.windows().is_empty() {
-                    cx.quit();
-                }
-            })
-            .detach();
+            {
+                let store = store.clone();
+                let tray = tray.clone();
+                cx.on_window_closed(move |cx, _| {
+                    if !cx.windows().is_empty() {
+                        return;
+                    }
+                    let visible = tray.borrow().as_ref().is_some_and(|t| t.visible());
+                    if !tray::stays_running(store.read(cx).prefs.run_in_background, visible) {
+                        cx.quit();
+                    }
+                })
+                .detach();
+            }
+            let quit_tray = tray.clone();
             cx.on_app_quit(move |_| {
+                quit_tray.borrow_mut().take();
                 if let Some(server) = &server {
                     server.shutdown();
                 }
