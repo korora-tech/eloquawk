@@ -661,7 +661,7 @@ mod tests {
     #[test]
     fn style_runs_split_at_every_edge_and_cover_the_text() {
         let marks = [(2..6, Marks::BOLD), (4..9, Marks::ITALIC)];
-        let runs = style_runs(12, &[5..8_usize], &marks);
+        let runs = style_runs(12, std::slice::from_ref(&(5..8)), &marks);
         let spans: Vec<_> = runs.iter().map(|(r, l, _)| (r.clone(), *l)).collect();
         assert_eq!(
             spans,
