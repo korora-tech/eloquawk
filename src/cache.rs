@@ -93,7 +93,7 @@ impl MailCache {
         let sealed = self
             .cipher
             .encrypt(
-                XNonce::from_slice(&nonce),
+                &XNonce::from(nonce),
                 Payload {
                     msg: plain,
                     aad: account.as_bytes(),
@@ -113,9 +113,10 @@ impl MailCache {
             return None;
         }
         let (nonce, sealed) = rest.split_at(NONCE_LEN);
+        let nonce = XNonce::try_from(nonce).ok()?;
         self.cipher
             .decrypt(
-                XNonce::from_slice(nonce),
+                &nonce,
                 Payload {
                     msg: sealed,
                     aad: account.as_bytes(),
@@ -354,6 +355,24 @@ mod tests {
                 },
             }],
         }
+    }
+
+    /// A file sealed by the chacha20poly1305 0.10 build must keep opening: the format on disk
+    /// is the same XChaCha20-Poly1305 whatever the crate version, and this pins it.
+    #[test]
+    fn opens_a_file_sealed_by_an_earlier_release() {
+        let hex = "454c514341434831201ec73e0ba3157793cfd8dde67110e932cb6da563074949f7a9197883a54516a4baf62a362d616f5bbb4ff4f27d43679fc9d3fb3c8731e880";
+        let raw: Vec<u8> = (0..hex.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
+            .collect();
+        let cache = MailCache::new(PathBuf::from("/nonexistent"), &[7u8; 32]);
+        assert_eq!(
+            cache.open("me@example.com", &raw).as_deref(),
+            Some(br#"{"hello":"cache"}"#.as_slice())
+        );
+        // The account is bound in as associated data.
+        assert!(cache.open("other@example.com", &raw).is_none());
     }
 
     #[test]

@@ -44,7 +44,7 @@ encoding_rs = "0.8"
 # Decodes RFC 2047 encoded-words in headers Gmail leaves undecoded.
 rfc2047-decoder = "1"
 # Encrypts the on-disk summary cache; its key lives in the Secret Service (SPEC 7.7).
-chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc"] }
+chacha20poly1305 = { version = "0.11", default-features = false, features = ["alloc"] }
 # Builds outgoing RFC 5322 messages; only the builder, no SMTP transport.
 lettre = { version = "0.11", default-features = false, features = ["builder"] }
 
