@@ -59,6 +59,16 @@ impl Marks {
     fn is_empty(self) -> bool {
         self.0 == 0
     }
+
+    /// The flags as stored by the thread cache.
+    pub fn bits(self) -> u8 {
+        self.0
+    }
+
+    /// Flags from [`Marks::bits`]; bits no flag owns are dropped.
+    pub fn from_bits(bits: u8) -> Marks {
+        Marks(bits & 0x0f)
+    }
 }
 
 /// A run of text with its styled and linked byte ranges. Ranges are ascending, do not

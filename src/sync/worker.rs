@@ -44,6 +44,10 @@ pub(super) struct Worker {
     pub(super) cache_dir: Option<PathBuf>,
     /// Opened once the keyring yields its key.
     pub(super) cache: Option<MailCache>,
+    /// The opened threads, bodies included, sealed with the same key (SPEC 7.8).
+    pub(super) threads: Option<ThreadCache>,
+    /// Accounts whose thread store needs pruning at the next save.
+    pub(super) threads_written: BTreeSet<AccountId>,
     /// The key could not be had; not asked for again this run.
     pub(super) cache_failed: bool,
 }
@@ -81,6 +85,8 @@ impl Worker {
             downloads: None,
             cache_dir: None,
             cache: None,
+            threads: None,
+            threads_written: BTreeSet::new(),
             cache_failed: false,
         }
     }

@@ -288,6 +288,7 @@ impl Worker {
             self.emit(SyncEvent::ThreadsUpdated(updated));
         }
         if !gone.is_empty() {
+            self.forget_threads(email, &gone);
             self.emit(SyncEvent::ThreadsGone {
                 account: email.to_string(),
                 ids: gone,
@@ -334,8 +335,28 @@ impl Worker {
     /// read; the store decides that. The fresh summary (attachments are certain here) goes
     /// to the list too when it changed. A `prefetch` (SPEC 16.11) does the same from the
     /// background lane, but a failure emits nothing, so the reader is unaffected.
+    ///
+    /// SPEC 7.8: a thread saved on disk at the history id the list knows for it is served
+    /// without a request. When a request fails (offline), whatever copy there is is shown
+    /// instead of the error.
     pub(super) fn open_thread(&mut self, key: ThreadKey, prefetch: bool) {
         let email = key.account.clone();
+        let saved = if self.open_cache().is_some() {
+            self.threads.as_ref().and_then(|t| t.load(&key))
+        } else {
+            None
+        };
+        let known = self
+            .accounts
+            .get(&email)
+            .and_then(|a| a.known.get(&key.id))
+            .map(|k| k.history_id);
+        if let Some(saved) = &saved
+            && known == Some(saved.history_id)
+        {
+            self.emit(SyncEvent::ThreadDetail(saved.detail.clone()));
+            return;
+        }
         match self.with_token(&email, |agent, ep, token| {
             gmail::thread_full(agent, ep, token, &key.id)
         }) {
@@ -346,20 +367,35 @@ impl Worker {
                     .get(&email)
                     .and_then(|a| a.known.get(&key.id))
                     .map(|k| k.summary.clone());
-                if let Some(summary) = self.remember(&email, &dto)
-                    && before.as_ref() != Some(&summary)
+                let summary = self.remember(&email, &dto);
+                if let Some(summary) = &summary
+                    && before.as_ref() != Some(summary)
                 {
-                    self.emit(SyncEvent::ThreadsUpdated(vec![summary]));
+                    self.emit(SyncEvent::ThreadsUpdated(vec![summary.clone()]));
                 }
                 let mut detail = parse::thread_detail(&email, &dto);
                 detail.key = key;
+                if let Some(summary) = &summary {
+                    self.save_thread(summary.history_id, &detail);
+                }
                 self.emit(SyncEvent::ThreadDetail(detail));
             }
             Err(e) => {
                 let error = e.reader_message();
                 self.failed_as(&email, &e, !prefetch);
-                if !prefetch {
-                    self.emit(SyncEvent::ThreadFailed { key, error });
+                match saved {
+                    // Old but better than nothing; the list's own refresh corrects it.
+                    Some(saved) if !matches!(e, CallError::Api(ApiError::NotFound)) => {
+                        self.emit(SyncEvent::ThreadDetail(saved.detail));
+                    }
+                    _ => {
+                        if matches!(e, CallError::Api(ApiError::NotFound)) {
+                            self.forget_threads(&email, std::slice::from_ref(&key.id));
+                        }
+                        if !prefetch {
+                            self.emit(SyncEvent::ThreadFailed { key, error });
+                        }
+                    }
                 }
             }
         }
@@ -424,9 +460,23 @@ impl Worker {
         };
         account.commit_round(collect_changes(&pages));
         if account.pending_changed.is_empty() {
+            self.round_done(email);
             self.emit(SyncEvent::Synced(Timestamp::now()));
         } else {
             self.queue.push(Job::Refetch(email.to_string()));
+        }
+    }
+
+    /// The end of a history round with nothing left pending. After the first one of a
+    /// session that resumed from the saved cursor it refreshes the label list, which the
+    /// rounds never do (a label made or renamed meanwhile), and ends the quiet period.
+    fn round_done(&mut self, email: &str) {
+        let resumed = self
+            .accounts
+            .get_mut(email)
+            .is_some_and(|a| std::mem::take(&mut a.resumed));
+        if resumed {
+            self.refresh_labels(email);
         }
     }
 
@@ -436,6 +486,11 @@ impl Worker {
             return;
         };
         account.reset();
+        if self.open_cache().is_some()
+            && let Some(threads) = &self.threads
+        {
+            threads.clear(email);
+        }
         self.queue
             .background
             .retain(|j| j.account() != email || !matches!(j, Job::FetchMeta(..) | Job::Refetch(_)));
@@ -506,6 +561,7 @@ impl Worker {
             self.emit(SyncEvent::ThreadsUpdated(updated));
         }
         if !gone.is_empty() {
+            self.forget_threads(email, &gone);
             self.emit(SyncEvent::ThreadsGone {
                 account: email.to_string(),
                 ids: gone,
@@ -530,7 +586,11 @@ impl Worker {
         let Some(account) = self.accounts.get_mut(email) else {
             return;
         };
-        let new_mail = account.take_new_mail();
+        let mut new_mail = account.take_new_mail();
+        if account.resumed {
+            // What arrived while the app was closed is not announced as if just received.
+            new_mail.clear();
+        }
         let mut counts = std::mem::take(&mut account.round_labels);
         counts.extend(ROUND_COUNTS.iter().map(|s| s.to_string()));
         let mut listed = true;
@@ -549,6 +609,7 @@ impl Worker {
             });
         }
         if listed {
+            self.round_done(email);
             self.emit(SyncEvent::Synced(Timestamp::now()));
         }
     }

@@ -25,6 +25,7 @@ mod protocol;
 mod secrets;
 mod store;
 mod sync;
+mod thread_cache;
 mod tray;
 mod ui;
 

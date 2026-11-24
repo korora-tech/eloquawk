@@ -47,6 +47,7 @@ use crate::model::{
 };
 use crate::protocol::{AuthState, Command, OpId, PageMode, SendError, SyncEvent, SyncHandle};
 use crate::secrets::{SecretError, Secrets};
+use crate::thread_cache::{self, ThreadCache};
 
 /// How long a browser sign-in may take before it is abandoned.
 const SIGN_IN_TIMEOUT: Duration = Duration::from_secs(5 * 60);

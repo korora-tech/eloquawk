@@ -21,6 +21,26 @@ and the thread summaries those pages show.
 - **WHEN** initial sync lists a thread whose history id matches the snapshot
 - **THEN** the cached summary is reused instead of fetching the thread's metadata
 
+### Requirement: Relaunch resumes from the saved history cursor
+The snapshot SHALL record the Gmail history id it is consistent with, and a launch that
+restores a snapshot with one SHALL follow the history from there instead of listing again.
+
+#### Scenario: Resume
+- **WHEN** the user relaunches with a snapshot that has a cursor
+- **THEN** the app asks Gmail for the changes since the cursor, fetches only the changed threads, and does not run an initial sync
+
+#### Scenario: Mail that arrived while closed
+- **WHEN** the first round after resuming finds new unread inbox mail
+- **THEN** it appears in the list but is not announced as new mail
+
+#### Scenario: Cursor too old
+- **WHEN** Gmail no longer has the saved cursor
+- **THEN** the account resets and runs a full initial sync
+
+#### Scenario: Snapshot taken mid-round
+- **WHEN** the snapshot is saved while a history round still has changes to fetch
+- **THEN** it carries no cursor, and the next launch runs a full initial sync
+
 #### Scenario: Searches are never cached
 - **WHEN** the user runs a search and then relaunches
 - **THEN** no search results appear from the snapshot

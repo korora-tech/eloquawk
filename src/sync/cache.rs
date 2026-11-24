@@ -1,4 +1,5 @@
 use super::*;
+use crate::model::ThreadDetail;
 
 impl Worker {
     // ----- summary cache (SPEC 7.7) ---------------------------------------------------------
@@ -8,7 +9,10 @@ impl Worker {
         if self.cache.is_none() && !self.cache_failed {
             let dir = self.cache_dir.clone()?;
             match self.secrets.cache_key() {
-                Ok(key) => self.cache = Some(MailCache::new(dir, &key)),
+                Ok(key) => {
+                    self.threads = Some(ThreadCache::new(dir.clone(), &key));
+                    self.cache = Some(MailCache::new(dir, &key));
+                }
                 Err(e) => {
                     eprintln!("eloquawk: keeping no summary cache: {e}");
                     self.cache_failed = true;
@@ -66,6 +70,11 @@ impl Worker {
 
     /// Writes every changed account's snapshot.
     pub(super) fn persist(&mut self) {
+        if let Some(threads) = &self.threads {
+            for email in std::mem::take(&mut self.threads_written) {
+                threads.prune(&email, thread_cache::MAX_THREADS, thread_cache::MAX_BYTES);
+            }
+        }
         if !self.accounts.values().any(|a| a.dirty) || self.open_cache().is_none() {
             return;
         }
@@ -76,6 +85,34 @@ impl Worker {
             account.dirty = false;
             if let Err(e) = cache.save(email, &account.snapshot()) {
                 eprintln!("eloquawk: could not write the summary cache: {}", e.kind());
+            }
+        }
+    }
+
+    /// Keeps an opened thread on disk, sealed (SPEC 7.8).
+    pub(super) fn save_thread(&mut self, history_id: u64, detail: &ThreadDetail) {
+        if self.open_cache().is_none() {
+            return;
+        }
+        let Some(threads) = &self.threads else {
+            return;
+        };
+        match threads.save(history_id, detail) {
+            Ok(()) => {
+                self.threads_written.insert(detail.key.account.clone());
+            }
+            Err(e) => eprintln!("eloquawk: could not write the thread cache: {}", e.kind()),
+        }
+    }
+
+    /// Drops threads Gmail no longer has from the thread store.
+    pub(super) fn forget_threads(&mut self, email: &str, ids: &[String]) {
+        if self.open_cache().is_none() {
+            return;
+        }
+        if let Some(threads) = &self.threads {
+            for id in ids {
+                threads.remove(&ThreadKey::new(email, id.as_str()));
             }
         }
     }

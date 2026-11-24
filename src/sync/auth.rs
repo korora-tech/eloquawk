@@ -64,7 +64,15 @@ impl Worker {
         let emails: Vec<AccountId> = self.accounts.keys().cloned().collect();
         for email in emails {
             self.restore(&email);
-            self.queue.push(Job::InitialSync(email));
+            // A saved cursor means the cache is current up to it: follow the changes since
+            // (SPEC 7.4) in place of listing everything again. Gmail refusing the cursor
+            // falls back to an initial sync.
+            let resumed = self.accounts.get(&email).is_some_and(|a| a.resumed);
+            self.queue.push(if resumed {
+                Job::History(email)
+            } else {
+                Job::InitialSync(email)
+            });
         }
     }
 

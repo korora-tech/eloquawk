@@ -29,8 +29,9 @@ built on gpui-kit, whose API differs from the pinned zed gpui.
 - **Secrets:** refresh tokens and a user-supplied OAuth client live only in the Secret
   Service. Access tokens live only in worker memory. Mail content is never written to disk in
   plaintext or to logs, except an attachment the user explicitly saves. The one exception to
-  "not on disk" is the summary cache (7.7): encrypted, with its key only in the Secret Service,
-  and never holding a message body. Prefs hold no mail data apart from
+  "not on disk" is the summary cache (7.7) and the thread store (7.8): encrypted, with their
+  key only in the Secret Service. The summary cache never holds a message body; the thread
+  store holds the threads the user opened, sealed. Prefs hold no mail data apart from
   the last selected label id. From M16 the OpenRouter API key lives only in the Secret Service
   (item `openrouter-api-key`, 16.4) and in the AI worker's memory.
 - **Mail leaves the machine only for Google and, for accounts the user opted in (16.2), a
@@ -108,6 +109,7 @@ src/...
 | `branding.rs` | `APP_ID` (M1); the embedded SVG icon (`LazyLock<Arc<Image>>`) and `icon(size)` (M14). The PNG is installed but not embedded: with no tray nothing in the app decodes it (M14 change). | copy+adapt |
 | `config.rs` | `Prefs` (section 4.3), XDG path `$XDG_CONFIG_HOME/eloquawk/settings.json`, atomic save, `ephemeral`. `load_from(path)` / `save_to(path)` take the path so tests use a temp dir. | copy+adapt |
 | `cache.rs` | The encrypted on-disk summary cache (7.7): labels, page 1 of label views and their thread summaries, per account. | new |
+| `thread_cache.rs` | The encrypted on-disk thread store (7.8): opened threads with their bodies, per account, bounded, sealed with the summary cache's key. | new |
 | `secrets.rs` | `SecretStore` trait, `KeyringStore`, `MemoryStore`, and the typed `Secrets` API (client, token map). Debug builds honour `ELOQUAWK_SECRETS=memory`. | copy, with the legacy migration removed |
 | `instance.rs` | Single instance: flock on `$XDG_RUNTIME_DIR/eloquawk.lock`, 0600 socket `eloquawk.sock`, JSON-line `hello` / `show` / `compose {mailto}`. `--demo --instance` uses `eloquawk-demo.lock` / `eloquawk-demo.sock`. | extracted from antarctical `dankcal.rs` |
 | `notify.rs` | Pure `new_mail_notes(threads, &mut seen) -> Vec<Note>`, grouping, the body format and markup escaping. `show(note)` calls notify-rust and is only called from `background_spawn`. | new, modelled on `reminders.rs` |
@@ -793,13 +795,45 @@ an encrypted snapshot of what it already knows:
 - **Key:** 32 random bytes in the keyring item `mail-cache-key` (base64), made on first use
   and read in the same unlock as the refresh tokens. If it is unreadable it is replaced, which
   only orphans the old files. Without a keyring there is no cache.
-- **Load:** in `load_from_keyring`, before each account's `InitialSync`, emit `Labels` and one
-  `ThreadPage { mode: Refresh, has_more: false }` per cached view. The Store fills an empty
-  list from it but keeps it loading, so the real listing still replaces it. The cached `known`
-  entries then make 7.3 step 3 reuse every summary whose history id is unchanged.
+- **Cursor:** the snapshot also holds `history_id`, the cursor it is consistent with. It is
+  written only when the account has completed a first sync and has no `pending_changed`;
+  otherwise it is `None`, so a cursor never skips a change that was not yet applied.
+- **Load:** in `load_from_keyring`, emit `Labels` and one `ThreadPage { mode: Refresh,
+  has_more: false }` per cached view. The Store fills an empty list from it but keeps it
+  loading. With a saved cursor the account **resumes**: `history_id` and `synced_once` are
+  restored and `History` is queued in place of `InitialSync`, so only what changed since is
+  fetched (7.4), with no profile call and no listing. Gmail answering 404 for the cursor
+  takes the usual step 8 reset to an initial sync. Without a cursor, `InitialSync` runs and
+  the cached `known` entries make 7.3 step 3 reuse every summary whose history id is
+  unchanged. The first round of a resumed session finds what arrived while the app was
+  closed, which is **not** reported as `NewMail`, and then refreshes the label list once
+  (rounds never do).
 - **Save:** whenever the queue drains and something cached changed (`dirty`), and at
   shutdown. `AccountReset` empties the snapshot; removing an account deletes its file.
 - A missing, tampered, foreign-key or old-format file reads as no cache.
+
+### 7.8 Thread store (`thread_cache.rs`)
+
+So an opened thread shows again without a request, and mail can be read offline, the worker
+keeps each thread it fetched in full:
+- **Contents:** the `ThreadDetail` (messages with bodies, the sanitised HTML model the reader
+  draws, headers, attachment metadata and signals; a file whose ranges would not index their
+  text reads as not saved) and the history id the thread had when fetched. Never attachment bytes.
+- **Format:** `<cache dir>/threads/<hash of account>/<hash of thread id>.thread`, mode 0600 in
+  0700 folders, atomic writes. `"ELQTHR01" ‖ nonce ‖ XChaCha20-Poly1305(JSON)` with the
+  account and thread id as associated data, under the summary cache's key. No address or id
+  is in a name or in the clear. The JSON shape is private to the module.
+- **Open (`OpenThread`, `Prefetch`):** a saved thread whose history id equals the one the
+  list knows is emitted with no request. Otherwise the thread is fetched, saved and emitted.
+  If the fetch fails for any reason but 404, the saved copy (however old) is emitted instead of
+  an error; with none, a prefetch is silent and an open reports the failure as before.
+- **Bounds:** at most `MAX_THREADS` (1500) files and `MAX_BYTES` (192 MiB) per account;
+  the least recently written go first, pruned whenever the queue drains. Leftover temporary
+  files go with them.
+- **Removal:** a thread Gmail reports gone (a 404 on open, refetch or metadata fetch) is
+  deleted; `AccountReset` empties the account's store; removing an account deletes it, with
+  no key needed.
+- With no keyring there is no store, as for the summary cache.
 
 ---
 
