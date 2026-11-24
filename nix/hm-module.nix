@@ -1,8 +1,8 @@
 # Home Manager module: `programs.eloquawk`. Takes this flake (`self`) for its package.
 #
 # Installing the package is all it does: the package carries the desktop entry (which
-# registers Eloquawk for `mailto:` links) and the hicolor icons. Eloquawk has no tray and no
-# background service, so there is no systemd unit to manage.
+# registers Eloquawk for `mailto:` links) and the hicolor icons. Eloquawk's background mode is
+# the app staying open behind its tray icon, not a service, so there is no systemd unit.
 self:
 {
   config,

@@ -26,7 +26,7 @@ A native Gmail client for Linux, built with Rust and [GPUI](https://www.gpui.rs/
 - **Message checks (optional, off by default):** with your own OpenRouter key (Jev) or Cloudflare token (Clef), the model flags likely phishing, scams and spam in the accounts you turn on, and suggests which of your labels a message you open belongs under (`1`, `2`, `3` apply them). See [Message checks](#message-checks).
 - **Local credential storage:** refresh tokens stay in your system keyring; mail stays in memory and is never written to disk. No analytics or telemetry.
 
-**Current limits:** Eloquawk does not render HTML mail, edit or sync drafts (Drafts are listed read-only), use send-as aliases or signatures, snooze, schedule sends, manage filters or labels, or delete permanently. There is no offline cache, so mail is fetched again at startup, and no tray icon: closing the last window quits.
+**Current limits:** Eloquawk does not render HTML mail, edit or sync drafts (Drafts are listed read-only), use send-as aliases or signatures, snooze, schedule sends, manage filters or labels, or delete permanently. There is no offline cache, so mail is fetched again at startup, and background mode needs a StatusNotifier tray host: without one, closing the last window quits.
 
 ## Message checks
 

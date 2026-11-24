@@ -96,10 +96,27 @@ own `settings.json`. A flake check SHALL evaluate the module.
 - **WHEN** `programs.eloquawk.package` is set to another package
 - **THEN** that package is installed instead
 
-### Requirement: No background presence
-Eloquawk SHALL have no tray icon and no background service. Closing the last window and
-`Ctrl+Q` SHALL quit the app.
+### Requirement: Background mode
+While "Keep running in the tray when the window is closed" is on in Settings (on by default)
+and the tray icon (StatusNotifierItem) is showing, closing the last window SHALL keep Eloquawk
+running without a window, so new-mail notifications continue. The tray icon SHALL offer "Open
+Eloquawk" (also its primary click) and "Quit". `Ctrl+Q` SHALL always quit. When no tray icon
+can be shown, or the setting is off, closing the last window SHALL quit. Demo mode SHALL never
+run in the background. If the tray icon disappears while no window is open, the main window
+SHALL open.
 
-#### Scenario: Last window closed
-- **WHEN** the user closes the last Eloquawk window
+#### Scenario: Last window closed with a tray
+- **WHEN** the user closes the last Eloquawk window and the tray icon is showing
+- **THEN** the process keeps running and new mail still notifies
+
+#### Scenario: Reopening from the tray
+- **WHEN** the user clicks the tray icon or chooses "Open Eloquawk"
+- **THEN** the main window opens or comes forward
+
+#### Scenario: Quit from the tray
+- **WHEN** the user chooses "Quit" in the tray menu
+- **THEN** the process exits
+
+#### Scenario: No tray available
+- **WHEN** the desktop has no StatusNotifier host and the user closes the last window
 - **THEN** the process exits

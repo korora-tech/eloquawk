@@ -921,6 +921,13 @@ impl SettingsView {
                         "Notify about new mail",
                         prefs.notifications,
                         self.pref(cx, |p| p.notifications = !p.notifications),
+                    ))
+                    .child(checkbox_row(
+                        p,
+                        "pref-background",
+                        "Keep running in the tray when the window is closed",
+                        prefs.run_in_background,
+                        self.pref(cx, |p| p.run_in_background = !p.run_in_background),
                     )),
             )
             .child(labelled("Check for new mail every", refresh_row))

@@ -12,7 +12,7 @@
 - **Attachments:** **Save** writes the file to your download directory: `XDG_DOWNLOAD_DIR` from `~/.config/user-dirs.dirs` when it names an absolute path, otherwise `~/Downloads`. Names are cleaned of path separators and control or direction-changing characters, and an existing file is never overwritten (`name (1).ext` instead). The notice offers **Open folder**.
 - **Composing:** each message opens in its own window. Cc and Bcc hide behind **Cc Bcc** until used. **Attach…** uses your desktop's file chooser portal; attachments may total 25 MB. Closing a message you have changed asks before discarding it.
 - **Theme:** System, Light or Dark in Settings. `eloquawk --theme light|dark|system` overrides it for one session.
-- **Closing:** there is no tray icon or background service. Closing the last window quits, and so does `Ctrl+Q`.
+- **Closing:** with **Keep running in the tray when the window is closed** on (the default) and a tray icon showing, closing the last window leaves Eloquawk running behind the icon, so new-mail notifications continue. Click the icon or choose **Open Eloquawk** to bring the window back, **Quit** to exit. `Ctrl+Q` always quits. The icon uses the StatusNotifierItem protocol (KDE, Cinnamon, COSMIC, and GNOME with an AppIndicator extension). Without a tray host, or with the setting off, closing the last window quits.
 
 ## Mailto links
 
@@ -61,6 +61,6 @@ Pass `eloquawk` to your Home Manager modules with `extraSpecialArgs = { inherit 
 }
 ```
 
-The module installs the package, which brings the desktop entry, the `mailto:` registration and the icons. There is no service to enable, because Eloquawk has no tray and does not run in the background. It does not set Eloquawk as your default mail handler; use your desktop's settings, `xdg-mime` as above, or Home Manager's `xdg.mimeApps.defaultApplications."x-scheme-handler/mailto"`. Eloquawk's own `settings.json` is not managed: the app writes it.
+The module installs the package, which brings the desktop entry, the `mailto:` registration and the icons. There is no service to enable: background mode is the app itself staying open behind its tray icon, not a systemd unit. It does not set Eloquawk as your default mail handler; use your desktop's settings, `xdg-mime` as above, or Home Manager's `xdg.mimeApps.defaultApplications."x-scheme-handler/mailto"`. Eloquawk's own `settings.json` is not managed: the app writes it.
 
 `homeManagerModules.default` is the same module under the older output name.
