@@ -86,11 +86,27 @@ pub fn open_compose_window(store: &Entity<Store>, prefill: Outgoing, cx: &mut Ap
     open_compose_window_raised(store, prefill, None, cx);
 }
 
+/// Opens `prefill`, read from Gmail draft `draft_id`, for editing: saves go to that draft
+/// and no signature is added.
+pub fn open_draft_window(store: &Entity<Store>, prefill: Outgoing, draft_id: String, cx: &mut App) {
+    open_compose_window_inner(store, prefill, Some(draft_id), None, cx);
+}
+
 /// [`open_compose_window`], spending `token` (handed over by a later launch with a `mailto:`
 /// link) on the new window.
 pub fn open_compose_window_raised(
     store: &Entity<Store>,
     prefill: Outgoing,
+    token: Option<&str>,
+    cx: &mut App,
+) {
+    open_compose_window_inner(store, prefill, None, token, cx);
+}
+
+fn open_compose_window_inner(
+    store: &Entity<Store>,
+    prefill: Outgoing,
+    draft_id: Option<String>,
     token: Option<&str>,
     cx: &mut App,
 ) {
@@ -109,7 +125,7 @@ pub fn open_compose_window_raised(
             ..Default::default()
         },
         move |window, cx| {
-            let view = cx.new(|cx| ComposeView::new(store, prefill, title, window, cx));
+            let view = cx.new(|cx| ComposeView::new(store, prefill, draft_id, title, window, cx));
             view.update(cx, |view, cx| view.focus_initial(window, cx));
             view
         },

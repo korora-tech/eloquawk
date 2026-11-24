@@ -41,7 +41,7 @@ use crate::google::gmail;
 use crate::google::oauth::{self, AuthError, ClientCredentials, TokenResponse};
 use crate::mail::{b64, compose, files, parse, signature};
 use crate::model::{
-    AccountId, Attachment, AttachmentSource, Label, LabelDelta, LabelKind,
+    AccountId, Address, Attachment, AttachmentSource, ComposeKind, Label, LabelDelta, LabelKind,
     MAX_OUTGOING_ATTACHMENTS, Outgoing, OutgoingAttachment, SendAs, ThreadKey, ThreadSummary,
     ViewKey, ViewKind, labels,
 };

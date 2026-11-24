@@ -287,6 +287,18 @@ impl MutationKind {
     }
 }
 
+/// The state of one draft operation, kept until the window that started it has read it.
+#[derive(Clone, Debug)]
+pub enum DraftOp {
+    Saving,
+    /// Saved; the draft's id.
+    Saved(String),
+    Failed(String),
+    Loading,
+    /// Read for editing: its id and prefill, or why it cannot be edited.
+    Loaded(Result<(String, Box<Outgoing>), String>),
+}
+
 /// The state of one send.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SendState {
@@ -417,6 +429,12 @@ pub struct Store {
     sends: HashMap<OpId, SendState>,
     /// Messages waiting out the undo window, by op; they go to the worker when it ends.
     scheduled: HashMap<OpId, Outgoing>,
+    /// Draft saves and loads by op, until their window has read the outcome.
+    drafts: HashMap<OpId, DraftOp>,
+    /// The load of the draft the user opened in the Drafts view.
+    edit_draft: Option<OpId>,
+    /// The Gmail draft behind a send, deleted once the send succeeds.
+    send_drafts: HashMap<OpId, (AccountId, String)>,
     /// Sends still in flight whose compose window has closed: their outcome becomes a
     /// notice, since no window is left to show it.
     abandoned: HashSet<OpId>,
@@ -590,6 +608,9 @@ impl Store {
             undo: None,
             sends: HashMap::new(),
             scheduled: HashMap::new(),
+            drafts: HashMap::new(),
+            edit_draft: None,
+            send_drafts: HashMap::new(),
             abandoned: HashSet::new(),
             send_threads: HashMap::new(),
             next_op: 1,

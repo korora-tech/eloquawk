@@ -448,6 +448,40 @@ pub fn post_multipart<T: DeserializeOwned>(
     read(result, limits.body).and_then(|(_, body)| decode(&body))
 }
 
+/// [`post_multipart`] with PUT, for `drafts.update`.
+pub fn put_multipart<T: DeserializeOwned>(
+    agent: &ureq::Agent,
+    token: &str,
+    url: &str,
+    query: &[(&str, String)],
+    parts: &[(&str, &[u8])],
+    limits: Limits,
+) -> Result<T, ApiError> {
+    let url = with_query(url, query)?;
+    let (boundary, body) = multipart_body(parts);
+    let result = agent
+        .put(url.as_str())
+        .header("Authorization", &bearer(token))
+        .header(
+            "Content-Type",
+            &format!("multipart/related; boundary={boundary}"),
+        )
+        .config()
+        .timeout_global(Some(limits.timeout))
+        .build()
+        .send(&body[..]);
+    read(result, limits.body).and_then(|(_, body)| decode(&body))
+}
+
+/// `DELETE url` with a bearer token; the empty success body is ignored.
+pub fn delete(agent: &ureq::Agent, token: &str, url: &str) -> Result<(), ApiError> {
+    let result = agent
+        .delete(url)
+        .header("Authorization", &bearer(token))
+        .call();
+    read(result, BODY_LIMIT).map(|_| ())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

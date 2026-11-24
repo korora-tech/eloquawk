@@ -262,7 +262,7 @@ impl MainView {
             let key = key.clone();
             this.store.update(cx, |st, cx| {
                 st.set_cursor_index(ix);
-                st.open_thread(key);
+                st.activate(key);
                 cx.notify();
             });
             this.focus_mail(window, cx);

@@ -309,7 +309,22 @@ impl Store {
                 self.details.insert(key, DetailState::Failed(error));
             }
             SyncEvent::MutationFinished { op, error } => self.on_mutation_finished(op, error),
+            SyncEvent::DraftSaved { op, draft_id } => {
+                self.drafts.insert(op, DraftOp::Saved(draft_id));
+            }
+            SyncEvent::DraftFailed { op, message } => {
+                self.drafts.insert(op, DraftOp::Failed(message));
+            }
+            SyncEvent::DraftLoaded { op, result } => {
+                self.drafts.insert(op, DraftOp::Loaded(result));
+            }
             SyncEvent::SendFinished { op, error } => {
+                // The message is out: its draft is no longer wanted. A failed send keeps it.
+                if let Some((account, draft_id)) = self.send_drafts.remove(&op)
+                    && error.is_none()
+                {
+                    self.delete_draft(&account, &draft_id);
+                }
                 let thread = self.send_threads.remove(&op);
                 let watched = !self.abandoned.remove(&op);
                 match error {

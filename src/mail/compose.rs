@@ -14,7 +14,7 @@ use std::time::SystemTime;
 
 use jiff::Timestamp;
 use lettre::message::header::ContentType;
-use lettre::message::{Attachment, Mailbox, MultiPart, SinglePart};
+use lettre::message::{Attachment, Mailbox, MessageBuilder, MultiPart, SinglePart};
 
 use crate::model::{Address, MAX_OUTGOING_ATTACHMENTS, Outgoing, OutgoingAttachment};
 
@@ -83,17 +83,54 @@ pub fn build(
     if out.to.is_empty() && out.cc.is_empty() && out.bcc.is_empty() {
         return Err(ComposeError::NoRecipients);
     }
-    let mut b = lettre::Message::builder()
-        .from(mailbox(&out.from)?)
-        .keep_bcc();
-    for a in &out.to {
-        b = b.to(mailbox(a)?);
+    build_inner(out, attachments, now, message_id, true)
+}
+
+/// [`build`] for a draft: it may have no recipients yet, and an address still being typed is
+/// left out rather than refused.
+pub fn build_draft(
+    out: &Outgoing,
+    attachments: &[(OutgoingAttachment, Vec<u8>)],
+    now: Timestamp,
+    message_id: &str,
+) -> Result<Vec<u8>, ComposeError> {
+    build_inner(out, attachments, now, message_id, false)
+}
+
+fn build_inner(
+    out: &Outgoing,
+    attachments: &[(OutgoingAttachment, Vec<u8>)],
+    now: Timestamp,
+    message_id: &str,
+    strict: bool,
+) -> Result<Vec<u8>, ComposeError> {
+    let from = mailbox(&out.from)?;
+    let mut b = lettre::Message::builder().from(from.clone()).keep_bcc();
+    let mut any = false;
+    for (list, add) in [
+        (
+            &out.to,
+            MessageBuilder::to as fn(MessageBuilder, Mailbox) -> MessageBuilder,
+        ),
+        (&out.cc, MessageBuilder::cc),
+        (&out.bcc, MessageBuilder::bcc),
+    ] {
+        for a in list {
+            match mailbox(a) {
+                Ok(m) => {
+                    b = add(b, m);
+                    any = true;
+                }
+                Err(e) if strict => return Err(e),
+                Err(_) => {}
+            }
+        }
     }
-    for a in &out.cc {
-        b = b.cc(mailbox(a)?);
-    }
-    for a in &out.bcc {
-        b = b.bcc(mailbox(a)?);
+    if !any {
+        // Nothing to derive an envelope from; a draft is never sent through it.
+        let envelope = lettre::address::Envelope::new(None, vec![from.email.clone()])
+            .map_err(|e| ComposeError::Build(e.to_string()))?;
+        b = b.envelope(envelope);
     }
     let date = SystemTime::try_from(now).map_err(|e| ComposeError::Build(e.to_string()))?;
     b = b
@@ -228,6 +265,29 @@ mod tests {
 
     fn now() -> Timestamp {
         "2025-10-03T09:30:00Z".parse().unwrap()
+    }
+
+    #[test]
+    fn drafts_may_lack_recipients_and_skip_half_typed_ones() {
+        let mut out = outgoing();
+        out.to.clear();
+        out.cc.clear();
+        out.bcc.clear();
+        let id = message_id_from([1; 8]);
+        assert!(matches!(
+            build(&out, &[], now(), &id),
+            Err(ComposeError::NoRecipients)
+        ));
+        let raw = build_draft(&out, &[], now(), &id).unwrap();
+        let m = MessageParser::default().parse(&raw).unwrap();
+        assert!(m.to().is_none() && m.bcc().is_none());
+        assert_eq!(m.subject(), Some("Re: Café ☕ plans"));
+        // A half-typed address is dropped from the draft, a valid one stays; a send refuses.
+        out.to = vec![addr(None, "bob@"), addr(None, "ann@example.org")];
+        let raw = build_draft(&out, &[], now(), &id).unwrap();
+        let m = MessageParser::default().parse(&raw).unwrap();
+        assert_eq!(m.to().unwrap().iter().count(), 1);
+        assert!(build(&out, &[], now(), &id).is_err());
     }
 
     #[test]

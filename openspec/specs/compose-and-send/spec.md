@@ -231,6 +231,31 @@ app exits.
 - **WHEN** the user quits while a message is held
 - **THEN** the message is sent first and the app exits once it has finished
 
+### Requirement: Drafts
+The app SHALL keep an edited message as a Gmail draft: about four seconds after the last edit,
+and while no send is held or in flight, it SHALL create the draft, or replace it when one exists,
+so other clients see it. A draft MAY have no recipients, and an address still being typed SHALL
+be left out of it. The draft SHALL be deleted when the message is sent successfully or discarded,
+and kept when a send fails or is undone. Asking "Discard this message?" SHALL also offer "Save
+draft", which saves, then closes or quits. A failed save SHALL show "Couldn't save the draft"
+inline and SHALL NOT block editing or sending. Choosing a draft in the Drafts view (Enter or a
+click) SHALL open it in a compose window, without adding a signature, instead of the reader;
+saving then replaces that draft. A draft with attachments SHALL NOT open for editing, with the
+notice "Drafts with attachments can't be edited here yet.", since saving would drop them. Switching
+From to another account SHALL replace the draft with one in that account.
+
+#### Scenario: Autosave
+- **WHEN** the user types a message and waits
+- **THEN** the Drafts view of the same account shows it
+
+#### Scenario: Sent message
+- **WHEN** a drafted message is sent
+- **THEN** its draft is deleted
+
+#### Scenario: Edit a draft
+- **WHEN** the user presses Enter on a conversation in the Drafts view
+- **THEN** a compose window opens with the draft's fields and no second signature
+
 ### Requirement: Closing and quitting with unsent edits
 Escape, ctrl-w and the window manager's close button SHALL close a compose window, first
 asking "Discard this message?" with Discard and Keep when anything was edited; a second

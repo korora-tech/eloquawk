@@ -319,12 +319,61 @@ impl Store {
         (op, Some(Duration::from_secs(secs)))
     }
 
+    /// Saves the composer's text as the account's Gmail draft: `draft_id` replaces an existing
+    /// one. The outcome is read with [`Store::draft_op`].
+    pub fn save_draft(&mut self, outgoing: Outgoing, draft_id: Option<String>) -> OpId {
+        let op = self.alloc_op();
+        self.drafts.insert(op, DraftOp::Saving);
+        self.send_command(Command::SaveDraft {
+            op,
+            outgoing,
+            draft_id,
+        });
+        op
+    }
+
+    /// Deletes a Gmail draft (the message was discarded).
+    pub fn delete_draft(&self, account: &str, draft_id: &str) {
+        self.send_command(Command::DeleteDraft {
+            account: account.to_string(),
+            draft_id: draft_id.to_string(),
+        });
+    }
+
+    /// Reads the draft in conversation `thread_id` for editing; the outcome is read with
+    /// [`Store::draft_op`].
+    pub fn load_draft(&mut self, account: &str, thread_id: &str) -> OpId {
+        let op = self.alloc_op();
+        self.drafts.insert(op, DraftOp::Loading);
+        self.send_command(Command::LoadDraft {
+            op,
+            account: account.to_string(),
+            thread_id: thread_id.to_string(),
+        });
+        op
+    }
+
+    pub fn draft_op(&self, op: OpId) -> Option<&DraftOp> {
+        self.drafts.get(&op)
+    }
+
+    /// The window that started `op` has read its outcome.
+    pub fn forget_draft_op(&mut self, op: OpId) {
+        self.drafts.remove(&op);
+    }
+
+    /// Ties a Gmail draft to a send: it is deleted when the send succeeds.
+    pub fn note_send_draft(&mut self, op: OpId, account: &str, draft_id: String) {
+        self.send_drafts.insert(op, (account.to_string(), draft_id));
+    }
+
     /// Takes a message back from the undo window. `None` when it already left (or never was
     /// held), in which case nothing changes.
     pub fn cancel_send(&mut self, op: OpId) -> Option<Outgoing> {
         let outgoing = self.scheduled.remove(&op)?;
         self.sends.remove(&op);
         self.send_threads.remove(&op);
+        self.send_drafts.remove(&op);
         self.abandoned.remove(&op);
         Some(outgoing)
     }

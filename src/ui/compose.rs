@@ -19,7 +19,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use gpui::prelude::*;
 use gpui::{
     AnyWindowHandle, App, ClickEvent, Context, Div, Entity, FocusHandle, Focusable, FontWeight,
-    PathPromptOptions, SharedString, Subscription, Window, div, px, rgb,
+    PathPromptOptions, SharedString, Subscription, Task, Window, div, px, rgb,
 };
 
 use super::text_area::TextArea;
@@ -35,9 +35,10 @@ use crate::model::{
     AccountId, Address, AttachmentSource, ComposeKind, Outgoing, OutgoingAttachment, ThreadDetail,
 };
 use crate::protocol::OpId;
-use crate::store::{SendState, Store};
+use crate::store::{DraftOp, SendState, Store};
 use crate::ui::format::{full_date, size_human};
 use jiff::ZonedDateTime;
+use std::time::Duration;
 
 /// An empty new message from `account`.
 pub fn blank(account: &AccountId) -> Outgoing {
@@ -143,7 +144,7 @@ enum Leave {
 }
 
 /// The field texts as opened, to tell whether anything was edited.
-#[derive(Clone, PartialEq)]
+#[derive(Clone, Default, PartialEq)]
 struct Snapshot {
     account: AccountId,
     from: String,
@@ -192,6 +193,22 @@ pub struct ComposeView {
     attach_error: Option<String>,
     invalid: [bool; 3],
     sending: Sending,
+    /// Gmail's draft for this message, once one has been saved or opened.
+    draft_id: Option<String>,
+    /// A draft save in flight.
+    saving: Option<OpId>,
+    /// What the draft on Gmail holds, to tell whether there is anything new to save.
+    saved: Snapshot,
+    /// The snapshot the save in flight carries.
+    saved_pending: Option<Snapshot>,
+    /// A draft save failed: shown inline until the next one works.
+    draft_error: Option<String>,
+    /// The user asked to save and close: close once the draft has caught up.
+    close_when_saved: Option<Leave>,
+    /// The account `draft_id` belongs to: changing From to another account needs a new draft.
+    draft_account: AccountId,
+    /// The autosave timer; replaced by every edit.
+    autosave_timer: Option<Task<()>>,
     send_anyway: bool,
     confirm: Option<Leave>,
     /// The user agreed to discard this message while quitting; quit no longer asks about it.
@@ -206,6 +223,7 @@ impl ComposeView {
     pub fn new(
         store: Entity<Store>,
         prefill: Outgoing,
+        draft_id: Option<String>,
         title: String,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -224,16 +242,27 @@ impl ComposeView {
             || (prefill.from.clone(), String::new()),
             |i| (i.address, i.signature),
         );
-        let text = signature::insert(&prefill.body, &signature, prefill.kind);
+        // An opened draft already holds whatever signature it had.
+        let text = if draft_id.is_some() {
+            prefill.body.clone()
+        } else {
+            signature::insert(&prefill.body, &signature, prefill.kind)
+        };
         let body = cx.new(|cx| TextArea::new(&text, "", 5, cx));
         let accounts = store.read(cx).accounts.clone();
         let mut subscriptions = vec![cx.observe_in(&store, window, |this, store, window, cx| {
             this.on_store(&store, window, cx)
         })];
         for input in [&to, &cc, &bcc, &subject] {
-            subscriptions.push(cx.observe(input, |this, _, cx| this.validate(cx)));
+            subscriptions.push(cx.observe(input, |this, _, cx| {
+                this.validate(cx);
+                this.schedule_autosave(cx);
+            }));
         }
-        subscriptions.push(cx.observe(&body, |_, _, cx| cx.notify()));
+        subscriptions.push(cx.observe(&body, |this, _, cx| {
+            this.schedule_autosave(cx);
+            cx.notify();
+        }));
         let show_cc = !prefill.cc.is_empty() || !prefill.bcc.is_empty();
         // The window manager's close button gets the same discard check as escape.
         let weak = cx.entity().downgrade();
@@ -264,6 +293,14 @@ impl ComposeView {
             attach_error: None,
             invalid: [false; 3],
             sending: Sending::Editing,
+            draft_id,
+            saving: None,
+            saved: Snapshot::default(),
+            saved_pending: None,
+            draft_error: None,
+            close_when_saved: None,
+            draft_account: prefill.account.clone(),
+            autosave_timer: None,
             send_anyway: false,
             confirm: None,
             discarded: false,
@@ -281,6 +318,7 @@ impl ComposeView {
             _subscriptions: subscriptions,
         };
         this.baseline = this.snapshot(cx);
+        this.saved = this.baseline.clone();
         this.validate(cx);
         this
     }
@@ -423,6 +461,12 @@ impl ComposeView {
         } else {
             Sending::InFlight(op)
         };
+        if let Some(id) = self.draft_id.clone() {
+            let account = self.draft_account.clone();
+            self.store
+                .update(cx, |s, _| s.note_send_draft(op, &account, id));
+        }
+        self.autosave_timer = None;
         self.send_anyway = false;
         cx.notify();
     }
@@ -440,14 +484,139 @@ impl ComposeView {
         // Too late: the window ended a moment ago and the message is on its way.
         if taken.is_some() {
             self.sending = Sending::Editing;
+            self.schedule_autosave(cx);
             window.focus(&self.body.focus_handle(cx), cx);
         }
         cx.notify();
     }
 
+    // ----- drafts -----------------------------------------------------------------------
+
+    /// How long after the last edit the draft is saved to Gmail.
+    const AUTOSAVE_AFTER: Duration = Duration::from_secs(4);
+
+    /// Restarts the autosave timer after an edit. Nothing is saved while a send is held or on
+    /// its way, and a message nobody has touched is never saved.
+    fn schedule_autosave(&mut self, cx: &mut Context<Self>) {
+        if matches!(self.sending, Sending::Pending(_) | Sending::InFlight(_)) {
+            return;
+        }
+        self.autosave_timer = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(Self::AUTOSAVE_AFTER).await;
+            let _ = this.update(cx, |this, cx| this.autosave(cx));
+        }));
+    }
+
+    /// Saves the message as Gmail's draft when it differs from what Gmail has. One save at a
+    /// time: an edit during a save is picked up when it lands.
+    fn autosave(&mut self, cx: &mut Context<Self>) {
+        if self.saving.is_some()
+            || matches!(self.sending, Sending::Pending(_) | Sending::InFlight(_))
+            || self.discarded
+        {
+            return;
+        }
+        let now = self.snapshot(cx);
+        if now == self.saved || now == self.baseline && self.draft_id.is_none() {
+            return;
+        }
+        // A draft belongs to one account: after From moved to another, the old one goes.
+        if self.draft_account != self.account
+            && let Some(id) = self.draft_id.take()
+        {
+            let account = self.draft_account.clone();
+            self.store.read(cx).delete_draft(&account, &id);
+        }
+        let out = self.outgoing(cx);
+        let draft_id = self.draft_id.clone();
+        self.saving = Some(self.store.update(cx, |s, cx| {
+            let op = s.save_draft(out, draft_id);
+            cx.notify();
+            op
+        }));
+        self.saved_pending = Some(now);
+    }
+
+    /// Reads the outcome of the draft save in flight.
+    fn on_draft(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(op) = self.saving else {
+            return;
+        };
+        let outcome = match self.store.read(cx).draft_op(op) {
+            Some(DraftOp::Saved(id)) => Ok(id.clone()),
+            Some(DraftOp::Failed(message)) => Err(message.clone()),
+            _ => return,
+        };
+        self.store.update(cx, |s, _| s.forget_draft_op(op));
+        self.saving = None;
+        let snapshot = self.saved_pending.take();
+        match outcome {
+            Ok(id) => {
+                self.draft_id = Some(id);
+                self.draft_account = self.account.clone();
+                if let Some(snapshot) = snapshot {
+                    self.draft_error = None;
+                    // The account may have changed mid-save: the draft is then stale.
+                    self.saved = snapshot;
+                }
+                // A send started meanwhile must not leave this draft behind.
+                if let Sending::Pending(send) | Sending::InFlight(send) = self.sending
+                    && let Some(id) = self.draft_id.clone()
+                {
+                    let account = self.draft_account.clone();
+                    self.store
+                        .update(cx, |s, _| s.note_send_draft(send, &account, id));
+                }
+                if let Some(how) = self.close_when_saved {
+                    if self.snapshot(cx) == self.saved {
+                        self.on_close_saved(how, window, cx);
+                        return;
+                    }
+                    self.autosave(cx);
+                } else if self.snapshot(cx) != self.saved {
+                    self.schedule_autosave(cx);
+                }
+            }
+            Err(message) => {
+                self.draft_error = Some(message);
+                self.close_when_saved = None;
+            }
+        }
+        cx.notify();
+    }
+
+    /// Save draft and leave: the draft is already on Gmail, so nothing is discarded.
+    fn save_and_leave(&mut self, how: Leave, window: &mut Window, cx: &mut Context<Self>) {
+        self.confirm = None;
+        self.close_when_saved = Some(how);
+        self.autosave_timer = None;
+        if self.saving.is_none() && self.snapshot(cx) == self.saved {
+            self.on_close_saved(how, window, cx);
+        } else {
+            self.autosave(cx);
+        }
+        cx.notify();
+    }
+
+    fn on_close_saved(&mut self, how: Leave, window: &mut Window, cx: &mut Context<Self>) {
+        self.discarded = true;
+        self.close_when_saved = None;
+        self.finish(how, window, cx);
+    }
+
+    /// Deletes Gmail's copy when the message is discarded.
+    fn drop_draft(&mut self, cx: &mut Context<Self>) {
+        self.autosave_timer = None;
+        if let Some(id) = self.draft_id.take() {
+            let account = self.draft_account.clone();
+            self.store.read(cx).delete_draft(&account, &id);
+        }
+    }
+
     fn on_store(&mut self, store: &Entity<Store>, window: &mut Window, cx: &mut Context<Self>) {
+        self.accounts = store.read(cx).accounts.clone();
+        self.on_draft(window, cx);
         let s = store.read(cx);
-        self.accounts = s.accounts.clone();
         let (Sending::Pending(op) | Sending::InFlight(op)) = self.sending else {
             return;
         };
@@ -522,6 +691,7 @@ impl ComposeView {
 
     fn discard(&mut self, _: &DiscardCompose, window: &mut Window, cx: &mut Context<Self>) {
         let how = self.confirm.take().unwrap_or(Leave::Close);
+        self.drop_draft(cx);
         self.finish(how, window, cx);
     }
 
@@ -674,7 +844,11 @@ impl ComposeView {
     fn error_text(&self) -> Option<String> {
         match &self.sending {
             Sending::Failed { message, .. } => Some(message.clone()),
-            _ => self.attach_error.clone(),
+            _ => self.attach_error.clone().or_else(|| {
+                self.draft_error
+                    .as_ref()
+                    .map(|m| format!("Couldn't save the draft: {m}"))
+            }),
         }
     }
 
@@ -837,6 +1011,16 @@ impl ComposeView {
                         .text_color(rgb(p.text))
                         .child("Discard this message?"),
                 )
+                .child(button(
+                    p,
+                    "save-draft",
+                    "Save draft",
+                    ButtonStyle::Secondary,
+                    Some(Box::new(cx.listener(|this, _: &ClickEvent, window, cx| {
+                        let how = this.confirm.unwrap_or(Leave::Close);
+                        this.save_and_leave(how, window, cx)
+                    }))),
+                ))
                 .child(button(
                     p,
                     "discard",

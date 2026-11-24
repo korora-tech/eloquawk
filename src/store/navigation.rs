@@ -80,6 +80,43 @@ impl Store {
         }
     }
 
+    /// The user chose a conversation (Enter, a click). In the Drafts view that edits its draft
+    /// instead of reading it; anywhere else it is [`Store::open_thread`].
+    pub fn activate(&mut self, key: ThreadKey) {
+        if self.in_drafts_view() && self.edit_draft.is_none() {
+            self.edit_draft = Some(self.load_draft(&key.account, &key.id));
+        } else {
+            self.open_thread(key);
+        }
+    }
+
+    /// [`Store::activate`] on the cursor row.
+    pub fn activate_cursor(&mut self) {
+        if let Some(key) = self.cursor.clone() {
+            self.activate(key);
+        }
+    }
+
+    fn in_drafts_view(&self) -> bool {
+        self.view
+            .as_ref()
+            .is_some_and(|v| matches!(&v.kind, ViewKind::Label(id) if id == labels::DRAFT))
+    }
+
+    /// The draft the user opened in the Drafts view, once it has been read: its id and
+    /// prefill, or the reason it cannot be edited. `None` while it loads or when none was
+    /// asked for.
+    pub fn take_edit_draft(&mut self) -> Option<Result<(String, Box<Outgoing>), String>> {
+        let op = self.edit_draft?;
+        let Some(DraftOp::Loaded(result)) = self.drafts.get(&op) else {
+            return None;
+        };
+        let result = result.clone();
+        self.drafts.remove(&op);
+        self.edit_draft = None;
+        Some(result)
+    }
+
     /// Opens a thread: fetches its detail unless a fresh one is cached, and marks it read
     /// when that preference is on (not undoable, no toast). A cached detail is checked by
     /// the AI at once when the conditions of SPEC 16.10 hold.

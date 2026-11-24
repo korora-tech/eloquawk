@@ -232,6 +232,7 @@ impl Worker {
             Job::ListView(view, more) => self.list_view(view, more),
             Job::Mutate(m) => self.mutate(m),
             Job::Send(s) => self.send(s.op, s.outgoing),
+            Job::Draft(d) => self.draft(*d),
             Job::Save(d) => self.save(*d),
             Job::InitialSync(email) => self.initial_sync(&email),
             Job::Labels(email, ids) => self.label_counts(&email, ids),
@@ -364,6 +365,50 @@ impl Worker {
                             message: SIGNED_OUT.into(),
                             maybe_sent: false,
                         }),
+                    });
+                }
+            }
+            Command::SaveDraft {
+                op,
+                outgoing,
+                draft_id,
+            } => {
+                if self.accounts.contains_key(&outgoing.account) {
+                    self.queue.push(Job::Draft(Box::new(DraftWork::Save {
+                        op,
+                        outgoing: Box::new(outgoing),
+                        draft_id,
+                    })));
+                } else {
+                    self.emit(SyncEvent::DraftFailed {
+                        op,
+                        message: SIGNED_OUT.into(),
+                    });
+                }
+            }
+            Command::DeleteDraft { account, draft_id } => {
+                if self.accounts.contains_key(&account) {
+                    self.queue.push(Job::Draft(Box::new(DraftWork::Delete {
+                        account,
+                        draft_id,
+                    })));
+                }
+            }
+            Command::LoadDraft {
+                op,
+                account,
+                thread_id,
+            } => {
+                if self.accounts.contains_key(&account) {
+                    self.queue.push(Job::Draft(Box::new(DraftWork::Load {
+                        op,
+                        account,
+                        thread_id,
+                    })));
+                } else {
+                    self.emit(SyncEvent::DraftLoaded {
+                        op,
+                        result: Err(SIGNED_OUT.into()),
                     });
                 }
             }

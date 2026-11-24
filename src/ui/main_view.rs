@@ -90,6 +90,7 @@ impl MainView {
                 this.schedule_toast_expiry(&store, cx);
                 this.sync_search_field(&store, cx);
                 this.fulfil_pending_compose(cx);
+                this.fulfil_draft_edit(cx);
                 cx.notify();
             }),
             cx.subscribe_in(&reader, window, |this, _, event, window, cx| match event {
@@ -430,9 +431,22 @@ impl MainView {
             return;
         }
         self.store.update(cx, |s, cx| {
-            s.open_cursor();
+            s.activate_cursor();
             cx.notify();
         });
+    }
+
+    /// Opens a compose window for the draft the Drafts view asked to edit, once it is read.
+    fn fulfil_draft_edit(&mut self, cx: &mut Context<Self>) {
+        let Some(result) = self.store.update(cx, |s, _| s.take_edit_draft()) else {
+            return;
+        };
+        match result {
+            Ok((draft_id, outgoing)) => {
+                super::windows::open_draft_window(&self.store, *outgoing, draft_id, cx)
+            }
+            Err(message) => self.store.update(cx, |s, _| s.inform(message)),
+        }
     }
 
     /// Escape and `u`: close the shortcut overlay if it shows, else the reader, else clear the
