@@ -155,6 +155,31 @@ fn me(account: &str) -> Address {
     Address::new(Some("You"), account)
 }
 
+/// The demo account's send-as addresses: its own with a signature and, for the personal
+/// account, one alias.
+pub fn send_as(account: &str) -> Vec<crate::model::SendAs> {
+    let own = crate::model::SendAs {
+        email: account.to_string(),
+        name: Some("Demo User".into()),
+        signature: "Demo User\nEloquawk".into(),
+        is_default: true,
+        is_primary: true,
+    };
+    if account != PERSONAL {
+        return vec![own];
+    }
+    vec![
+        own,
+        crate::model::SendAs {
+            email: "hello@example.com".into(),
+            name: Some("Demo Studio".into()),
+            signature: "Demo Studio\nhello@example.com".into(),
+            is_default: false,
+            is_primary: false,
+        },
+    ]
+}
+
 /// The account's labels with zero counts; [`with_counts`] fills them in.
 pub fn label_defs(account: &str) -> Vec<Label> {
     let system = |id: &str, name: &str| Label {

@@ -240,6 +240,15 @@ fn disabled_row(p: &Palette, id: impl Into<ElementId>, label: String) -> Statefu
 /// The refresh interval choices, in seconds.
 const REFRESH_CHOICES: &[(u64, &str)] = &[(60, "1 min"), (300, "5 min"), (900, "15 min")];
 
+/// Undo-send delays offered in Settings, in seconds; 0 sends at once.
+const UNDO_SEND_CHOICES: &[(u32, &str)] = &[
+    (0, "Off"),
+    (5, "5 s"),
+    (10, "10 s"),
+    (20, "20 s"),
+    (30, "30 s"),
+];
+
 pub enum SettingsEvent {
     Close,
 }
@@ -873,6 +882,18 @@ impl SettingsView {
                 )
             }),
         );
+        let undo_row = segments(
+            p,
+            UNDO_SEND_CHOICES.iter().map(|&(secs, label)| {
+                segment(
+                    p,
+                    SharedString::from(format!("undo-send-{secs}")),
+                    label,
+                    prefs.undo_send_secs == secs,
+                    self.pref(cx, move |p| p.undo_send_secs = secs),
+                )
+            }),
+        );
         let labelled = |label: &'static str, control: Div| {
             div()
                 .flex()
@@ -931,6 +952,7 @@ impl SettingsView {
                     )),
             )
             .child(labelled("Check for new mail every", refresh_row))
+            .child(labelled("Undo send for", undo_row))
     }
 }
 

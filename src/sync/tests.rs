@@ -794,6 +794,7 @@ fn fake_gmail_read_path() {
             .for_path("/gmail/history")
             .sticky(),
         Reply::json(200, fixtures::LABELS).for_path("/gmail/labels"),
+        Reply::json(200, fixtures::SEND_AS).for_path("/gmail/settings/sendAs"),
         Reply::json(200, fixtures::THREADS).for_path("/gmail/threads"),
         Reply::json(200, r#"{"threads":[{"id":"t3","historyId":"9"}]}"#).for_path("/gmail/threads"),
         Reply::json(200, &meta(A)).for_path(&format!("/gmail/threads/{A}")),
@@ -857,6 +858,25 @@ fn fake_gmail_read_path() {
         })
         .unwrap();
     assert!(labels_ev.iter().any(|l| l.id == "Label_1"));
+    let aliases = events
+        .iter()
+        .find_map(|e| match e {
+            SyncEvent::SendAs { aliases, .. } => Some(aliases.clone()),
+            _ => None,
+        })
+        .expect("the send-as list is fetched");
+    // The default first, the unverified alias left out, signatures as plain text.
+    let got: Vec<(&str, &str)> = aliases
+        .iter()
+        .map(|a| (a.email.as_str(), a.signature.as_str()))
+        .collect();
+    assert_eq!(
+        got,
+        [
+            ("me@example.com", "Me"),
+            ("alias@example.com", "Studio\nTeam")
+        ]
+    );
     let page = events
         .iter()
         .find_map(|e| match e {

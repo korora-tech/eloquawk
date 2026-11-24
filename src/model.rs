@@ -69,6 +69,33 @@ pub enum LabelKind {
     User,
 }
 
+/// One address an account may send from (Gmail `sendAs`), with its signature as plain text.
+#[derive(Clone, PartialEq)]
+pub struct SendAs {
+    pub email: String,
+    pub name: Option<String>,
+    /// The signature converted from Gmail's HTML; empty when there is none.
+    pub signature: String,
+    /// The account's default From.
+    pub is_default: bool,
+    pub is_primary: bool,
+}
+
+impl SendAs {
+    pub fn address(&self) -> Address {
+        Address::new(self.name.as_deref().filter(|n| !n.is_empty()), &self.email)
+    }
+}
+
+impl fmt::Debug for SendAs {
+    /// Redacting: the address and signature are mail data.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SendAs")
+            .field("signature_len", &self.signature.len())
+            .finish_non_exhaustive()
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Label {
     pub account: AccountId,

@@ -146,6 +146,11 @@ pub enum SyncEvent {
         account: AccountId,
         labels: Vec<Label>,
     },
+    /// The addresses the account may send from and their signatures: replaces the account's.
+    SendAs {
+        account: AccountId,
+        aliases: Vec<crate::model::SendAs>,
+    },
     /// A count refresh: upserts by label id.
     LabelCounts {
         account: AccountId,
@@ -202,6 +207,7 @@ impl fmt::Debug for SyncEvent {
             SyncEvent::Notice(_) => f.write_str("Notice"),
             SyncEvent::Saved(_) => f.write_str("Saved"),
             SyncEvent::Labels { labels, .. } => write!(f, "Labels({})", labels.len()),
+            SyncEvent::SendAs { aliases, .. } => write!(f, "SendAs({})", aliases.len()),
             SyncEvent::LabelCounts { labels, .. } => write!(f, "LabelCounts({})", labels.len()),
             SyncEvent::ThreadPage {
                 ids,

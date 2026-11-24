@@ -507,6 +507,20 @@ impl TextArea {
         self.buffer.text()
     }
 
+    /// Replaces the whole text as one undoable edit, keeping the caret near where it was.
+    pub fn set_text(&mut self, text: &str, cx: &mut Context<Self>) {
+        let caret = self.buffer.cursor().min(text.len());
+        let len = self.buffer.text().len();
+        self.buffer.replace(0..len, text, EditKind::Other);
+        let caret = (0..=caret)
+            .rev()
+            .find(|i| text.is_char_boundary(*i))
+            .unwrap_or(0);
+        self.buffer.move_to(caret);
+        self.autoscroll = true;
+        cx.notify();
+    }
+
     fn changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.autoscroll = true;
         window.notify_text_input_changed(&self.focus);

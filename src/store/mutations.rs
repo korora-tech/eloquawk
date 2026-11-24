@@ -299,6 +299,66 @@ impl Store {
         op
     }
 
+    /// Like [`Store::send`], but holds the message for the configured undo window so
+    /// [`Store::cancel_send`] can take it back. Returns the op and the wait: the caller runs
+    /// the timer (on something that outlives the window) and calls
+    /// [`Store::dispatch_scheduled`] when it ends. With no delay it is a plain send and the
+    /// wait is `None`.
+    pub fn send_undoable(&mut self, outgoing: Outgoing) -> (OpId, Option<Duration>) {
+        let secs = u64::from(self.prefs.undo_send_secs);
+        if secs == 0 {
+            return (self.send(outgoing), None);
+        }
+        let op = self.alloc_op();
+        self.sends.insert(op, SendState::Scheduled);
+        if let Some(id) = &outgoing.thread_id {
+            self.send_threads
+                .insert(op, ThreadKey::new(outgoing.account.as_str(), id.as_str()));
+        }
+        self.scheduled.insert(op, outgoing);
+        (op, Some(Duration::from_secs(secs)))
+    }
+
+    /// Takes a message back from the undo window. `None` when it already left (or never was
+    /// held), in which case nothing changes.
+    pub fn cancel_send(&mut self, op: OpId) -> Option<Outgoing> {
+        let outgoing = self.scheduled.remove(&op)?;
+        self.sends.remove(&op);
+        self.send_threads.remove(&op);
+        self.abandoned.remove(&op);
+        Some(outgoing)
+    }
+
+    /// The undo window of `op` ended: hands the message to the worker. A message taken back
+    /// meanwhile is gone, so this does nothing.
+    pub fn dispatch_scheduled(&mut self, op: OpId) {
+        let Some(outgoing) = self.scheduled.remove(&op) else {
+            return;
+        };
+        if let Some(state) = self.sends.get_mut(&op) {
+            *state = SendState::Sending;
+        } else {
+            // Its window is gone: the outcome is a notice, as for any abandoned send.
+            self.abandoned.insert(op);
+        }
+        self.send_command(Command::Send { op, outgoing });
+    }
+
+    /// Ends every undo window now, for quitting.
+    pub fn flush_sends(&mut self) {
+        let ops: Vec<OpId> = self.scheduled.keys().copied().collect();
+        for op in ops {
+            self.dispatch_scheduled(op);
+        }
+    }
+
+    /// A message is still held, or sent without an outcome yet: quitting now would lose it.
+    pub fn sends_unsettled(&self) -> bool {
+        !self.scheduled.is_empty()
+            || !self.abandoned.is_empty()
+            || self.sends.values().any(|s| *s == SendState::Sending)
+    }
+
     /// After the current list changed: auto-advances the reading pane off a removed thread
     /// (when `advance`), moves a removed cursor to the row at its old index, and drops
     /// selected threads that left the list.

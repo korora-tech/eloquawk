@@ -244,7 +244,7 @@ fn main() {
                             tray::Event::Show(token) => {
                                 ui::windows::raise_main_window(&store, token.as_deref(), cx)
                             }
-                            tray::Event::Quit => cx.quit(),
+                            tray::Event::Quit => ui::compose::quit_when_settled(&store, cx),
                             tray::Event::Gone => {
                                 if cx.windows().is_empty() {
                                     ui::windows::show_main_window(&store, cx);
@@ -257,7 +257,11 @@ fn main() {
             }
 
             // Edited compose windows ask before the app quits.
-            cx.on_action(|_: &ui::Quit, cx| cx.defer(ui::compose::request_quit));
+            let quit_store = store.clone();
+            cx.on_action(move |_: &ui::Quit, cx| {
+                let store = quit_store.clone();
+                cx.defer(move |cx| ui::compose::request_quit(&store, cx))
+            });
             {
                 let store = store.clone();
                 let tray = tray.clone();
@@ -267,7 +271,8 @@ fn main() {
                     }
                     let visible = tray.borrow().as_ref().is_some_and(|t| t.visible());
                     if !tray::stays_running(store.read(cx).prefs.run_in_background, visible) {
-                        cx.quit();
+                        // A message still held for undo leaves before the app does.
+                        ui::compose::quit_when_settled(&store, cx);
                     }
                 })
                 .detach();

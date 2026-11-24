@@ -188,6 +188,7 @@ impl Store {
             self.last_sync = None;
         }
         self.labels.retain(|a, _| known.contains(a));
+        self.send_as.retain(|a, _| known.contains(a));
         self.lists.retain(|v, _| known.contains(&v.account));
         self.drop_threads(|k| !known.contains(&k.account));
         self.new_mail.retain(|s| known.contains(&s.key.account));
@@ -259,6 +260,9 @@ impl Store {
             SyncEvent::Saved(path) => {
                 let text = saved_text(&path);
                 self.post_notice(text, Some(NoticeAction::OpenFolder(path)));
+            }
+            SyncEvent::SendAs { account, aliases } => {
+                self.send_as.insert(account, aliases);
             }
             SyncEvent::Labels { account, labels } => {
                 self.labels.insert(account, labels);

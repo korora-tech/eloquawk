@@ -103,6 +103,10 @@ impl Demo {
         self.emit(SyncEvent::Auth(AuthState::Demo));
         self.emit(SyncEvent::Accounts(self.accounts.clone()));
         for account in self.accounts.clone() {
+            self.emit(SyncEvent::SendAs {
+                aliases: demo_data::send_as(&account),
+                account: account.clone(),
+            });
             self.emit(SyncEvent::Labels {
                 labels: self.labels(&account),
                 account,

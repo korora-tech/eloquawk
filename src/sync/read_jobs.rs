@@ -32,6 +32,7 @@ impl Worker {
         if !self.refresh_labels(email) {
             return;
         }
+        self.refresh_send_as(email);
         // A repeat (Refresh, a retried poll) merges into what the list shows.
         let mode = if synced_before {
             PageMode::Refresh
@@ -51,6 +52,33 @@ impl Worker {
             self.report();
         }
         self.emit(SyncEvent::Synced(Timestamp::now()));
+    }
+
+    /// Fetches the addresses the account may send from and their signatures. Best effort: a
+    /// failure leaves what the composer already has and is no reason to back the account off,
+    /// since the account's own address always works as From.
+    pub(super) fn refresh_send_as(&mut self, email: &str) {
+        let Ok(list) = self.with_token(email, gmail::send_as) else {
+            return;
+        };
+        let mut aliases: Vec<SendAs> = list
+            .send_as
+            .into_iter()
+            // A pending alias is not yet verified, and Gmail would refuse to send from it.
+            .filter(|dto| dto.verification_status.as_deref() != Some("pending"))
+            .map(|dto| SendAs {
+                email: dto.send_as_email,
+                name: dto.display_name.filter(|n| !n.trim().is_empty()),
+                signature: signature::from_html(dto.signature.as_deref().unwrap_or("")),
+                is_default: dto.is_default,
+                is_primary: dto.is_primary,
+            })
+            .collect();
+        aliases.sort_by_key(|a| (!a.is_default, !a.is_primary));
+        self.emit(SyncEvent::SendAs {
+            account: email.to_string(),
+            aliases,
+        });
     }
 
     /// Fetches the full label list, emits it with the last known counts, and queues the

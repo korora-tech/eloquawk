@@ -836,6 +836,85 @@ fn abandoned_send_failure_becomes_a_notice() {
     assert_eq!(s.send_state(op), None);
 }
 
+fn sent(rx: &mpsc::Receiver<Command>) -> usize {
+    drain(rx)
+        .iter()
+        .filter(|c| matches!(c, Command::Send { .. }))
+        .count()
+}
+
+#[test]
+fn undoable_send_is_held_until_its_window_ends() {
+    let (mut s, rx) = store();
+    let (op, wait) = s.send_undoable(crate::ui::compose::blank(&ME.to_string()));
+    assert_eq!(wait, Some(Duration::from_secs(10)));
+    assert_eq!(s.send_state(op), Some(&SendState::Scheduled));
+    assert_eq!(sent(&rx), 0, "nothing reaches the worker yet");
+    assert!(s.sends_unsettled());
+    s.dispatch_scheduled(op);
+    assert_eq!(s.send_state(op), Some(&SendState::Sending));
+    assert_eq!(sent(&rx), 1);
+    // A second timer firing for the same op sends nothing more.
+    s.dispatch_scheduled(op);
+    assert_eq!(sent(&rx), 0);
+}
+
+#[test]
+fn cancelling_returns_the_message_and_nothing_leaves() {
+    let (mut s, rx) = store();
+    let mut out = crate::ui::compose::blank(&ME.to_string());
+    out.subject = "Hello".into();
+    let (op, _) = s.send_undoable(out);
+    let back = s.cancel_send(op).expect("still held");
+    assert_eq!(back.subject, "Hello");
+    assert_eq!(s.send_state(op), None);
+    assert!(!s.sends_unsettled());
+    // The timer fires afterwards: nothing to send.
+    s.dispatch_scheduled(op);
+    assert_eq!(sent(&rx), 0);
+    // Too late to undo once it left.
+    let (op, _) = s.send_undoable(crate::ui::compose::blank(&ME.to_string()));
+    s.dispatch_scheduled(op);
+    assert!(s.cancel_send(op).is_none());
+    assert_eq!(s.send_state(op), Some(&SendState::Sending));
+}
+
+#[test]
+fn zero_delay_sends_at_once_and_flush_ends_every_window() {
+    let (mut s, rx) = store();
+    s.prefs.undo_send_secs = 0;
+    let (op, wait) = s.send_undoable(crate::ui::compose::blank(&ME.to_string()));
+    assert_eq!((wait, s.send_state(op)), (None, Some(&SendState::Sending)));
+    assert_eq!(sent(&rx), 1);
+    s.prefs.undo_send_secs = 10;
+    s.send_undoable(crate::ui::compose::blank(&ME.to_string()));
+    s.send_undoable(crate::ui::compose::blank(&ME.to_string()));
+    s.flush_sends();
+    assert_eq!(sent(&rx), 2);
+}
+
+#[test]
+fn a_window_closed_during_the_undo_window_still_reports_failure() {
+    let (mut s, rx) = store();
+    let (op, _) = s.send_undoable(crate::ui::compose::blank(&ME.to_string()));
+    s.abandon_send(op);
+    assert!(s.sends_unsettled(), "held messages block a quit");
+    s.dispatch_scheduled(op);
+    assert_eq!(sent(&rx), 1);
+    s.apply(SyncEvent::SendFinished {
+        op,
+        error: Some(SendError {
+            message: "No".into(),
+            maybe_sent: false,
+        }),
+    });
+    assert_eq!(
+        s.notice.as_ref().map(|n| n.text.as_str()),
+        Some("Couldn't send the message")
+    );
+    assert!(!s.sends_unsettled());
+}
+
 #[test]
 fn account_removal_prunes() {
     let (mut s, rx) = store();

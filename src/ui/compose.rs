@@ -30,7 +30,7 @@ use super::{CloseCompose, DiscardCompose, Quit, Send as SendMessage};
 use crate::demo_script::{ComposeField, Cond};
 use crate::mail::address::{format_list, parse_list};
 use crate::mail::compose::{TOO_LARGE_TO_ATTACH, fits, mime_for, valid_email};
-use crate::mail::reply;
+use crate::mail::{reply, signature};
 use crate::model::{
     AccountId, Address, AttachmentSource, ComposeKind, Outgoing, OutgoingAttachment, ThreadDetail,
 };
@@ -79,12 +79,60 @@ pub fn title_for(prefill: &Outgoing) -> String {
     }
 }
 
+/// One address a message can be sent from: an account's own, or one of its send-as aliases.
+#[derive(Clone, Debug, PartialEq)]
+struct Identity {
+    account: AccountId,
+    address: Address,
+    /// Plain-text signature; empty when there is none.
+    signature: String,
+}
+
+/// Every identity of every signed-in account, each account's default first. An account whose
+/// send-as list has not arrived yet is just its own address with no signature.
+fn identities(store: &Store) -> Vec<Identity> {
+    let mut all = Vec::new();
+    for account in &store.accounts {
+        match store.send_as.get(account).filter(|l| !l.is_empty()) {
+            Some(list) => all.extend(list.iter().map(|a| Identity {
+                account: account.clone(),
+                address: a.address(),
+                signature: a.signature.clone(),
+            })),
+            None => all.push(Identity {
+                account: account.clone(),
+                address: Address::new(None, account),
+                signature: String::new(),
+            }),
+        }
+    }
+    all
+}
+
+/// The identity a prefill sends from: its `from` address when the account has it, else the
+/// account's default.
+fn initial_identity(all: &[Identity], prefill: &Outgoing) -> Option<Identity> {
+    let mine = || all.iter().filter(|i| i.account == prefill.account);
+    mine()
+        .find(|i| {
+            i.address.email.eq_ignore_ascii_case(&prefill.from.email)
+                && prefill.from.email != prefill.account
+        })
+        .or_else(|| mine().next())
+        .cloned()
+}
+
 /// Where the send stands.
 #[derive(Clone, Debug, PartialEq)]
 enum Sending {
     Editing,
+    /// Held for the undo window: Undo brings the message back, closing the window does not.
+    Pending(OpId),
     InFlight(OpId),
-    Failed { message: String, maybe_sent: bool },
+    Failed {
+        message: String,
+        maybe_sent: bool,
+    },
 }
 
 /// What to do once the user agrees to discard.
@@ -98,6 +146,7 @@ enum Leave {
 #[derive(Clone, PartialEq)]
 struct Snapshot {
     account: AccountId,
+    from: String,
     to: String,
     cc: String,
     bcc: String,
@@ -123,6 +172,10 @@ pub struct ComposeView {
     kind: ComposeKind,
     accounts: Vec<AccountId>,
     account: AccountId,
+    /// The address in From: the account's own or one of its aliases.
+    from: Address,
+    /// The signature currently in the body for `from`, so changing From can swap it.
+    signature: String,
     /// The account the thread belongs to; switching From away drops the thread id.
     thread_account: AccountId,
     thread_id: Option<String>,
@@ -166,7 +219,13 @@ impl ComposeView {
         let cc = field(format_list(&prefill.cc), "", 2, cx);
         let bcc = field(format_list(&prefill.bcc), "", 3, cx);
         let subject = field(prefill.subject.clone(), "Subject", 4, cx);
-        let body = cx.new(|cx| TextArea::new(&prefill.body, "", 5, cx));
+        let identity = initial_identity(&identities(store.read(cx)), &prefill);
+        let (from, signature) = identity.map_or_else(
+            || (prefill.from.clone(), String::new()),
+            |i| (i.address, i.signature),
+        );
+        let text = signature::insert(&prefill.body, &signature, prefill.kind);
+        let body = cx.new(|cx| TextArea::new(&text, "", 5, cx));
         let accounts = store.read(cx).accounts.clone();
         let mut subscriptions = vec![cx.observe_in(&store, window, |this, store, window, cx| {
             this.on_store(&store, window, cx)
@@ -189,6 +248,8 @@ impl ComposeView {
             kind: prefill.kind,
             accounts,
             account: prefill.account.clone(),
+            from,
+            signature,
             thread_account: prefill.account.clone(),
             thread_id: prefill.thread_id,
             in_reply_to: prefill.in_reply_to,
@@ -209,6 +270,7 @@ impl ComposeView {
             opened: OPENED.fetch_add(1, Ordering::Relaxed),
             baseline: Snapshot {
                 account: String::new(),
+                from: String::new(),
                 to: String::new(),
                 cc: String::new(),
                 bcc: String::new(),
@@ -239,6 +301,7 @@ impl ComposeView {
     fn snapshot(&self, cx: &App) -> Snapshot {
         Snapshot {
             account: self.account.clone(),
+            from: self.from.email.clone(),
             to: self.to.read(cx).text().to_string(),
             cc: self.cc.read(cx).text().to_string(),
             bcc: self.bcc.read(cx).text().to_string(),
@@ -255,7 +318,9 @@ impl ComposeView {
     /// Closing or quitting should ask first: something was edited, the user has not agreed
     /// to discard it, and it is not already with the worker.
     fn needs_asking(&self, cx: &App) -> bool {
-        !self.discarded && !matches!(self.sending, Sending::InFlight(_)) && self.edited(cx)
+        !self.discarded
+            && !matches!(self.sending, Sending::Pending(_) | Sending::InFlight(_))
+            && self.edited(cx)
     }
 
     /// The window manager asks to close the window: ask about edits first.
@@ -274,7 +339,7 @@ impl ComposeView {
     /// Hands a send still in flight over to the store, which reports its outcome as a notice
     /// once this window is gone.
     fn abandon_send(&self, cx: &mut Context<Self>) {
-        if let Sending::InFlight(op) = self.sending {
+        if let Sending::Pending(op) | Sending::InFlight(op) = self.sending {
             self.store.update(cx, |s, _| s.abandon_send(op));
         }
     }
@@ -305,7 +370,7 @@ impl ComposeView {
     fn can_send(&self, cx: &App) -> bool {
         let state_ok = match &self.sending {
             Sending::Editing => true,
-            Sending::InFlight(_) => false,
+            Sending::Pending(_) | Sending::InFlight(_) => false,
             Sending::Failed { maybe_sent, .. } => !maybe_sent || self.send_anyway,
         };
         state_ok && self.confirm.is_none() && self.recipients_ok(cx)
@@ -315,7 +380,7 @@ impl ComposeView {
         Outgoing {
             account: self.account.clone(),
             kind: self.kind,
-            from: Address::new(None, &self.account),
+            from: self.from.clone(),
             to: parse_list(self.to.read(cx).text()),
             cc: parse_list(self.cc.read(cx).text()),
             bcc: parse_list(self.bcc.read(cx).text()),
@@ -336,26 +401,69 @@ impl ComposeView {
             return;
         }
         let out = self.outgoing(cx);
-        let op = self.store.update(cx, |s, cx| {
-            let op = s.send(out);
-            cx.notify();
-            op
+        let (op, wait) = self.store.update(cx, |s, store_cx| {
+            let (op, wait) = s.send_undoable(out);
+            if let Some(wait) = wait {
+                // The store's task, so the message still leaves if this window is closed.
+                store_cx
+                    .spawn(async move |this, cx| {
+                        cx.background_executor().timer(wait).await;
+                        let _ = this.update(cx, |s, cx| {
+                            s.dispatch_scheduled(op);
+                            cx.notify();
+                        });
+                    })
+                    .detach();
+            }
+            store_cx.notify();
+            (op, wait)
         });
-        self.sending = Sending::InFlight(op);
+        self.sending = if wait.is_some() {
+            Sending::Pending(op)
+        } else {
+            Sending::InFlight(op)
+        };
         self.send_anyway = false;
+        cx.notify();
+    }
+
+    /// Undo while the message is held: it comes back as it was, ready to edit and send again.
+    fn undo_send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Sending::Pending(op) = self.sending else {
+            return;
+        };
+        let taken = self.store.update(cx, |s, cx| {
+            let taken = s.cancel_send(op);
+            cx.notify();
+            taken
+        });
+        // Too late: the window ended a moment ago and the message is on its way.
+        if taken.is_some() {
+            self.sending = Sending::Editing;
+            window.focus(&self.body.focus_handle(cx), cx);
+        }
         cx.notify();
     }
 
     fn on_store(&mut self, store: &Entity<Store>, window: &mut Window, cx: &mut Context<Self>) {
         let s = store.read(cx);
         self.accounts = s.accounts.clone();
-        let Sending::InFlight(op) = self.sending else {
+        let (Sending::Pending(op) | Sending::InFlight(op)) = self.sending else {
             return;
         };
         let failed = match s.send_state(op) {
             Some(SendState::Sent) => None,
             Some(SendState::Failed(e)) => Some(e.clone()),
-            Some(SendState::Sending) | None => return,
+            Some(SendState::Scheduled) => return,
+            // The undo window ended: from here it is an ordinary send.
+            Some(SendState::Sending) => {
+                if matches!(self.sending, Sending::Pending(_)) {
+                    self.sending = Sending::InFlight(op);
+                    cx.notify();
+                }
+                return;
+            }
+            None => return,
         };
         // This window has the outcome now; the store need not keep it.
         self.store.update(cx, |s, _| s.forget_send(op));
@@ -406,7 +514,8 @@ impl ComposeView {
             // Other compose windows may hold edits too: they ask in turn before the app quits.
             Leave::Quit => {
                 self.discarded = true;
-                cx.defer(request_quit);
+                let store = self.store.clone();
+                cx.defer(move |cx| request_quit(&store, cx));
             }
         }
     }
@@ -422,8 +531,21 @@ impl ComposeView {
         cx.notify();
     }
 
-    fn set_account(&mut self, account: AccountId, cx: &mut Context<Self>) {
-        self.account = account;
+    /// Switches From to `identity`, swapping the signature block when the user has not
+    /// touched it. Choosing another From is not itself an edit worth a discard prompt.
+    fn set_identity(&mut self, identity: Identity, cx: &mut Context<Self>) {
+        let was_edited = self.edited(cx);
+        let body = self.body.read(cx).text().to_string();
+        let swapped = signature::swap(&body, &self.signature, &identity.signature, self.kind);
+        if swapped != body {
+            self.body.update(cx, |b, cx| b.set_text(&swapped, cx));
+        }
+        self.account = identity.account;
+        self.from = identity.address;
+        self.signature = identity.signature;
+        if !was_edited {
+            self.baseline = self.snapshot(cx);
+        }
         cx.notify();
     }
 
@@ -575,12 +697,14 @@ impl ComposeView {
     }
 
     fn sender_row(&self, p: &Palette, cx: &Context<Self>) -> Option<Div> {
-        if self.accounts.len() < 2 {
+        let all = identities(self.store.read(cx));
+        if all.len() < 2 {
             return None;
         }
-        let segments = self.accounts.iter().enumerate().map(|(i, a)| {
-            let selected = *a == self.account;
-            let account = a.clone();
+        let segments = all.into_iter().enumerate().map(|(i, identity)| {
+            let selected =
+                identity.account == self.account && identity.address.email == self.from.email;
+            let label = identity.address.email.clone();
             div()
                 .id(("from", i))
                 .px(px(10.0))
@@ -599,9 +723,9 @@ impl ComposeView {
                         .hover(|s| s.bg(rgb(p.hover)).cursor_pointer())
                 })
                 .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                    this.set_account(account.clone(), cx)
+                    this.set_identity(identity.clone(), cx)
                 }))
-                .child(a.clone())
+                .child(label)
         });
         Some(
             self.row(
@@ -609,6 +733,7 @@ impl ComposeView {
                 "From",
                 div()
                     .flex()
+                    .flex_wrap()
                     .gap(px(4.0))
                     .p(px(2.0))
                     .rounded(px(7.0))
@@ -657,7 +782,8 @@ impl ComposeView {
     }
 
     fn footer(&self, p: &Palette, cx: &Context<Self>) -> Div {
-        let in_flight = matches!(self.sending, Sending::InFlight(_));
+        let pending = matches!(self.sending, Sending::Pending(_));
+        let in_flight = pending || matches!(self.sending, Sending::InFlight(_));
         let send: Option<OnClick> = self.can_send(cx).then(|| -> OnClick {
             Box::new(
                 cx.listener(|this, _: &ClickEvent, window, cx| this.send(&SendMessage, window, cx)),
@@ -685,7 +811,24 @@ impl ComposeView {
                 attach,
             ))
             .child(div().flex_1());
-        if self.confirm.is_some() {
+        if pending {
+            bar = bar
+                .child(
+                    div()
+                        .text_size(px(12.5))
+                        .text_color(rgb(p.secondary))
+                        .child("Sending soon"),
+                )
+                .child(button(
+                    p,
+                    "undo-send",
+                    "Undo",
+                    ButtonStyle::Primary,
+                    Some(Box::new(cx.listener(|this, _: &ClickEvent, window, cx| {
+                        this.undo_send(window, cx)
+                    }))),
+                ));
+        } else if self.confirm.is_some() {
             bar = bar
                 .child(
                     div()
@@ -821,7 +964,7 @@ pub fn compose_view(handle: AnyWindowHandle, cx: &App) -> Option<Entity<ComposeV
 
 /// Quits, unless a compose window holds edits: the first such window comes forward and asks
 /// "Discard this message?", and agreeing there carries on with the quit.
-pub fn request_quit(cx: &mut App) {
+pub fn request_quit(store: &Entity<Store>, cx: &mut App) {
     for handle in cx.windows() {
         let Some(view) = compose_view(handle, cx) else {
             continue;
@@ -840,7 +983,7 @@ pub fn request_quit(cx: &mut App) {
             return;
         }
     }
-    cx.quit();
+    quit_when_settled(store, cx);
 }
 
 /// The compose window opened last, if any: the demo script's target when no window has the
@@ -859,6 +1002,30 @@ pub fn open_count(cx: &App) -> usize {
         .into_iter()
         .filter(|w| w.downcast::<ComposeView>().is_some())
         .count()
+}
+
+/// How long quitting waits for a message that is held or on its way.
+const QUIT_GRACE: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// Quits once no message is held for undo or on its way to Gmail. Held messages go now, since
+/// the user asked to leave; the wait is bounded so a dead network cannot keep the app open.
+pub fn quit_when_settled(store: &Entity<Store>, cx: &mut App) {
+    store.update(cx, |s, _| s.flush_sends());
+    if !store.read(cx).sends_unsettled() {
+        cx.quit();
+        return;
+    }
+    let store = store.clone();
+    cx.spawn(async move |cx| {
+        let started = std::time::Instant::now();
+        while started.elapsed() < QUIT_GRACE && store.read_with(cx, |s, _| s.sends_unsettled()) {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(100))
+                .await;
+        }
+        cx.update(|cx| cx.quit());
+    })
+    .detach();
 }
 
 #[cfg(test)]

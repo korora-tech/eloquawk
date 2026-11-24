@@ -65,6 +65,32 @@ pub struct LabelColor {
     pub background_color: Option<String>,
 }
 
+/// `GET /settings/sendAs`: the addresses the account may send from, with their signatures.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SendAsList {
+    #[serde(default)]
+    pub send_as: Vec<SendAsDto>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SendAsDto {
+    pub send_as_email: String,
+    #[serde(default)]
+    pub display_name: Option<String>,
+    /// HTML.
+    #[serde(default)]
+    pub signature: Option<String>,
+    #[serde(default)]
+    pub is_default: bool,
+    #[serde(default)]
+    pub is_primary: bool,
+    /// "accepted" or "pending"; absent for the primary address.
+    #[serde(default)]
+    pub verification_status: Option<String>,
+}
+
 /// `GET /threads`. The list's snippets are not kept: the summary comes from the metadata
 /// fetch, which has the same snippet.
 #[derive(Clone, Debug, Deserialize)]
@@ -340,6 +366,18 @@ pub fn labels(agent: &ureq::Agent, ep: &Endpoints, token: &str) -> Result<LabelL
         agent,
         token,
         &format!("{}/labels", ep.base),
+        &[],
+        Limits::default(),
+    )
+}
+
+/// `GET /settings/sendAs` (1 unit): the primary address and every alias, with signatures.
+/// Covered by `gmail.modify`.
+pub fn send_as(agent: &ureq::Agent, ep: &Endpoints, token: &str) -> Result<SendAsList, ApiError> {
+    api::get(
+        agent,
+        token,
+        &format!("{}/settings/sendAs", ep.base),
         &[],
         Limits::default(),
     )
@@ -635,6 +673,7 @@ pub(crate) mod fixtures {
     pub const HISTORY_EMPTY: &str = include_str!("fixtures/history_empty.json");
     pub const ATTACHMENT: &str = include_str!("fixtures/attachment.json");
     pub const SEND: &str = include_str!("fixtures/send.json");
+    pub const SEND_AS: &str = include_str!("fixtures/send_as.json");
 }
 
 #[cfg(test)]
@@ -709,6 +748,15 @@ mod tests {
         let f: ThreadDto = serde_json::from_str(THREAD_FULL).unwrap();
         assert_eq!(f.messages.len(), 2);
         assert!(!f.messages[1].payload.as_ref().unwrap().parts.is_empty());
+    }
+
+    #[test]
+    fn send_as_deserialises() {
+        let l: SendAsList = serde_json::from_str(SEND_AS).unwrap();
+        assert_eq!(l.send_as.len(), 3);
+        assert!(l.send_as[2].is_primary && l.send_as[2].is_default);
+        assert_eq!(l.send_as[1].verification_status.as_deref(), Some("pending"));
+        assert!(l.send_as[1].signature.is_none());
     }
 
     #[test]
