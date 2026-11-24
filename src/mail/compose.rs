@@ -95,10 +95,11 @@ pub fn build(
     for a in &out.bcc {
         b = b.bcc(mailbox(a)?);
     }
+    let date = SystemTime::try_from(now).map_err(|e| ComposeError::Build(e.to_string()))?;
     b = b
         .subject(out.subject.clone())
         .message_id(Some(message_id.to_string()))
-        .date(SystemTime::from(now))
+        .date(date)
         .user_agent(format!("Eloquawk/{}", env!("CARGO_PKG_VERSION")));
     if let Some(id) = out.in_reply_to.as_deref().filter(|s| !s.trim().is_empty()) {
         b = b.in_reply_to(id.trim().to_string());

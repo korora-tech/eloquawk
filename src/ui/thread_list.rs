@@ -10,7 +10,7 @@ use gpui::{
     AnyElement, ClickEvent, Context, Div, FontWeight, HighlightStyle, SharedString, StyledText,
     div, px, rgb, uniform_list,
 };
-use jiff::Zoned;
+use jiff::ZonedDateTime;
 
 use super::format;
 use super::main_view::MainView;
@@ -205,7 +205,7 @@ impl MainView {
 
     fn render_rows(&mut self, range: Range<usize>, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let p = palette(cx);
-        let now = Zoned::now();
+        let now = ZonedDateTime::now();
         let store = self.store.read(cx);
         let rows = store.visible_rows();
         // Near the end of what is loaded: ask for more (the store sends it once).
@@ -251,7 +251,7 @@ impl MainView {
         s: &ThreadSummary,
         participants: String,
         state: RowState,
-        now: &Zoned,
+        now: &ZonedDateTime,
         clock_24h: bool,
         cx: &Context<Self>,
     ) -> AnyElement {

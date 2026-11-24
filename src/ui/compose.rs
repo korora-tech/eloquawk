@@ -37,7 +37,7 @@ use crate::model::{
 use crate::protocol::OpId;
 use crate::store::{SendState, Store};
 use crate::ui::format::{full_date, size_human};
-use jiff::Zoned;
+use jiff::ZonedDateTime;
 
 /// An empty new message from `account`.
 pub fn blank(account: &AccountId) -> Outgoing {
@@ -65,7 +65,7 @@ pub fn reply_prefill(
     clock_24h: bool,
 ) -> Option<Outgoing> {
     let me = Address::new(None, &detail.key.account);
-    let now = Zoned::now();
+    let now = ZonedDateTime::now();
     reply::prefill(detail, kind, &me, &|t| full_date(t, &now, clock_24h))
 }
 

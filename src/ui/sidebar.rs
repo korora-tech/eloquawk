@@ -328,7 +328,10 @@ impl MainView {
         } else if store.mode == Mode::Demo {
             "Nothing is sent or saved".to_string()
         } else if let Some(t) = store.last_sync {
-            let t = format::time(&t.to_zoned(TimeZone::system()), store.prefs.clock_24h);
+            let t = format::time(
+                &t.to_zoned_datetime(TimeZone::system()),
+                store.prefs.clock_24h,
+            );
             format!("Synced {t}")
         } else {
             String::new()

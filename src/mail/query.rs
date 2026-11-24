@@ -6,7 +6,7 @@
 //! for them (`in:spam`, `in:trash`, `in:anywhere` or the matching `label:`).
 
 use jiff::civil::Date;
-use jiff::{Timestamp, ToSpan, Zoned};
+use jiff::{Timestamp, ToSpan, ZonedDateTime};
 
 use crate::model::{Label, ThreadDetail, ThreadSummary, labels};
 
@@ -242,7 +242,7 @@ impl Query {
         summary: &ThreadSummary,
         detail: Option<&ThreadDetail>,
         all_labels: &[Label],
-        now: &Zoned,
+        now: &ZonedDateTime,
     ) -> bool {
         let hidden = summary.in_label(labels::SPAM) || summary.in_label(labels::TRASH);
         if hidden && !self.wants_spam_or_trash(all_labels) {
@@ -280,7 +280,7 @@ struct Candidate<'a> {
     summary: &'a ThreadSummary,
     detail: Option<&'a ThreadDetail>,
     labels: &'a [Label],
-    now: &'a Zoned,
+    now: &'a ZonedDateTime,
 }
 
 fn contains(hay: &str, needle: &str) -> bool {
@@ -360,7 +360,7 @@ impl Candidate<'_> {
     }
 
     fn midnight(&self, date: Date) -> Option<Timestamp> {
-        date.to_zoned(self.now.time_zone().clone())
+        date.to_zoned_datetime(self.now.time_zone().clone())
             .ok()
             .map(|z| z.timestamp())
     }
@@ -374,7 +374,7 @@ mod tests {
     use crate::model::{Address, Attachment, BodySource, LabelKind, Message, ThreadKey};
     use jiff::tz::TimeZone;
 
-    fn now() -> Zoned {
+    fn now() -> ZonedDateTime {
         "2026-10-29T12:00:00+00:00[Europe/London]".parse().unwrap()
     }
 
@@ -611,7 +611,7 @@ mod tests {
         assert!(!m("after:2026/10/28", &s));
         assert!(!m("before:2026/10/27", &s));
         // In a zone twelve hours ahead, 27 Oct 12:00Z is already the 28th.
-        let ahead = Zoned::new(now().timestamp(), TimeZone::fixed(jiff::tz::offset(13)));
+        let ahead = ZonedDateTime::new(now().timestamp(), TimeZone::fixed(jiff::tz::offset(13)));
         assert!(Query::parse("after:2026/10/28").matches(&s, None, &[], &ahead));
     }
 }
