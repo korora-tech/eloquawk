@@ -101,6 +101,9 @@ pub struct Prefs {
     pub newest_first: bool,
     /// The AI message checks (M16).
     pub ai: AiPrefs,
+    /// Senders (lowercase addresses) whose messages load remote images without asking. Only
+    /// honoured for a message whose DMARC check passed, so a forged From cannot use it.
+    pub image_senders: BTreeSet<String>,
     /// Demo mode and tests: never written to disk.
     #[serde(skip)]
     pub ephemeral: bool,
@@ -122,6 +125,7 @@ impl Default for Prefs {
             sidebar_collapsed: false,
             newest_first: true,
             ai: AiPrefs::default(),
+            image_senders: BTreeSet::new(),
             ephemeral: false,
         }
     }
@@ -301,6 +305,7 @@ mod tests {
             collapsed_labels: [("you@example.com".into(), "Label_7".into())].into(),
             sidebar_collapsed: true,
             newest_first: false,
+            image_senders: ["news@example.com".to_string()].into(),
             ai: AiPrefs {
                 accounts: [("you@example.com".to_string(), 1)].into(),
                 suggest_labels: false,

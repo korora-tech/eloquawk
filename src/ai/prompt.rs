@@ -953,6 +953,7 @@ mod tests {
             body: body.into(),
             body_source: source,
             body_truncated: false,
+            rich: None,
             attachments: vec![],
             signals: MessageSignals::default(),
         }

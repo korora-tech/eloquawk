@@ -436,6 +436,7 @@ impl Demo {
             body: out.body.clone(),
             body_source: BodySource::Plain,
             body_truncated: false,
+            rich: None,
             signals: Default::default(),
             attachments: parts
                 .iter()

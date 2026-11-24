@@ -6,10 +6,12 @@
 //! in. Nothing here touches the network or the disk.
 
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
 use jiff::{SignedDuration, Timestamp};
 
 use crate::google::gmail::Header;
+use crate::mail::rich::{RichDoc, sanitise};
 use crate::mail::{address, auth, html};
 use crate::model::{
     AccountId, Address, Attachment, BodySource, Label, LabelKind, Message, MessageSignals,
@@ -275,6 +277,7 @@ pub struct Draft {
     pub body: String,
     pub source: BodySource,
     pub truncated: bool,
+    pub rich: Option<Arc<RichDoc>>,
     pub minutes_ago: i64,
     pub unread: bool,
     pub attachments: Vec<Attachment>,
@@ -292,6 +295,7 @@ impl Draft {
             body: body.into(),
             source: BodySource::Plain,
             truncated: false,
+            rich: None,
             minutes_ago,
             unread: false,
             attachments: vec![],
@@ -317,6 +321,7 @@ impl Draft {
         let mut d = Self::new(from, to, body, minutes_ago);
         d.source = BodySource::Html;
         d.truncated = truncated;
+        d.rich = Some(Arc::new(sanitise(html)));
         d.signals = auth::signals(&demo_headers(headers), &links);
         d
     }
@@ -400,6 +405,7 @@ pub fn build_thread(
             body: d.body,
             body_source: d.source,
             body_truncated: d.truncated,
+            rich: d.rich,
             signals: d.signals,
             attachments: d.attachments,
         });
@@ -500,6 +506,7 @@ fn newsletter(you: &Address, now_minutes: i64) -> Draft {
     .unread();
     d.source = BodySource::Html;
     d.truncated = truncated;
+    d.rich = Some(Arc::new(sanitise(NEWSLETTER_HTML)));
     // No authentication headers: the newsletter's DMARC result is unknown (SPEC 16.13).
     d.signals = auth::signals(&[], &links);
     d

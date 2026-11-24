@@ -16,6 +16,7 @@ mod demo;
 mod demo_data;
 mod demo_script;
 mod google;
+mod images;
 mod instance;
 mod mail;
 mod model;

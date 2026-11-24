@@ -26,6 +26,7 @@ use jiff::ZonedDateTime;
 
 use super::body_text::{BodyEvent, BodyText};
 use super::format;
+use super::rich_view::RichState;
 use super::theme::{Palette, palette};
 use super::triage::{self, GuardDecision};
 use super::widgets::{
@@ -36,6 +37,7 @@ use crate::mail::address::display_name;
 use crate::mail::links::LinkTarget;
 use crate::mail::mailto;
 use crate::mail::quote::split_quote;
+use crate::mail::rich::RichText;
 use crate::model::{
     Address, Attachment, BodySource, LabelDelta, LabelKind, Message, ThreadDetail, ThreadKey,
     ThreadSummary, ViewKind, labels,
@@ -95,7 +97,7 @@ impl BodyParts {
         let (body, cut) = cut_body(&m.body, MAX_BODY);
         let (shown, quote) = split_quote(body);
         let mut captions = Vec::new();
-        if m.body_source == BodySource::Html {
+        if m.body_source == BodySource::Html && m.rich.is_none() {
             captions.push("Converted from HTML");
         }
         if cut || m.body_truncated {
@@ -205,7 +207,7 @@ pub enum ReaderEvent {
 }
 
 pub struct ReaderView {
-    store: Entity<Store>,
+    pub(super) store: Entity<Store>,
     focus: FocusHandle,
     scroll: ScrollHandle,
     last: Fingerprint,
@@ -219,7 +221,9 @@ pub struct ReaderView {
     seen: HashSet<String>,
     /// Body entities by message id (quotes under [`quote_key`]), with their event
     /// subscriptions; dropped when the open thread changes.
-    bodies: HashMap<String, (Entity<BodyText>, Subscription)>,
+    pub(super) bodies: HashMap<String, (Entity<BodyText>, Subscription)>,
+    /// Remote-image state for HTML messages.
+    pub(super) rich: RichState,
     /// The message card `n` / `p` moved to, by index; `o` / enter toggles it.
     focused_card: Option<usize>,
     _subscription: Subscription,
@@ -237,6 +241,7 @@ impl ReaderView {
                     this.expanded.clear();
                     this.unfolded.clear();
                     this.seen.clear();
+                    this.rich = RichState::default();
                     this.focused_card = None;
                     let keys: Vec<String> = this.bodies.keys().cloned().collect();
                     for key in keys {
@@ -257,6 +262,7 @@ impl ReaderView {
             unfolded: HashSet::new(),
             seen: HashSet::new(),
             bodies: HashMap::new(),
+            rich: RichState::default(),
             focused_card: None,
             _subscription: subscription,
         }
@@ -295,8 +301,37 @@ impl ReaderView {
             return body;
         }
         let body = cx.new(|cx| BodyText::new(text, secondary, cx));
-        // The message a click came from, for the link guard: the map key without "#quote".
-        let message_id = key.strip_suffix("#quote").unwrap_or(&key).to_string();
+        self.track_body(key, body, cx)
+    }
+
+    /// The body entity of one text segment of an HTML message, created on first use and kept
+    /// in step with `rich`.
+    pub(super) fn rich_body(
+        &mut self,
+        key: String,
+        rich: &RichText,
+        secondary: bool,
+        cx: &mut Context<Self>,
+    ) -> Entity<BodyText> {
+        if let Some((body, _)) = self.bodies.get(&key) {
+            let body = body.clone();
+            body.update(cx, |b, cx| b.set_rich(rich, cx));
+            return body;
+        }
+        let body = cx.new(|cx| BodyText::new_rich(rich, secondary, cx));
+        self.track_body(key, body, cx)
+    }
+
+    /// Keeps `body` under `key` and routes its events: selecting clears the other bodies,
+    /// and a clicked link goes through the link guard for the message the key belongs to.
+    fn track_body(
+        &mut self,
+        key: String,
+        body: Entity<BodyText>,
+        cx: &mut Context<Self>,
+    ) -> Entity<BodyText> {
+        // The message a click came from, for the link guard: the key up to any "#quote" or "~".
+        let message_id = key.split(['#', '~']).next().unwrap_or(&key).to_string();
         let subscription = cx.subscribe(
             &body,
             move |this, body, event: &BodyEvent, cx| match event {
@@ -311,7 +346,7 @@ impl ReaderView {
     /// Drops the body entity under `key`. A focused body takes the focus with it, which would
     /// leave the Mail context without focus (and j, k, escape dead), so the focus moves to the
     /// reader first.
-    fn drop_body(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn drop_body(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) {
         if let Some((body, _)) = self.bodies.remove(key)
             && body.focus_handle(cx).contains_focused(window, cx)
         {
@@ -332,7 +367,7 @@ impl ReaderView {
     /// composer. The schemes are checked again here, so nothing else can be opened whatever
     /// the detector produced. While the link guard is armed for the message, a web link only
     /// posts a toast whose "Open link" button opens it (SPEC 16.12.1).
-    fn open_link(&self, target: &LinkTarget, message_id: &str, cx: &mut Context<Self>) {
+    pub(super) fn open_link(&self, target: &LinkTarget, message_id: &str, cx: &mut Context<Self>) {
         self.follow(target, message_id, false, cx);
     }
 
@@ -514,7 +549,16 @@ impl ReaderView {
         let m = messages.get(n).ok_or_else(|| format!("no card {n}"))?;
         self.initialise_messages(&messages);
         self.expanded.insert(m.id.clone());
-        let body = self.body(m.id.clone(), BodyParts::of(m).main, false, cx);
+        let first_text = m.rich.as_ref().and_then(|d| {
+            d.main.iter().enumerate().find_map(|(i, s)| match s {
+                crate::mail::rich::Segment::Text(t) => Some((i, t.clone())),
+                _ => None,
+            })
+        });
+        let body = match first_text {
+            Some((i, t)) => self.rich_body(format!("{}~{i}", m.id), &t, false, cx),
+            None => self.body(m.id.clone(), BodyParts::of(m).main, false, cx),
+        };
         body.update(cx, |b, cx| b.select_all_and_focus(window, cx));
         cx.notify();
         Ok(())
@@ -873,6 +917,7 @@ impl ReaderView {
             // A collapsed card keeps no body entities, so no hidden selection lingers.
             self.drop_body(&m.id, window, cx);
             self.drop_body(&quote_key(&m.id), window, cx);
+            self.drop_rich_bodies(&m.id, window, cx);
             return shell
                 .child(
                     div()
@@ -922,15 +967,42 @@ impl ReaderView {
         let unfolded = self.unfolded.contains(&m.id);
         let qid = m.id.clone();
         let copy_text = parts.visible(unfolded);
-        let body = self.body(m.id.clone(), parts.main.clone(), false, cx);
-        let quote = parts.quote.clone().map(|q| {
-            let body = unfolded.then(|| self.body(quote_key(&m.id), q, true, cx));
-            if !unfolded {
-                // A folded quote keeps no entity (nor selection).
-                self.drop_body(&quote_key(&m.id), window, cx);
+        let rich = m.rich.clone();
+        let allowed = rich.is_some() && self.images_allowed(m, cx);
+        self.fetch_if_allowed(m, allowed, cx);
+        let images_bar = match &rich {
+            Some(doc) => self.images_bar(m, doc, ix, p, cx),
+            None => None,
+        };
+        let (body, quote): (AnyElement, Option<Option<AnyElement>>) = match &rich {
+            Some(doc) => {
+                let body = self.rich_column(m, &doc.main, &m.id, false, allowed, p, cx);
+                let quote = doc.quote.as_ref().map(|segments| {
+                    if unfolded {
+                        Some(self.rich_column(m, segments, &quote_key(&m.id), true, allowed, p, cx))
+                    } else {
+                        self.drop_rich_quote(&m.id, window, cx);
+                        None
+                    }
+                });
+                (body, quote)
             }
-            body
-        });
+            None => {
+                let body = self
+                    .body(m.id.clone(), parts.main.clone(), false, cx)
+                    .into_any_element();
+                let quote = parts.quote.clone().map(|q| {
+                    let body = unfolded
+                        .then(|| self.body(quote_key(&m.id), q, true, cx).into_any_element());
+                    if !unfolded {
+                        // A folded quote keeps no entity (nor selection).
+                        self.drop_body(&quote_key(&m.id), window, cx);
+                    }
+                    body
+                });
+                (body, quote)
+            }
+        };
         let captions = parts.captions.clone();
         shell
             .child(
@@ -1010,6 +1082,7 @@ impl ReaderView {
                         .text_size(px(12.0)),
                     ),
             )
+            .when_some(images_bar, |d, bar| d.child(bar))
             .child(
                 div()
                     .px(px(14.0))
@@ -1380,6 +1453,7 @@ mod tests {
             body: String::new(),
             body_source: BodySource::Plain,
             body_truncated: false,
+            rich: None,
             signals: Default::default(),
             attachments: vec![],
         }
@@ -1431,6 +1505,7 @@ mod tests {
             body: String::new(),
             body_source: BodySource::Plain,
             body_truncated: false,
+            rich: None,
             signals: Default::default(),
             attachments: vec![],
         };
