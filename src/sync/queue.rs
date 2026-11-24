@@ -34,6 +34,58 @@ impl PartialEq for Outbox {
 
 impl Eq for Outbox {}
 
+/// Work on a draft. Saves and loads are the same job when they share an op id; a delete when it
+/// names the same draft.
+#[derive(Clone)]
+pub(super) enum DraftWork {
+    Save {
+        op: OpId,
+        outgoing: Box<Outgoing>,
+        draft_id: Option<String>,
+    },
+    Delete {
+        account: AccountId,
+        draft_id: String,
+    },
+    Load {
+        op: OpId,
+        account: AccountId,
+        thread_id: String,
+    },
+}
+
+impl PartialEq for DraftWork {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Save { op: a, .. }, Self::Save { op: b, .. })
+            | (Self::Load { op: a, .. }, Self::Load { op: b, .. }) => a == b,
+            (
+                Self::Delete {
+                    account: a,
+                    draft_id: x,
+                },
+                Self::Delete {
+                    account: b,
+                    draft_id: y,
+                },
+            ) => a == b && x == y,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for DraftWork {}
+
+impl std::fmt::Debug for DraftWork {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Save { .. } => "DraftWork::Save",
+            Self::Delete { .. } => "DraftWork::Delete",
+            Self::Load { .. } => "DraftWork::Load",
+        })
+    }
+}
+
 /// An attachment to save (SPEC 7.5 `SaveAttachment`). Two are the same job when they name the
 /// same part of the same message; `Debug` leaves the filename out.
 #[derive(Clone)]
@@ -71,6 +123,7 @@ pub(super) enum Job {
     ListView(ViewKey, bool),
     Mutate(Mutation),
     Send(Box<Outbox>),
+    Draft(Box<DraftWork>),
     Save(Box<Download>),
     // Background lane: the back of the queue, coalesced.
     InitialSync(AccountId),
@@ -89,7 +142,12 @@ impl Job {
     pub(super) fn interactive(&self) -> bool {
         matches!(
             self,
-            Job::OpenThread(_) | Job::ListView(..) | Job::Mutate(_) | Job::Send(_) | Job::Save(_)
+            Job::OpenThread(_)
+                | Job::ListView(..)
+                | Job::Mutate(_)
+                | Job::Send(_)
+                | Job::Draft(_)
+                | Job::Save(_)
         )
     }
 
@@ -99,6 +157,10 @@ impl Job {
             Job::ListView(view, _) => &view.account,
             Job::Mutate(m) => &m.account,
             Job::Send(s) => &s.outgoing.account,
+            Job::Draft(d) => match &**d {
+                DraftWork::Save { outgoing, .. } => &outgoing.account,
+                DraftWork::Delete { account, .. } | DraftWork::Load { account, .. } => account,
+            },
             Job::Save(d) => &d.account,
             Job::InitialSync(a)
             | Job::Labels(a, _)

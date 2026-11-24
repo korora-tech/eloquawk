@@ -154,7 +154,10 @@ impl Store {
     /// The compose window that started `op` closed: a send still in flight reports its
     /// outcome as a notice instead, and a settled one is forgotten.
     pub fn abandon_send(&mut self, op: OpId) {
-        if self.sends.get(&op) == Some(&SendState::Sending) {
+        if matches!(
+            self.sends.get(&op),
+            Some(SendState::Sending | SendState::Scheduled)
+        ) {
             self.abandoned.insert(op);
         }
         self.sends.remove(&op);

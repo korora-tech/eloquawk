@@ -65,6 +65,67 @@ pub struct LabelColor {
     pub background_color: Option<String>,
 }
 
+/// `GET /settings/sendAs`: the addresses the account may send from, with their signatures.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SendAsList {
+    #[serde(default)]
+    pub send_as: Vec<SendAsDto>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SendAsDto {
+    pub send_as_email: String,
+    #[serde(default)]
+    pub display_name: Option<String>,
+    /// HTML.
+    #[serde(default)]
+    pub signature: Option<String>,
+    #[serde(default)]
+    pub is_default: bool,
+    #[serde(default)]
+    pub is_primary: bool,
+    /// "accepted" or "pending"; absent for the primary address.
+    #[serde(default)]
+    pub verification_status: Option<String>,
+}
+
+/// The draft resource Gmail returns from `drafts.create`, `drafts.update` and `drafts.list`.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DraftDto {
+    pub id: String,
+    #[serde(default)]
+    pub message: Option<DraftMessageRef>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DraftMessageRef {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub thread_id: String,
+}
+
+/// `GET /drafts`.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DraftList {
+    #[serde(default)]
+    pub drafts: Vec<DraftDto>,
+    #[serde(default)]
+    pub next_page_token: Option<String>,
+}
+
+/// JSON part of the multipart `drafts` upload: `{"message":{"threadId":..}}`.
+#[derive(Clone, Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DraftMetadata {
+    pub message: SendMetadata,
+}
+
 /// `GET /threads`. The list's snippets are not kept: the summary comes from the metadata
 /// fetch, which has the same snippet.
 #[derive(Clone, Debug, Deserialize)]
@@ -345,6 +406,18 @@ pub fn labels(agent: &ureq::Agent, ep: &Endpoints, token: &str) -> Result<LabelL
     )
 }
 
+/// `GET /settings/sendAs` (1 unit): the primary address and every alias, with signatures.
+/// Covered by `gmail.modify`.
+pub fn send_as(agent: &ureq::Agent, ep: &Endpoints, token: &str) -> Result<SendAsList, ApiError> {
+    api::get(
+        agent,
+        token,
+        &format!("{}/settings/sendAs", ep.base),
+        &[],
+        Limits::default(),
+    )
+}
+
 /// `GET /labels/{id}`: one label with its counts (1 unit).
 pub fn label(
     agent: &ureq::Agent,
@@ -570,6 +643,91 @@ pub fn send(
     .map(|r: SendResponse| r.thread_id)
 }
 
+fn draft_parts(thread_id: Option<&str>) -> Result<Vec<u8>, ApiError> {
+    serde_json::to_vec(&DraftMetadata {
+        message: SendMetadata {
+            thread_id: thread_id.map(str::to_string),
+        },
+    })
+    .map_err(|e| ApiError::Decode(e.to_string()))
+}
+
+/// `POST UPLOAD/drafts?uploadType=multipart` (10 units): a new draft holding `raw`.
+pub fn draft_create(
+    agent: &ureq::Agent,
+    ep: &Endpoints,
+    token: &str,
+    raw: &[u8],
+    thread_id: Option<&str>,
+) -> Result<DraftDto, ApiError> {
+    let json = draft_parts(thread_id)?;
+    api::post_multipart(
+        agent,
+        token,
+        &format!("{}/drafts", ep.upload),
+        &[("uploadType", "multipart".to_string())],
+        &[
+            ("application/json; charset=UTF-8", &json),
+            ("message/rfc822", raw),
+        ],
+        Limits::large(raw.len() as u64),
+    )
+}
+
+/// `PUT UPLOAD/drafts/{id}?uploadType=multipart` (15 units): replaces the draft's message.
+/// Gmail gives the new message a new id.
+pub fn draft_update(
+    agent: &ureq::Agent,
+    ep: &Endpoints,
+    token: &str,
+    id: &str,
+    raw: &[u8],
+    thread_id: Option<&str>,
+) -> Result<DraftDto, ApiError> {
+    let json = draft_parts(thread_id)?;
+    api::put_multipart(
+        agent,
+        token,
+        &format!("{}/drafts/{}", ep.upload, segment(id)),
+        &[("uploadType", "multipart".to_string())],
+        &[
+            ("application/json; charset=UTF-8", &json),
+            ("message/rfc822", raw),
+        ],
+        Limits::large(raw.len() as u64),
+    )
+}
+
+/// `DELETE /drafts/{id}` (10 units).
+pub fn draft_delete(
+    agent: &ureq::Agent,
+    ep: &Endpoints,
+    token: &str,
+    id: &str,
+) -> Result<(), ApiError> {
+    api::delete(agent, token, &format!("{}/drafts/{}", ep.base, segment(id)))
+}
+
+/// `GET /drafts` (5 units): one page of draft and message ids.
+pub fn drafts(
+    agent: &ureq::Agent,
+    ep: &Endpoints,
+    token: &str,
+    page_token: Option<&str>,
+) -> Result<DraftList, ApiError> {
+    let mut query = vec![("maxResults", "100".to_string())];
+    if let Some(t) = page_token {
+        query.push(("pageToken", t.to_string()));
+    }
+    api::get(
+        agent,
+        token,
+        &format!("{}/drafts", ep.base),
+        &query,
+        Limits::default(),
+    )
+}
+
 /// Query parameters for `GET /threads`. `Label(id)` sets `labelIds` (plus
 /// `includeSpamTrash=true` for TRASH and SPAM), `AllMail` sets neither, `Search(q)` sets `q`.
 pub fn threads_query(
@@ -635,6 +793,7 @@ pub(crate) mod fixtures {
     pub const HISTORY_EMPTY: &str = include_str!("fixtures/history_empty.json");
     pub const ATTACHMENT: &str = include_str!("fixtures/attachment.json");
     pub const SEND: &str = include_str!("fixtures/send.json");
+    pub const SEND_AS: &str = include_str!("fixtures/send_as.json");
 }
 
 #[cfg(test)]
@@ -709,6 +868,15 @@ mod tests {
         let f: ThreadDto = serde_json::from_str(THREAD_FULL).unwrap();
         assert_eq!(f.messages.len(), 2);
         assert!(!f.messages[1].payload.as_ref().unwrap().parts.is_empty());
+    }
+
+    #[test]
+    fn send_as_deserialises() {
+        let l: SendAsList = serde_json::from_str(SEND_AS).unwrap();
+        assert_eq!(l.send_as.len(), 3);
+        assert!(l.send_as[2].is_primary && l.send_as[2].is_default);
+        assert_eq!(l.send_as[1].verification_status.as_deref(), Some("pending"));
+        assert!(l.send_as[1].signature.is_none());
     }
 
     #[test]

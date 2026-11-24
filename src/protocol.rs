@@ -78,6 +78,25 @@ pub enum Command {
         op: OpId,
         outgoing: Outgoing,
     },
+    /// Creates the draft (`draft_id: None`) or replaces it with the composer's current text.
+    /// The outcome is `DraftSaved` or `DraftFailed`; a failure is never retried.
+    SaveDraft {
+        op: OpId,
+        outgoing: Outgoing,
+        draft_id: Option<String>,
+    },
+    /// Deletes a draft: the user discarded it, or its message was sent. Best effort.
+    DeleteDraft {
+        account: AccountId,
+        draft_id: String,
+    },
+    /// Finds the draft in conversation `thread_id` and reads it for editing; the outcome is
+    /// `DraftLoaded`.
+    LoadDraft {
+        op: OpId,
+        account: AccountId,
+        thread_id: String,
+    },
     SaveAttachment {
         account: AccountId,
         message_id: String,
@@ -146,6 +165,11 @@ pub enum SyncEvent {
         account: AccountId,
         labels: Vec<Label>,
     },
+    /// The addresses the account may send from and their signatures: replaces the account's.
+    SendAs {
+        account: AccountId,
+        aliases: Vec<crate::model::SendAs>,
+    },
     /// A count refresh: upserts by label id.
     LabelCounts {
         account: AccountId,
@@ -176,6 +200,19 @@ pub enum SyncEvent {
         op: OpId,
         error: Option<String>,
     },
+    DraftSaved {
+        op: OpId,
+        draft_id: String,
+    },
+    DraftFailed {
+        op: OpId,
+        message: String,
+    },
+    /// A draft read for editing: its id and the composer's prefill, or why it cannot be edited.
+    DraftLoaded {
+        op: OpId,
+        result: Result<(String, Box<Outgoing>), String>,
+    },
     SendFinished {
         op: OpId,
         error: Option<SendError>,
@@ -202,6 +239,7 @@ impl fmt::Debug for SyncEvent {
             SyncEvent::Notice(_) => f.write_str("Notice"),
             SyncEvent::Saved(_) => f.write_str("Saved"),
             SyncEvent::Labels { labels, .. } => write!(f, "Labels({})", labels.len()),
+            SyncEvent::SendAs { aliases, .. } => write!(f, "SendAs({})", aliases.len()),
             SyncEvent::LabelCounts { labels, .. } => write!(f, "LabelCounts({})", labels.len()),
             SyncEvent::ThreadPage {
                 ids,
@@ -219,6 +257,11 @@ impl fmt::Debug for SyncEvent {
             SyncEvent::ThreadFailed { .. } => f.write_str("ThreadFailed"),
             SyncEvent::MutationFinished { op, error } => {
                 write!(f, "MutationFinished({op}, failed: {})", error.is_some())
+            }
+            SyncEvent::DraftSaved { op, .. } => write!(f, "DraftSaved({op})"),
+            SyncEvent::DraftFailed { op, .. } => write!(f, "DraftFailed({op})"),
+            SyncEvent::DraftLoaded { op, result } => {
+                write!(f, "DraftLoaded({op}, ok: {})", result.is_ok())
             }
             SyncEvent::SendFinished { op, error } => {
                 write!(f, "SendFinished({op}, failed: {})", error.is_some())

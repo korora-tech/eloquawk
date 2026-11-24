@@ -25,6 +25,8 @@ pub enum ThemePref {
 
 pub const REFRESH_SECS_MIN: u64 = 30;
 pub const REFRESH_SECS_MAX: u64 = 900;
+/// The longest undo-send delay, in seconds.
+pub const UNDO_SEND_SECS_MAX: u32 = 30;
 pub const PAGE_SIZE_MIN: u32 = 10;
 pub const PAGE_SIZE_MAX: u32 = 100;
 
@@ -99,6 +101,9 @@ pub struct Prefs {
     pub sidebar_collapsed: bool,
     /// The reader shows a conversation's latest message at the top.
     pub newest_first: bool,
+    /// Seconds Send waits before the message leaves, so it can be undone; 0 sends at once.
+    /// Clamped to 0..=30.
+    pub undo_send_secs: u32,
     /// The AI message checks (M16).
     pub ai: AiPrefs,
     /// Senders (lowercase addresses) whose messages load remote images without asking. Only
@@ -124,6 +129,7 @@ impl Default for Prefs {
             collapsed_labels: BTreeSet::new(),
             sidebar_collapsed: false,
             newest_first: true,
+            undo_send_secs: 10,
             ai: AiPrefs::default(),
             image_senders: BTreeSet::new(),
             ephemeral: false,
@@ -194,6 +200,7 @@ impl Prefs {
     /// Pulls out-of-range numbers back into their allowed ranges.
     pub fn clamped(mut self) -> Self {
         self.refresh_secs = self.refresh_secs.clamp(REFRESH_SECS_MIN, REFRESH_SECS_MAX);
+        self.undo_send_secs = self.undo_send_secs.min(UNDO_SEND_SECS_MAX);
         self.page_size = self.page_size.clamp(PAGE_SIZE_MIN, PAGE_SIZE_MAX);
         self.ai.spend_limit_cents = self
             .ai
@@ -282,6 +289,7 @@ mod tests {
         assert!(p.clock_24h && p.mark_read_on_open && p.notifications && p.run_in_background);
         assert_eq!((p.refresh_secs, p.page_size), (60, 50));
         assert!(!p.ephemeral);
+        assert_eq!(p.undo_send_secs, 10);
         // A settings file from before M16 has no `ai`: checks are off, with the defaults.
         assert_eq!(p.ai, AiPrefs::default());
         assert!(p.ai.accounts.is_empty() && !p.ai.background && p.ai.suggest_labels);
@@ -306,6 +314,7 @@ mod tests {
             sidebar_collapsed: true,
             newest_first: false,
             image_senders: ["news@example.com".to_string()].into(),
+            undo_send_secs: 20,
             ai: AiPrefs {
                 accounts: [("you@example.com".to_string(), 1)].into(),
                 suggest_labels: false,
@@ -343,11 +352,12 @@ mod tests {
         let path = dir.0.join("settings.json");
         std::fs::write(
             &path,
-            r#"{"refresh_secs":5,"page_size":1000,"ai":{"spend_limit_cents":1}}"#,
+            r#"{"refresh_secs":5,"page_size":1000,"undo_send_secs":99,"ai":{"spend_limit_cents":1}}"#,
         )
         .unwrap();
         let p = Prefs::load_from(&path);
         assert_eq!((p.refresh_secs, p.page_size), (30, 100));
+        assert_eq!(p.undo_send_secs, UNDO_SEND_SECS_MAX);
         assert_eq!(p.ai.spend_limit_cents, SPEND_LIMIT_CENTS_MIN);
         std::fs::write(&path, r#"{"ai":{"spend_limit_cents":99999}}"#).unwrap();
         assert_eq!(

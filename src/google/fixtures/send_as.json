@@ -1,0 +1,24 @@
+{
+  "sendAs": [
+    {
+      "sendAsEmail": "alias@example.com",
+      "displayName": "Studio",
+      "signature": "<div>Studio<br>Team</div>",
+      "isPrimary": false,
+      "isDefault": false,
+      "verificationStatus": "accepted"
+    },
+    {
+      "sendAsEmail": "pending@example.com",
+      "isPrimary": false,
+      "verificationStatus": "pending"
+    },
+    {
+      "sendAsEmail": "me@example.com",
+      "displayName": "Me",
+      "signature": "<div>Me</div>",
+      "isPrimary": true,
+      "isDefault": true
+    }
+  ]
+}

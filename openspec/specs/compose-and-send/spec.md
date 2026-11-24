@@ -39,9 +39,10 @@ forward, and in the body for a reply or reply-all.
 
 ### Requirement: Compose fields
 The compose window SHALL offer To, Cc, Bcc, Subject and the body. Cc and Bcc SHALL stay
-behind a "Cc Bcc" link unless the prefill fills them. With two or more accounts it SHALL
-show a From selector, defaulting to the current account for a new message and to the
-conversation's account for a reply or forward. Enter in a one-line field SHALL move to the
+behind a "Cc Bcc" link unless the prefill fills them. With two or more send-as addresses
+across the signed-in accounts it SHALL show a From selector listing each account's own
+address and its verified Gmail send-as aliases, defaulting to the current account's default
+address for a new message and to the conversation's account for a reply or forward. Enter in a one-line field SHALL move to the
 next field, tab and shift-tab SHALL move between fields, and a line break typed or pasted
 into a one-line field SHALL become a space.
 
@@ -57,6 +58,29 @@ into a one-line field SHALL become a space.
 - **WHEN** the user switches From to a different account on a reply
 - **THEN** the sent message is not filed into the original conversation's thread
 - **AND** it still carries In-Reply-To and References for the message it answers
+
+### Requirement: Send-as addresses and signatures
+The app SHALL read each account's send-as addresses and their signatures from Gmail's
+settings with the existing `gmail.modify` scope, and SHALL leave out an alias Gmail has not
+verified. A message sent from an alias SHALL carry that alias's address, and its display name
+when it has one, in From, and SHALL be sent through the account that owns the alias. A new
+message, reply or forward SHALL open with the From address's signature as plain text under a
+"-- " line, at the end of a new message and above the quoted text of a reply or forward. Changing
+From SHALL swap the signature block unless the user edited it, and SHALL NOT by itself make the
+window ask "Discard this message?". A failed fetch SHALL NOT raise a problem: the account's own
+address stays available.
+
+#### Scenario: Choosing an alias
+- **WHEN** an account has a verified alias and the user picks it in From
+- **THEN** the sent message carries the alias in From and the body's signature is the alias's
+
+#### Scenario: Unverified alias
+- **WHEN** Gmail lists an alias whose verification is pending
+- **THEN** From does not offer it
+
+#### Scenario: Edited signature
+- **WHEN** the user edits the signature text and then changes From
+- **THEN** the body keeps the edited text
 
 ### Requirement: Recipient validation
 Each address field SHALL show a red border while any entry in it is not a valid address.
@@ -183,6 +207,54 @@ disabled until the user ticks "Send anyway".
 #### Scenario: Gmail rejects the message
 - **WHEN** Gmail answers the send with a client error
 - **THEN** the compose window shows the error inline and Send stays enabled
+
+### Requirement: Undo send
+Send SHALL hold the message for the "Undo send for" delay set in Settings (Off, 5, 10, 20 or 30
+seconds; 10 by default) before it goes to Gmail. While it is held the compose window SHALL
+show "Sending soon" and an Undo button, with Send disabled; Undo SHALL return the window to
+editing with every field and attachment intact and nothing sent. When the delay ends the send
+SHALL continue as in "Sending and its outcome". With the delay Off the message SHALL be sent
+at once. The delay SHALL run in the app, not the window: closing the window while a message is
+held SHALL NOT cancel or delay it, and a failure SHALL then be reported as a notice. Quitting
+SHALL send any held message at once and wait up to 20 seconds for it to finish before the
+app exits.
+
+#### Scenario: Undo
+- **WHEN** the user presses Send and then Undo inside the delay
+- **THEN** the window is editable again with the same text and no message was sent
+
+#### Scenario: Closing while held
+- **WHEN** the user closes the window while the message is held
+- **THEN** the message is still sent when the delay ends
+
+#### Scenario: Quit while held
+- **WHEN** the user quits while a message is held
+- **THEN** the message is sent first and the app exits once it has finished
+
+### Requirement: Drafts
+The app SHALL keep an edited message as a Gmail draft: about four seconds after the last edit,
+and while no send is held or in flight, it SHALL create the draft, or replace it when one exists,
+so other clients see it. A draft MAY have no recipients, and an address still being typed SHALL
+be left out of it. The draft SHALL be deleted when the message is sent successfully or discarded,
+and kept when a send fails or is undone. Asking "Discard this message?" SHALL also offer "Save
+draft", which saves, then closes or quits. A failed save SHALL show "Couldn't save the draft"
+inline and SHALL NOT block editing or sending. Choosing a draft in the Drafts view (Enter or a
+click) SHALL open it in a compose window, without adding a signature, instead of the reader;
+saving then replaces that draft. A draft with attachments SHALL NOT open for editing, with the
+notice "Drafts with attachments can't be edited here yet.", since saving would drop them. Switching
+From to another account SHALL replace the draft with one in that account.
+
+#### Scenario: Autosave
+- **WHEN** the user types a message and waits
+- **THEN** the Drafts view of the same account shows it
+
+#### Scenario: Sent message
+- **WHEN** a drafted message is sent
+- **THEN** its draft is deleted
+
+#### Scenario: Edit a draft
+- **WHEN** the user presses Enter on a conversation in the Drafts view
+- **THEN** a compose window opens with the draft's fields and no second signature
 
 ### Requirement: Closing and quitting with unsent edits
 Escape, ctrl-w and the window manager's close button SHALL close a compose window, first

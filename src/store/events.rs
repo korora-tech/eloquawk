@@ -188,6 +188,7 @@ impl Store {
             self.last_sync = None;
         }
         self.labels.retain(|a, _| known.contains(a));
+        self.send_as.retain(|a, _| known.contains(a));
         self.lists.retain(|v, _| known.contains(&v.account));
         self.drop_threads(|k| !known.contains(&k.account));
         self.new_mail.retain(|s| known.contains(&s.key.account));
@@ -260,6 +261,9 @@ impl Store {
                 let text = saved_text(&path);
                 self.post_notice(text, Some(NoticeAction::OpenFolder(path)));
             }
+            SyncEvent::SendAs { account, aliases } => {
+                self.send_as.insert(account, aliases);
+            }
             SyncEvent::Labels { account, labels } => {
                 self.labels.insert(account, labels);
             }
@@ -305,7 +309,22 @@ impl Store {
                 self.details.insert(key, DetailState::Failed(error));
             }
             SyncEvent::MutationFinished { op, error } => self.on_mutation_finished(op, error),
+            SyncEvent::DraftSaved { op, draft_id } => {
+                self.drafts.insert(op, DraftOp::Saved(draft_id));
+            }
+            SyncEvent::DraftFailed { op, message } => {
+                self.drafts.insert(op, DraftOp::Failed(message));
+            }
+            SyncEvent::DraftLoaded { op, result } => {
+                self.drafts.insert(op, DraftOp::Loaded(result));
+            }
             SyncEvent::SendFinished { op, error } => {
+                // The message is out: its draft is no longer wanted. A failed send keeps it.
+                if let Some((account, draft_id)) = self.send_drafts.remove(&op)
+                    && error.is_none()
+                {
+                    self.delete_draft(&account, &draft_id);
+                }
                 let thread = self.send_threads.remove(&op);
                 let watched = !self.abandoned.remove(&op);
                 match error {

@@ -8,7 +8,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use jiff::Timestamp;
 
@@ -21,7 +21,7 @@ use crate::config::Prefs;
 use crate::mail::address::{self, ParticipantsLabel};
 use crate::mail::query::Query;
 use crate::model::{
-    AccountId, Label, LabelDelta, LabelKind, Message, Outgoing, ThreadDetail, ThreadKey,
+    AccountId, Label, LabelDelta, LabelKind, Message, Outgoing, SendAs, ThreadDetail, ThreadKey,
     ThreadSummary, ViewKey, ViewKind, labels,
 };
 use crate::protocol::{AuthState, Command, OpId, PageMode, SendError, SyncEvent, SyncHandle};
@@ -287,9 +287,23 @@ impl MutationKind {
     }
 }
 
+/// The state of one draft operation, kept until the window that started it has read it.
+#[derive(Clone, Debug)]
+pub enum DraftOp {
+    Saving,
+    /// Saved; the draft's id.
+    Saved(String),
+    Failed(String),
+    Loading,
+    /// Read for editing: its id and prefill, or why it cannot be edited.
+    Loaded(Result<(String, Box<Outgoing>), String>),
+}
+
 /// The state of one send.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SendState {
+    /// Held back for the undo window; nothing has gone to the worker yet.
+    Scheduled,
     Sending,
     Sent,
     Failed(SendError),
@@ -391,6 +405,8 @@ pub struct Store {
     pub problem: Option<String>,
     pub notice: Option<Notice>,
     pub labels: HashMap<AccountId, Vec<Label>>,
+    /// Each account's send-as addresses and their signatures, as last fetched.
+    pub send_as: HashMap<AccountId, Vec<SendAs>>,
     pub threads: HashMap<ThreadKey, ThreadSummary>,
     pub lists: HashMap<ViewKey, ListState>,
     /// The view the thread list shows.
@@ -411,6 +427,14 @@ pub struct Store {
     pending: BTreeMap<OpId, Pending>,
     undo: Option<(OpId, UndoAction)>,
     sends: HashMap<OpId, SendState>,
+    /// Messages waiting out the undo window, by op; they go to the worker when it ends.
+    scheduled: HashMap<OpId, Outgoing>,
+    /// Draft saves and loads by op, until their window has read the outcome.
+    drafts: HashMap<OpId, DraftOp>,
+    /// The load of the draft the user opened in the Drafts view.
+    edit_draft: Option<OpId>,
+    /// The Gmail draft behind a send, deleted once the send succeeds.
+    send_drafts: HashMap<OpId, (AccountId, String)>,
     /// Sends still in flight whose compose window has closed: their outcome becomes a
     /// notice, since no window is left to show it.
     abandoned: HashSet<OpId>,
@@ -569,6 +593,7 @@ impl Store {
             problem: None,
             notice: None,
             labels: HashMap::new(),
+            send_as: HashMap::new(),
             threads: HashMap::new(),
             lists: HashMap::new(),
             view: None,
@@ -582,6 +607,10 @@ impl Store {
             pending: BTreeMap::new(),
             undo: None,
             sends: HashMap::new(),
+            scheduled: HashMap::new(),
+            drafts: HashMap::new(),
+            edit_draft: None,
+            send_drafts: HashMap::new(),
             abandoned: HashSet::new(),
             send_threads: HashMap::new(),
             next_op: 1,

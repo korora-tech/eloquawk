@@ -794,6 +794,7 @@ fn fake_gmail_read_path() {
             .for_path("/gmail/history")
             .sticky(),
         Reply::json(200, fixtures::LABELS).for_path("/gmail/labels"),
+        Reply::json(200, fixtures::SEND_AS).for_path("/gmail/settings/sendAs"),
         Reply::json(200, fixtures::THREADS).for_path("/gmail/threads"),
         Reply::json(200, r#"{"threads":[{"id":"t3","historyId":"9"}]}"#).for_path("/gmail/threads"),
         Reply::json(200, &meta(A)).for_path(&format!("/gmail/threads/{A}")),
@@ -857,6 +858,25 @@ fn fake_gmail_read_path() {
         })
         .unwrap();
     assert!(labels_ev.iter().any(|l| l.id == "Label_1"));
+    let aliases = events
+        .iter()
+        .find_map(|e| match e {
+            SyncEvent::SendAs { aliases, .. } => Some(aliases.clone()),
+            _ => None,
+        })
+        .expect("the send-as list is fetched");
+    // The default first, the unverified alias left out, signatures as plain text.
+    let got: Vec<(&str, &str)> = aliases
+        .iter()
+        .map(|a| (a.email.as_str(), a.signature.as_str()))
+        .collect();
+    assert_eq!(
+        got,
+        [
+            ("me@example.com", "Me"),
+            ("alias@example.com", "Studio\nTeam")
+        ]
+    );
     let page = events
         .iter()
         .find_map(|e| match e {
@@ -1314,6 +1334,96 @@ fn outgoing(account: &str, thread_id: Option<&str>) -> Outgoing {
         references: vec!["<m2@mail.example>".into()],
         attachments: vec![],
     }
+}
+
+#[test]
+fn drafts_are_saved_updated_deleted_and_read_back() {
+    let draft = |id: &str| format!(r#"{{"id":"{id}","message":{{"id":"m9","threadId":"t9"}}}}"#);
+    let message = r#"{"id":"m9","threadId":"t9","labelIds":["DRAFT"],"payload":{"mimeType":"text/plain",
+        "headers":[{"name":"From","value":"Me <me@example.com>"},{"name":"To","value":"zoe@example.org"},
+        {"name":"Subject","value":"Plans"},{"name":"In-Reply-To","value":"<m2@mail.example>"}],
+        "body":{"size":5,"data":"SGVsbG8"}}}"#;
+    let server = FakeServer::start(vec![
+        Reply::json(200, TOKEN).for_path("/token").sticky(),
+        Reply::json(200, &draft("r1")).for_path("/upload/drafts"),
+        Reply::json(200, &draft("r1")).for_path("/upload/drafts/r1"),
+        Reply::json(404, r#"{"error":{"code":404,"message":"Not Found"}}"#)
+            .for_path("/upload/drafts/gone"),
+        Reply::json(200, &draft("r2")).for_path("/upload/drafts"),
+        Reply::json(200, "").for_path("/gmail/drafts/r1"),
+        Reply::json(200, &format!(r#"{{"drafts":[{}]}}"#, draft("r1"))).for_path("/gmail/drafts"),
+        Reply::json(200, message).for_path("/gmail/messages/m9"),
+    ]);
+    let (mut w, rx) = worker(Secrets::memory(), fake_endpoints(&server));
+    signed_in(&mut w, "me@example.com", "rt");
+    // No recipient yet is fine for a draft.
+    let mut out = outgoing("me@example.com", None);
+    out.to.clear();
+    out.bcc.clear();
+    let save = |op, draft_id: Option<&str>| DraftWork::Save {
+        op,
+        outgoing: Box::new(out.clone()),
+        draft_id: draft_id.map(str::to_string),
+    };
+    w.draft(save(1, None));
+    w.draft(save(2, Some("r1")));
+    // A draft deleted elsewhere is created again.
+    w.draft(save(3, Some("gone")));
+    w.draft(DraftWork::Delete {
+        account: "me@example.com".into(),
+        draft_id: "r1".into(),
+    });
+    w.draft(DraftWork::Load {
+        op: 4,
+        account: "me@example.com".into(),
+        thread_id: "t9".into(),
+    });
+    let events = drain(&rx);
+    let saved: Vec<(OpId, String)> = events
+        .iter()
+        .filter_map(|e| match e {
+            SyncEvent::DraftSaved { op, draft_id } => Some((*op, draft_id.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        saved,
+        [(1, "r1".to_string()), (2, "r1".into()), (3, "r2".into())]
+    );
+    let loaded = events
+        .iter()
+        .find_map(|e| match e {
+            SyncEvent::DraftLoaded { op: 4, result } => Some(result.clone()),
+            _ => None,
+        })
+        .expect("the draft is read back");
+    let (id, back) = loaded.unwrap();
+    assert_eq!(id, "r1");
+    assert_eq!(
+        (back.subject.as_str(), back.body.as_str(), back.to.len()),
+        ("Plans", "Hello", 1)
+    );
+    assert_eq!(back.thread_id.as_deref(), Some("t9"));
+    assert_eq!(back.kind, crate::model::ComposeKind::Reply);
+    let requests = server.finish();
+    let calls: Vec<(String, String)> = requests
+        .iter()
+        .filter(|r| r.path() != "/token")
+        .map(|r| (r.method.clone(), r.path().to_string()))
+        .collect();
+    assert_eq!(
+        calls,
+        [
+            ("POST", "/upload/drafts"),
+            ("PUT", "/upload/drafts/r1"),
+            ("PUT", "/upload/drafts/gone"),
+            ("POST", "/upload/drafts"),
+            ("DELETE", "/gmail/drafts/r1"),
+            ("GET", "/gmail/drafts"),
+            ("GET", "/gmail/messages/m9"),
+        ]
+        .map(|(m, p)| (m.to_string(), p.to_string()))
+    );
 }
 
 fn history_page(json: &str) -> gmail::HistoryList {

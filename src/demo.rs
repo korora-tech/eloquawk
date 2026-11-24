@@ -103,6 +103,10 @@ impl Demo {
         self.emit(SyncEvent::Auth(AuthState::Demo));
         self.emit(SyncEvent::Accounts(self.accounts.clone()));
         for account in self.accounts.clone() {
+            self.emit(SyncEvent::SendAs {
+                aliases: demo_data::send_as(&account),
+                account: account.clone(),
+            });
             self.emit(SyncEvent::Labels {
                 labels: self.labels(&account),
                 account,
@@ -206,6 +210,15 @@ impl Demo {
                     .collect(),
             }),
             Command::Send { op, outgoing } => self.send(op, outgoing),
+            Command::SaveDraft { op, .. } => self.emit(SyncEvent::DraftSaved {
+                op,
+                draft_id: format!("demo-draft-{op}"),
+            }),
+            Command::DeleteDraft { .. } => {}
+            Command::LoadDraft { op, .. } => self.emit(SyncEvent::DraftLoaded {
+                op,
+                result: Err("Demo mode doesn't keep drafts".into()),
+            }),
             Command::SaveAttachment { .. } => {
                 self.emit(SyncEvent::Notice("Demo mode doesn't save files".into()))
             }

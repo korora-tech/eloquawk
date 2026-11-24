@@ -836,6 +836,152 @@ fn abandoned_send_failure_becomes_a_notice() {
     assert_eq!(s.send_state(op), None);
 }
 
+fn sent(rx: &mpsc::Receiver<Command>) -> usize {
+    drain(rx)
+        .iter()
+        .filter(|c| matches!(c, Command::Send { .. }))
+        .count()
+}
+
+#[test]
+fn undoable_send_is_held_until_its_window_ends() {
+    let (mut s, rx) = store();
+    let (op, wait) = s.send_undoable(crate::ui::compose::blank(&ME.to_string()));
+    assert_eq!(wait, Some(Duration::from_secs(10)));
+    assert_eq!(s.send_state(op), Some(&SendState::Scheduled));
+    assert_eq!(sent(&rx), 0, "nothing reaches the worker yet");
+    assert!(s.sends_unsettled());
+    s.dispatch_scheduled(op);
+    assert_eq!(s.send_state(op), Some(&SendState::Sending));
+    assert_eq!(sent(&rx), 1);
+    // A second timer firing for the same op sends nothing more.
+    s.dispatch_scheduled(op);
+    assert_eq!(sent(&rx), 0);
+}
+
+#[test]
+fn cancelling_returns_the_message_and_nothing_leaves() {
+    let (mut s, rx) = store();
+    let mut out = crate::ui::compose::blank(&ME.to_string());
+    out.subject = "Hello".into();
+    let (op, _) = s.send_undoable(out);
+    let back = s.cancel_send(op).expect("still held");
+    assert_eq!(back.subject, "Hello");
+    assert_eq!(s.send_state(op), None);
+    assert!(!s.sends_unsettled());
+    // The timer fires afterwards: nothing to send.
+    s.dispatch_scheduled(op);
+    assert_eq!(sent(&rx), 0);
+    // Too late to undo once it left.
+    let (op, _) = s.send_undoable(crate::ui::compose::blank(&ME.to_string()));
+    s.dispatch_scheduled(op);
+    assert!(s.cancel_send(op).is_none());
+    assert_eq!(s.send_state(op), Some(&SendState::Sending));
+}
+
+#[test]
+fn zero_delay_sends_at_once_and_flush_ends_every_window() {
+    let (mut s, rx) = store();
+    s.prefs.undo_send_secs = 0;
+    let (op, wait) = s.send_undoable(crate::ui::compose::blank(&ME.to_string()));
+    assert_eq!((wait, s.send_state(op)), (None, Some(&SendState::Sending)));
+    assert_eq!(sent(&rx), 1);
+    s.prefs.undo_send_secs = 10;
+    s.send_undoable(crate::ui::compose::blank(&ME.to_string()));
+    s.send_undoable(crate::ui::compose::blank(&ME.to_string()));
+    s.flush_sends();
+    assert_eq!(sent(&rx), 2);
+}
+
+#[test]
+fn a_window_closed_during_the_undo_window_still_reports_failure() {
+    let (mut s, rx) = store();
+    let (op, _) = s.send_undoable(crate::ui::compose::blank(&ME.to_string()));
+    s.abandon_send(op);
+    assert!(s.sends_unsettled(), "held messages block a quit");
+    s.dispatch_scheduled(op);
+    assert_eq!(sent(&rx), 1);
+    s.apply(SyncEvent::SendFinished {
+        op,
+        error: Some(SendError {
+            message: "No".into(),
+            maybe_sent: false,
+        }),
+    });
+    assert_eq!(
+        s.notice.as_ref().map(|n| n.text.as_str()),
+        Some("Couldn't send the message")
+    );
+    assert!(!s.sends_unsettled());
+}
+
+#[test]
+fn a_sent_message_takes_its_draft_with_it_and_a_failed_one_keeps_it() {
+    let (mut s, rx) = store();
+    s.prefs.undo_send_secs = 0;
+    let deletes = |rx: &mpsc::Receiver<Command>| {
+        drain(rx)
+            .into_iter()
+            .filter_map(|c| match c {
+                Command::DeleteDraft { draft_id, .. } => Some(draft_id),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    let (op, _) = s.send_undoable(crate::ui::compose::blank(&ME.to_string()));
+    s.note_send_draft(op, ME, "d1".into());
+    s.apply(SyncEvent::SendFinished {
+        op,
+        error: Some(SendError {
+            message: "No".into(),
+            maybe_sent: false,
+        }),
+    });
+    assert!(deletes(&rx).is_empty(), "a failed send keeps the draft");
+    let (op, _) = s.send_undoable(crate::ui::compose::blank(&ME.to_string()));
+    s.note_send_draft(op, ME, "d1".into());
+    s.apply(SyncEvent::SendFinished { op, error: None });
+    assert_eq!(deletes(&rx), ["d1"]);
+    // Taking a held message back keeps its draft too.
+    s.prefs.undo_send_secs = 10;
+    let (op, _) = s.send_undoable(crate::ui::compose::blank(&ME.to_string()));
+    s.note_send_draft(op, ME, "d2".into());
+    s.cancel_send(op);
+    s.apply(SyncEvent::SendFinished { op, error: None });
+    assert!(deletes(&rx).is_empty());
+}
+
+#[test]
+fn enter_in_the_drafts_view_edits_the_draft_instead_of_opening_it() {
+    let (mut s, rx) = inbox_store(3);
+    s.apply(SyncEvent::Labels {
+        account: ME.into(),
+        labels: vec![label("DRAFT", LabelKind::System, 0, 3)],
+    });
+    // Elsewhere it opens the reader.
+    s.activate(key("t0"));
+    assert_eq!(s.open, Some(key("t0")));
+    drain(&rx);
+    s.view = Some(view("DRAFT"));
+    s.activate(key("t1"));
+    let load = drain(&rx)
+        .into_iter()
+        .find_map(|c| match c {
+            Command::LoadDraft { op, thread_id, .. } => Some((op, thread_id)),
+            _ => None,
+        })
+        .expect("the draft is requested");
+    assert_eq!(load.1, "t1");
+    assert_eq!(s.open, Some(key("t0")), "the reader did not move");
+    assert!(s.take_edit_draft().is_none(), "still loading");
+    s.apply(SyncEvent::DraftLoaded {
+        op: load.0,
+        result: Err("gone".into()),
+    });
+    assert_eq!(s.take_edit_draft().unwrap().unwrap_err(), "gone");
+    assert!(s.take_edit_draft().is_none());
+}
+
 #[test]
 fn account_removal_prunes() {
     let (mut s, rx) = store();
