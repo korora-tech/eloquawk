@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
-use jiff::{Timestamp, Zoned};
+use jiff::{Timestamp, ZonedDateTime};
 
 use crate::config::Prefs;
 use crate::demo_data::{self, DemoThread, PERSONAL};
@@ -228,7 +228,7 @@ impl Demo {
     /// The view's rows, newest first.
     fn rows(&self, view: &ViewKey) -> Vec<&DemoThread> {
         let all_labels = demo_data::label_defs(&view.account);
-        let now = Zoned::now();
+        let now = ZonedDateTime::now();
         let query = match &view.kind {
             ViewKind::Search(q) => Some(Query::parse(q)),
             _ => None,

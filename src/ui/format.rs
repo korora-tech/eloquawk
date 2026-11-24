@@ -1,10 +1,10 @@
 //! Date, time and size strings for the UI. Pure functions with the clock and time zone passed
 //! in, so they are tested without depending on when or where the tests run.
 
-use jiff::{Timestamp, ToSpan, Zoned};
+use jiff::{Timestamp, ToSpan, ZonedDateTime};
 
 /// "14:05" or "2:05pm" ("2pm" on the hour).
-pub fn time(z: &Zoned, clock_24h: bool) -> String {
+pub fn time(z: &ZonedDateTime, clock_24h: bool) -> String {
     if clock_24h {
         z.strftime("%H:%M").to_string()
     } else if z.minute() == 0 {
@@ -16,8 +16,8 @@ pub fn time(z: &Zoned, clock_24h: bool) -> String {
 
 /// The thread list's date column, relative to `now` in `now`'s time zone: today shows the
 /// time, the six days before it the weekday, this year "3 Oct", older "3 Oct 2025".
-pub fn list_date(t: Timestamp, now: &Zoned, clock_24h: bool) -> String {
-    let z = t.to_zoned(now.time_zone().clone());
+pub fn list_date(t: Timestamp, now: &ZonedDateTime, clock_24h: bool) -> String {
+    let z = t.to_zoned_datetime(now.time_zone().clone());
     let (date, today) = (z.date(), now.date());
     if date == today {
         return time(&z, clock_24h);
@@ -34,8 +34,8 @@ pub fn list_date(t: Timestamp, now: &Zoned, clock_24h: bool) -> String {
 }
 
 /// The reader's full date: "Mon 3 Oct 2026, 14:05".
-pub fn full_date(t: Timestamp, now: &Zoned, clock_24h: bool) -> String {
-    let z = t.to_zoned(now.time_zone().clone());
+pub fn full_date(t: Timestamp, now: &ZonedDateTime, clock_24h: bool) -> String {
+    let z = t.to_zoned_datetime(now.time_zone().clone());
     format!("{}, {}", z.strftime("%a %-d %b %Y"), time(&z, clock_24h))
 }
 
@@ -63,7 +63,7 @@ mod tests {
     use super::*;
     use jiff::tz::TimeZone;
 
-    fn now() -> Zoned {
+    fn now() -> ZonedDateTime {
         // Thursday 29 October 2026, 15:30 in Berlin.
         "2026-10-29T15:30:00+01:00[Europe/Berlin]"
             .parse()

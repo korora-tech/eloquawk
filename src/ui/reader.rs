@@ -22,7 +22,7 @@ use gpui::{
     AnyElement, ClickEvent, ClipboardItem, Context, Div, Entity, EventEmitter, FocusHandle,
     Focusable, FontWeight, ScrollHandle, SharedString, Subscription, Window, div, point, px, rgb,
 };
-use jiff::Zoned;
+use jiff::ZonedDateTime;
 
 use super::body_text::{BodyEvent, BodyText};
 use super::format;
@@ -1169,7 +1169,7 @@ impl ReaderView {
 /// The thread in Gmail on the web, for "Open in Gmail".
 /// What every card of one render shares.
 struct CardEnv {
-    now: Zoned,
+    now: ZonedDateTime,
     /// The thread in Gmail's web UI.
     gmail_url: Option<String>,
 }
@@ -1264,7 +1264,7 @@ impl Render for ReaderView {
             Some(DetailState::Loading) | None => Ok(None),
         };
         let bar = self.action_bar(p, summary.as_ref(), cx);
-        let now = Zoned::now();
+        let now = ZonedDateTime::now();
         let mut scroll = div()
             .id("reader-scroll")
             .flex_1()
