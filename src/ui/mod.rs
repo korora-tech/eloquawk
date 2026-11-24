@@ -19,6 +19,7 @@ pub mod help;
 pub mod label_picker;
 pub mod main_view;
 pub mod reader;
+pub mod rich_view;
 pub mod settings;
 pub mod sidebar;
 pub mod text_area;

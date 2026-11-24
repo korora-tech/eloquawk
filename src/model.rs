@@ -7,7 +7,9 @@
 use std::collections::BTreeSet;
 use std::fmt;
 use std::path::PathBuf;
+use std::sync::Arc;
 
+use crate::mail::rich::RichDoc;
 use jiff::Timestamp;
 
 /// The account's email address. Never contains '/'.
@@ -164,6 +166,10 @@ pub struct Message {
     pub body_source: BodySource,
     /// The HTML input cap was hit or the conversion failed (SPEC 8.2).
     pub body_truncated: bool,
+    /// The sanitised HTML body for display, when the message has one (`body_source` is
+    /// [`BodySource::Html`]). `body` stays the plain-text form used for copying, search and
+    /// the AI checks.
+    pub rich: Option<Arc<RichDoc>>,
     pub attachments: Vec<Attachment>,
     /// Sender authentication and link signals, from `format=full` only (SPEC 16.6.1).
     pub signals: MessageSignals,
@@ -442,6 +448,7 @@ mod tests {
             body: "secret body".into(),
             body_source: BodySource::Plain,
             body_truncated: false,
+            rich: None,
             attachments: vec![],
             signals: MessageSignals::default(),
         }

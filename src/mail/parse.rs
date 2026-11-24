@@ -5,6 +5,7 @@
 //! header, payload or body never fails a conversion; it yields an empty field instead.
 
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
 use encoding_rs::{Encoding, WINDOWS_1252};
 use jiff::Timestamp;
@@ -17,6 +18,7 @@ use crate::model::{
 
 use super::address::{parse_address, parse_list, participants};
 use super::html::{decode_entities, html_to_text};
+use super::rich::sanitise;
 
 /// The value of the first header called `name`, compared case-insensitively.
 pub fn header<'a>(headers: &'a [Header], name: &str) -> Option<&'a str> {
@@ -172,10 +174,12 @@ pub fn parse_message(dto: &MessageDto) -> Message {
         .then(|| join_text_parts(&texts))
         .filter(|t| !t.trim().is_empty() || found.html.is_none());
     let mut html_links = Vec::new();
+    let mut rich = None;
     let (body, body_source, body_truncated) = match (plain, found.html) {
         (Some(text), _) => (text, BodySource::Plain, found.unfetched_text),
-        (None, Some(part)) => match part_text(part).map(|t| html_to_text(&t)) {
-            Some(Some(c)) => {
+        (None, Some(part)) => match part_text(part).map(|t| (html_to_text(&t), t)) {
+            Some((Some(c), html)) => {
+                rich = Some(Arc::new(sanitise(&html)));
                 html_links = c.links;
                 (
                     c.text,
@@ -183,7 +187,7 @@ pub fn parse_message(dto: &MessageDto) -> Message {
                     c.truncated || found.unfetched_text,
                 )
             }
-            Some(None) => (snippet.clone(), BodySource::Html, true),
+            Some((None, _)) => (snippet.clone(), BodySource::Html, true),
             None if found.unfetched_text => (snippet.clone(), BodySource::Empty, true),
             None => (String::new(), BodySource::Empty, false),
         },
@@ -228,6 +232,7 @@ pub fn parse_message(dto: &MessageDto) -> Message {
         body,
         body_source,
         body_truncated,
+        rich,
         attachments: found.attachments,
         signals,
     }

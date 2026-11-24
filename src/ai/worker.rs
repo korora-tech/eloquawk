@@ -927,6 +927,7 @@ mod tests {
             body: format!("Body of {subject}."),
             body_source: BodySource::Plain,
             body_truncated: false,
+            rich: None,
             attachments: vec![],
             signals: MessageSignals::default(),
         }

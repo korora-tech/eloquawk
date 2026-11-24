@@ -16,11 +16,14 @@ use std::ops::Range;
 use std::rc::Rc;
 
 use gpui::{
-    App, AvailableSpace, Bounds, CursorStyle, DispatchPhase, ElementId, GlobalElementId, Hitbox,
-    HitboxBehavior, Hsla, IntoElement, LayoutId, MouseMoveEvent, Pixels, Point, SharedString, Size,
-    Style, TextRun, UnderlineStyle, Window, WrapBoundary, WrappedLine, fill, point, px, size,
+    App, AvailableSpace, Bounds, CursorStyle, DispatchPhase, ElementId, FontStyle, FontWeight,
+    GlobalElementId, Hitbox, HitboxBehavior, Hsla, IntoElement, LayoutId, MouseMoveEvent, Pixels,
+    Point, SharedString, Size, StrikethroughStyle, Style, TextRun, UnderlineStyle, Window,
+    WrapBoundary, WrappedLine, fill, point, px, size,
 };
 use unicode_segmentation::UnicodeSegmentation;
+
+use crate::mail::rich::Marks;
 
 // ----- pure helpers -------------------------------------------------------------------------
 
@@ -71,6 +74,39 @@ pub fn word_at(text: &str, ix: usize) -> Range<usize> {
     last
 }
 
+/// Splits `0..len` at every edge of `links` and `marks` into runs, each with whether it is
+/// inside a link and the marks that apply to it. Both lists are ascending; overlaps and
+/// out-of-range ends are clipped, so the runs always cover `0..len` exactly.
+pub fn style_runs(
+    len: usize,
+    links: &[Range<usize>],
+    marks: &[(Range<usize>, Marks)],
+) -> Vec<(Range<usize>, bool, Marks)> {
+    let mut edges: Vec<usize> = vec![0, len];
+    for r in links.iter().chain(marks.iter().map(|(r, _)| r)) {
+        edges.push(r.start.min(len));
+        edges.push(r.end.min(len));
+    }
+    edges.sort_unstable();
+    edges.dedup();
+    if edges.len() < 2 {
+        return vec![(0..0, false, Marks::default())];
+    }
+    edges
+        .windows(2)
+        .map(|w| {
+            let r = w[0]..w[1];
+            let link = links.iter().any(|l| l.start <= r.start && r.end <= l.end);
+            let m = marks
+                .iter()
+                .filter(|(m, _)| m.start <= r.start && r.end <= m.end)
+                .fold(Marks::default(), |acc, (_, m)| acc.union(*m));
+            (r, link, m)
+        })
+        .collect()
+}
+
+#[cfg(test)]
 /// Splits `0..len` into plain and link segments (`true` for a link). `links` are byte ranges in
 /// ascending order; overlapping or out-of-range ones are clipped.
 pub fn segments(len: usize, links: &[Range<usize>]) -> Vec<(Range<usize>, bool)> {
@@ -415,6 +451,9 @@ pub struct SelectableText {
     pub text: SharedString,
     /// Link byte ranges, ascending and non-overlapping.
     pub links: Vec<Range<usize>>,
+    /// Bold, italic, monospace and strike ranges, ascending and non-overlapping; empty for
+    /// plain text.
+    pub marks: Vec<(Range<usize>, Marks)>,
     pub selection: Range<usize>,
     pub selection_color: Hsla,
     pub link_color: Hsla,
@@ -454,24 +493,44 @@ impl gpui::Element for SelectableText {
         _id: Option<&GlobalElementId>,
         _inspector_id: Option<&gpui::InspectorElementId>,
         window: &mut Window,
-        _cx: &mut App,
+        cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
         let style = window.text_style();
         let font_size = style.font_size.to_pixels(window.rem_size());
         let line_height = window.line_height();
         let base = style.to_run(0);
         let link_color = self.link_color;
-        let runs: Vec<TextRun> = segments(self.text.len(), &self.links)
+        let mono = super::theme::mono_font(cx);
+        let runs: Vec<TextRun> = style_runs(self.text.len(), &self.links, &self.marks)
             .into_iter()
-            .map(|(r, link)| TextRun {
-                len: r.len(),
-                color: if link { link_color } else { base.color },
-                underline: link.then_some(UnderlineStyle {
-                    color: Some(link_color),
-                    thickness: px(1.0),
-                    wavy: false,
-                }),
-                ..base.clone()
+            .map(|(r, link, marks)| {
+                let mut font = base.font.clone();
+                if marks.contains(Marks::BOLD) {
+                    font.weight = FontWeight::BOLD;
+                }
+                if marks.contains(Marks::ITALIC) {
+                    font.style = FontStyle::Italic;
+                }
+                if marks.contains(Marks::MONO)
+                    && let Some(family) = &mono
+                {
+                    font.family = family.clone();
+                }
+                TextRun {
+                    len: r.len(),
+                    font,
+                    color: if link { link_color } else { base.color },
+                    underline: link.then_some(UnderlineStyle {
+                        color: Some(link_color),
+                        thickness: px(1.0),
+                        wavy: false,
+                    }),
+                    strikethrough: marks.contains(Marks::STRIKE).then_some(StrikethroughStyle {
+                        thickness: px(1.0),
+                        color: None,
+                    }),
+                    ..base.clone()
+                }
             })
             .collect();
         self.layout
@@ -597,6 +656,31 @@ mod tests {
         // At the very end: the last segment.
         assert_eq!(&text[word_at(text, text.len())], ".");
         assert_eq!(word_at("", 0), 0..0);
+    }
+
+    #[test]
+    fn style_runs_split_at_every_edge_and_cover_the_text() {
+        let marks = [(2..6, Marks::BOLD), (4..9, Marks::ITALIC)];
+        let runs = style_runs(12, &[5..8_usize], &marks);
+        let spans: Vec<_> = runs.iter().map(|(r, l, _)| (r.clone(), *l)).collect();
+        assert_eq!(
+            spans,
+            [
+                (0..2, false),
+                (2..4, false),
+                (4..5, false),
+                (5..6, true),
+                (6..8, true),
+                (8..9, false),
+                (9..12, false)
+            ]
+        );
+        assert!(runs[1].2.contains(Marks::BOLD) && !runs[1].2.contains(Marks::ITALIC));
+        assert!(runs[2].2.contains(Marks::BOLD) && runs[2].2.contains(Marks::ITALIC));
+        assert!(runs[4].2.contains(Marks::ITALIC) && !runs[4].2.contains(Marks::BOLD));
+        // Out-of-range ends are clipped; empty text yields one empty run.
+        assert_eq!(style_runs(3, &[], &[(1..99, Marks::BOLD)]).len(), 2);
+        assert_eq!(style_runs(0, &[], &[]).len(), 1);
     }
 
     #[test]

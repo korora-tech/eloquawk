@@ -1,6 +1,7 @@
 //! HTML mail to plain text, and entity decoding for Gmail snippets.
 //!
-//! Eloquawk never renders HTML. Bodies go through html2text with the `InlineLinks` decorator,
+//! This is the plain-text form of an HTML body (copying, search, the AI checks); what the
+//! reader draws comes from `mail::rich`. Bodies go through html2text with the `InlineLinks` decorator,
 //! which drops emphasis, heading and image markup and keeps each link's real target visible
 //! (`text <href>`), so a link whose text differs from its target is obvious. Images, and so
 //! tracking pixels, are dropped: nothing remote is ever fetched. The input is capped and the

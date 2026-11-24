@@ -167,8 +167,35 @@ const UI_FONTS: &[&str] = &[
     "Liberation Sans",
 ];
 
+/// Monospace families for code and preformatted text in mail, best first.
+const MONO_FONTS: &[&str] = &[
+    "JetBrains Mono",
+    "IBM Plex Mono",
+    "DejaVu Sans Mono",
+    "Liberation Mono",
+    "Noto Sans Mono",
+    "Cascadia Mono",
+    "Ubuntu Mono",
+];
+
 /// The UI font family chosen at start; `None` keeps gpui's default.
 pub struct UiFont(pub Option<SharedString>);
+
+/// The monospace family chosen at start; `None` shows monospace text in the UI font.
+pub struct MonoFont(pub Option<SharedString>);
+
+impl Global for MonoFont {}
+
+/// The first [`MONO_FONTS`] family among the installed ones.
+pub fn pick_mono_font<'a>(installed: impl IntoIterator<Item = &'a str>) -> Option<&'static str> {
+    let installed: std::collections::HashSet<&str> = installed.into_iter().collect();
+    MONO_FONTS.iter().copied().find(|f| installed.contains(f))
+}
+
+/// The monospace family for mail text, when one is installed.
+pub fn mono_font(cx: &App) -> Option<SharedString> {
+    cx.try_global::<MonoFont>().and_then(|f| f.0.clone())
+}
 
 impl Global for UiFont {}
 
@@ -186,6 +213,8 @@ pub fn init_ui_font(cx: &mut App) {
         eprintln!("eloquawk: no preferred UI font is installed; text weights may not show");
     }
     cx.set_global(UiFont(font));
+    let mono = pick_mono_font(names.iter().map(String::as_str)).map(SharedString::from);
+    cx.set_global(MonoFont(mono));
 }
 
 /// The UI font family for a window root, when one was chosen.

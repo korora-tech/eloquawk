@@ -452,6 +452,7 @@ mod tests {
             body: String::new(),
             body_source: BodySource::Plain,
             body_truncated: false,
+            rich: None,
             attachments: vec![Attachment {
                 part_id: "1".into(),
                 attachment_id: None,

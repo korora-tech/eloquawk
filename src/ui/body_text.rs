@@ -21,6 +21,7 @@ use gpui::{
 use super::text_layout::{SelectableText, TextLayout, normalise, word_at};
 use super::theme::palette;
 use crate::mail::links::{LinkTarget, find_links};
+use crate::mail::rich::{Marks, RichText};
 
 actions!(
     body_text,
@@ -67,6 +68,8 @@ pub struct BodyText {
     focus: FocusHandle,
     text: SharedString,
     links: Vec<(Range<usize>, LinkTarget)>,
+    /// Styled ranges of an HTML message's text; empty for plain text.
+    marks: Vec<(Range<usize>, Marks)>,
     selection: Range<usize>,
     anchor: usize,
     press: Option<Press>,
@@ -77,11 +80,25 @@ pub struct BodyText {
 
 impl EventEmitter<BodyEvent> for BodyText {}
 
+/// The links of a sanitised text: the ones the HTML had, then bare URLs and addresses in the
+/// text that no link already covers, in order.
+fn rich_links(rich: &RichText) -> Vec<(Range<usize>, LinkTarget)> {
+    let mut out = rich.links.clone();
+    for (r, t) in find_links(&rich.text) {
+        if !out.iter().any(|(o, _)| o.start < r.end && r.start < o.end) {
+            out.push((r, t));
+        }
+    }
+    out.sort_by_key(|(r, _)| r.start);
+    out
+}
+
 impl BodyText {
     pub fn new(text: String, secondary: bool, cx: &mut Context<Self>) -> Self {
         Self {
             focus: cx.focus_handle(),
             links: find_links(&text),
+            marks: Vec::new(),
             text: text.into(),
             selection: 0..0,
             anchor: 0,
@@ -91,10 +108,36 @@ impl BodyText {
         }
     }
 
+    /// A body for sanitised HTML: the text with its styles, and the links the message really
+    /// had plus any bare URLs in the text.
+    pub fn new_rich(rich: &RichText, secondary: bool, cx: &mut Context<Self>) -> Self {
+        let mut body = Self::new(String::new(), secondary, cx);
+        body.load_rich(rich);
+        body
+    }
+
+    fn load_rich(&mut self, rich: &RichText) {
+        self.text = rich.text.clone().into();
+        self.links = rich_links(rich);
+        self.marks = rich.marks.clone();
+        self.selection = 0..0;
+        self.anchor = 0;
+    }
+
+    /// Replaces an HTML body's content (a refreshed message), dropping the selection when it
+    /// changed.
+    pub fn set_rich(&mut self, rich: &RichText, cx: &mut Context<Self>) {
+        if *self.text != *rich.text || self.marks != rich.marks {
+            self.load_rich(rich);
+            cx.notify();
+        }
+    }
+
     /// Replaces the text (a refreshed message), dropping the selection when it changed.
     pub fn set_text(&mut self, text: String, cx: &mut Context<Self>) {
         if *self.text != *text {
             self.links = find_links(&text);
+            self.marks.clear();
             self.text = text.into();
             self.selection = 0..0;
             self.anchor = 0;
@@ -243,6 +286,7 @@ impl Render for BodyText {
                 layout: self.layout.clone(),
                 text: self.text.clone(),
                 links: self.links.iter().map(|(r, _)| r.clone()).collect(),
+                marks: self.marks.clone(),
                 selection: self.selection.clone(),
                 selection_color: rgb(p.selection).into(),
                 link_color: rgb(p.link).into(),

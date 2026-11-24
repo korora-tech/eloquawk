@@ -15,6 +15,7 @@ pub mod parse;
 pub mod query;
 pub mod quote;
 pub mod reply;
+pub mod rich;
 
 /// `s` with every CR and LF turned into a space, for one-line values such as a subject. A
 /// decoded header or a `mailto:` subject can carry line breaks, and gpui's `shape_line`

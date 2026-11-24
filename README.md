@@ -17,7 +17,7 @@ A native Gmail client for Linux, built with Rust and [GPUI](https://www.gpui.rs/
 
 - **Several Google accounts:** each account's labels sit in the sidebar with their unread counts; collapse the ones you are not using.
 - **Gmail's keyboard shortcuts:** `j`/`k`, `e` to archive, `#` to trash, `r` to reply, `g i` for the inbox and the rest, with `?` showing them all. Archive, trash, spam, star and label changes apply at once and can be undone with `z`.
-- **Conversations as plain text:** HTML mail is converted to text, links show where they really go, remote images are never loaded, and you can select and copy any part of a message.
+- **Private HTML mail:** HTML is sanitised into text, lists, quotes, links and images, never run in an engine: no scripts, styles, forms or frames. Links name their real host, tracking pixels are dropped, and remote images stay blocked until you press Load images for that message or allow the sender (honoured only when the message passed DMARC). You can select and copy any part of a message.
 - **Compose, reply, reply all and forward:** in their own windows, with attachments up to 25 MB and the original attachments carried along when forwarding.
 - **Search and labels:** Gmail's own search syntax, sent to Gmail as you typed it, and a label picker (`l`) for your own labels.
 - **Attachments:** save them to your download directory with one click.
