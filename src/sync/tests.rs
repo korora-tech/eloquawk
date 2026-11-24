@@ -2219,18 +2219,62 @@ fn send_result_in(all: &[SyncEvent], op: OpId) -> Option<Option<SendError>> {
     })
 }
 
-/// SPEC 7.7: a second launch shows the cached labels and inbox before any request, and
-/// its listing reuses the cached summaries instead of fetching each thread again.
-#[test]
-fn a_relaunch_starts_from_the_summary_cache() {
-    let cache_dir =
-        std::env::temp_dir().join(format!("eloquawk-sync-cache-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&cache_dir);
-    let list = format!(
-        r#"{{"threads":[{{"id":"{A}","historyId":"123450"}},{{"id":"{B}","historyId":"123450"}}]}}"#
-    );
-    let labels: gmail::LabelList = serde_json::from_str(fixtures::LABELS).unwrap();
-    let script = |first: bool| {
+/// The two runs of the relaunch tests: the first lists the inbox and opens thread `A`;
+/// the second starts from what the first saved.
+struct Relaunch {
+    cache_dir: PathBuf,
+    secrets: Secrets,
+}
+
+impl Relaunch {
+    fn new(name: &str) -> Self {
+        let cache_dir = std::env::temp_dir().join(format!(
+            "eloquawk-sync-{name}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&cache_dir);
+        // Secrets outlive both runs, as the keyring does, so the cache key is the same.
+        let secrets = Secrets::memory();
+        secrets.set_token("me@example.com", "rt").unwrap();
+        Self { cache_dir, secrets }
+    }
+
+    /// Runs a worker against `script` until it settles, optionally opening `A` after,
+    /// and returns every event and every request.
+    fn run(
+        &self,
+        script: Vec<Reply>,
+        open: bool,
+    ) -> (Vec<SyncEvent>, Vec<crate::google::fake::Recorded>) {
+        let server = FakeServer::start(script);
+        let (handle, rx) = start_with(
+            self.secrets.clone(),
+            fake_endpoints(&server),
+            Some(client()),
+            fast(),
+            None,
+            Some(self.cache_dir.clone()),
+        )
+        .unwrap();
+        let mut events = until(&rx, |e| matches!(e, SyncEvent::Synced(_)));
+        events.extend(until(&rx, |e| matches!(e, SyncEvent::Busy(false))));
+        if open {
+            handle.send(Command::OpenThread(ThreadKey::new("me@example.com", A)));
+            events.extend(until(&rx, |e| matches!(e, SyncEvent::ThreadDetail(_))));
+        }
+        handle.send(Command::Shutdown);
+        while let Ok(ev) = rx.recv_blocking() {
+            events.push(ev);
+        }
+        (events, server.finish())
+    }
+
+    /// Gmail as the first launch sees it: two threads in the inbox, and `A` opened.
+    fn first_script() -> Vec<Reply> {
+        let list = format!(
+            r#"{{"threads":[{{"id":"{A}","historyId":"123450"}},{{"id":"{B}","historyId":"123450"}}]}}"#
+        );
         let mut script = vec![
             Reply::json(200, TOKEN).for_path("/token"),
             Reply::json(200, fixtures::PROFILE).for_path("/gmail/profile"),
@@ -2240,51 +2284,62 @@ fn a_relaunch_starts_from_the_summary_cache() {
             Reply::json(200, fixtures::LABELS).for_path("/gmail/labels"),
             Reply::json(200, &list).for_path("/gmail/threads"),
         ];
-        if first {
-            for id in [A, B] {
-                script.push(Reply::json(200, &meta(id)).for_path(&format!("/gmail/threads/{id}")));
-            }
-        }
-        for l in &labels.labels {
-            script.push(
-                Reply::json(200, fixtures::LABEL_INBOX.replace("INBOX", &l.id).as_str())
-                    .for_path(&format!("/gmail/labels/{}", l.id))
-                    .sticky(),
-            );
+        for id in [A, B] {
+            script.push(Reply::json(200, &meta(id)).for_path(&format!("/gmail/threads/{id}")));
         }
         script
-    };
-    // Secrets outlive both runs, as the keyring does, so the cache key is the same.
-    let secrets = Secrets::memory();
-    secrets.set_token("me@example.com", "rt").unwrap();
-    let run = |first: bool| {
-        let server = FakeServer::start(script(first));
-        let (handle, rx) = start_with(
-            secrets.clone(),
-            fake_endpoints(&server),
-            Some(client()),
-            fast(),
-            None,
-            Some(cache_dir.clone()),
-        )
-        .unwrap();
-        let mut events = until(&rx, |e| matches!(e, SyncEvent::Synced(_)));
-        events.extend(until(&rx, |e| matches!(e, SyncEvent::Busy(false))));
-        handle.send(Command::Shutdown);
-        while let Ok(ev) = rx.recv_blocking() {
-            events.push(ev);
-        }
-        (events, server.finish())
-    };
+            .push(Reply::json(200, fixtures::THREAD_FULL).for_path(&format!("/gmail/threads/{A}")));
+        script.extend(Self::counts());
+        script
+    }
 
-    let (_, requests) = run(true);
-    assert!(
-        requests
+    /// A launch that only follows the history: no profile, no listing.
+    fn resume_script() -> Vec<Reply> {
+        let mut script = vec![
+            Reply::json(200, TOKEN).for_path("/token"),
+            Reply::json(200, fixtures::HISTORY_EMPTY)
+                .for_path("/gmail/history")
+                .sticky(),
+            Reply::json(200, fixtures::LABELS).for_path("/gmail/labels"),
+        ];
+        script.extend(Self::counts());
+        script
+    }
+
+    fn counts() -> Vec<Reply> {
+        let labels: gmail::LabelList = serde_json::from_str(fixtures::LABELS).unwrap();
+        labels
+            .labels
             .iter()
-            .any(|r| r.path() == format!("/gmail/threads/{A}"))
-    );
+            .map(|l| {
+                Reply::json(200, fixtures::LABEL_INBOX.replace("INBOX", &l.id).as_str())
+                    .for_path(&format!("/gmail/labels/{}", l.id))
+                    .sticky()
+            })
+            .collect()
+    }
+}
 
-    let (events, requests) = run(false);
+impl Drop for Relaunch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.cache_dir);
+    }
+}
+
+fn count(requests: &[crate::google::fake::Recorded], path: &str) -> usize {
+    requests.iter().filter(|r| r.path() == path).count()
+}
+
+/// SPEC 7.7 and 7.8: a second launch shows the cached labels and inbox before any request,
+/// then follows the history from the saved cursor instead of listing and fetching again,
+/// and a thread opened before is read from disk.
+#[test]
+fn a_relaunch_resumes_from_the_saved_cursor() {
+    let r = Relaunch::new("resume");
+    let (_, requests) = r.run(Relaunch::first_script(), true);
+    assert_eq!(count(&requests, &format!("/gmail/threads/{A}")), 2);
+
+    let (events, requests) = r.run(Relaunch::resume_script(), true);
     let first_request = events
         .iter()
         .position(|e| matches!(e, SyncEvent::Busy(true)))
@@ -2307,35 +2362,217 @@ fn a_relaunch_starts_from_the_summary_cache() {
             .iter()
             .any(|e| matches!(e, SyncEvent::Labels { labels, .. } if !labels.is_empty()))
     );
-    let listed = events
+    // The cursor the first launch ended at is where the history is read from.
+    let history: Vec<_> = requests
         .iter()
-        .find_map(|e| match e {
-            SyncEvent::ThreadPage {
-                threads,
-                mode: PageMode::Replace,
-                ..
-            } => Some(threads.len()),
-            _ => None,
-        })
-        .unwrap();
-    assert_eq!(listed, 2, "the listing reuses both cached summaries");
+        .filter(|r| r.path() == "/gmail/history")
+        .collect();
+    assert!(!history.is_empty());
+    assert!(has(&query(history[0]), "startHistoryId", "123456"));
+    assert_eq!(count(&requests, "/gmail/profile"), 0, "no initial sync");
+    assert_eq!(
+        count(&requests, "/gmail/threads"),
+        0,
+        "nothing is listed again"
+    );
+    assert_eq!(
+        count(&requests, "/gmail/labels"),
+        1,
+        "the label list is refreshed once"
+    );
     assert!(
         !requests
             .iter()
             .any(|r| r.path().starts_with("/gmail/threads/")),
-        "no thread is fetched again"
+        "no thread is fetched, the opened one comes from disk"
     );
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, SyncEvent::NewMail { .. })),
+        "nothing is announced as new on resuming"
+    );
+    assert!(events.iter().any(|e| matches!(
+        e,
+        SyncEvent::ThreadDetail(d) if d.key.id == A && d.messages.len() == 2
+    )));
+}
 
-    // Signing out deletes the account's cache, even before the cache was opened.
-    let files = || std::fs::read_dir(&cache_dir).unwrap().count();
-    assert_eq!(files(), 1);
-    let (mut w, _rx) = worker(secrets.clone(), nowhere());
-    w.cache_dir = Some(cache_dir.clone());
+/// Gmail no longer has the saved cursor: the account resets and lists afresh.
+#[test]
+fn a_resume_with_an_expired_cursor_falls_back_to_an_initial_sync() {
+    let r = Relaunch::new("expired");
+    r.run(Relaunch::first_script(), true);
+    let mut script = vec![
+        Reply::json(200, TOKEN).for_path("/token"),
+        Reply::json(404, r#"{"error":{"code":404,"message":"Not Found"}}"#)
+            .for_path("/gmail/history"),
+        Reply::json(200, fixtures::PROFILE).for_path("/gmail/profile"),
+        Reply::json(200, fixtures::LABELS).for_path("/gmail/labels"),
+        Reply::json(200, r#"{"threads":[]}"#).for_path("/gmail/threads"),
+    ];
+    script.extend(Relaunch::counts());
+    let (events, requests) = r.run(script, false);
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, SyncEvent::AccountReset(_)))
+    );
+    assert_eq!(count(&requests, "/gmail/profile"), 1);
+    assert_eq!(count(&requests, "/gmail/threads"), 1);
+    // Whatever was saved for the thread is gone with the reset.
+    let threads = r.cache_dir.join("threads");
+    let left = std::fs::read_dir(threads)
+        .map(|d| {
+            d.flatten()
+                .flat_map(|a| std::fs::read_dir(a.path()).unwrap())
+                .count()
+        })
+        .unwrap_or(0);
+    assert_eq!(left, 0);
+}
+
+/// A cursor saved with changes still pending would skip them: none is saved.
+#[test]
+fn a_snapshot_taken_mid_round_carries_no_cursor() {
+    let mut a = AccountState::new("rt".into(), None);
+    a.history_id = Some(9);
+    a.synced_once = true;
+    assert_eq!(a.snapshot().history_id, Some(9));
+    a.pending_changed.insert("t".into());
+    assert_eq!(a.snapshot().history_id, None);
+    a.pending_changed.clear();
+    a.synced_once = false;
+    assert_eq!(
+        a.snapshot().history_id,
+        None,
+        "an unfinished first sync neither"
+    );
+    // Restoring without a cursor leaves the account to sync from scratch.
+    let mut b = AccountState::new("rt".into(), None);
+    let snap = Snapshot {
+        labels: vec![Label {
+            account: "me@example.com".into(),
+            id: "INBOX".into(),
+            name: "INBOX".into(),
+            kind: LabelKind::System,
+            color: None,
+            threads_unread: 0,
+            threads_total: 0,
+            messages_total: 0,
+            hidden: false,
+        }],
+        ..Snapshot::default()
+    };
+    assert!(b.restore(snap.clone()));
+    assert_eq!(
+        (b.history_id, b.synced_once, b.resumed),
+        (None, false, false)
+    );
+    let mut c = AccountState::new("rt".into(), None);
+    c.restore(Snapshot {
+        history_id: Some(5),
+        ..snap
+    });
+    assert_eq!(
+        (c.history_id, c.synced_once, c.resumed),
+        (Some(5), true, true)
+    );
+}
+
+/// With no connection a thread saved earlier still opens, even when the list has seen it
+/// change since; one that was never saved fails as before, and a thread Gmail says is
+/// gone is forgotten.
+#[test]
+fn saved_threads_open_offline() {
+    let r = Relaunch::new("offline");
+    r.run(Relaunch::first_script(), true);
+    let (mut w, rx) = worker(r.secrets.clone(), nowhere());
+    w.cache_dir = Some(r.cache_dir.clone());
+    w.accounts.insert(
+        "me@example.com".into(),
+        AccountState::new("rt".into(), None),
+    );
+    let key = ThreadKey::new("me@example.com", A);
+    let known = |w: &mut Worker, history_id: u64| {
+        w.accounts.get_mut("me@example.com").unwrap().known.insert(
+            A.into(),
+            Known {
+                history_id,
+                star_target: None,
+                summary: parse::thread_summary(
+                    &"me@example.com".to_string(),
+                    &serde_json::from_str(&meta(A)).unwrap(),
+                )
+                .unwrap(),
+            },
+        );
+    };
+    // Changed since saved (the saved copy is at 123450), and nothing answers.
+    known(&mut w, 999999);
+    w.open_thread(key.clone(), false);
+    let events = drain(&rx);
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            SyncEvent::ThreadDetail(d) if d.key == key && d.messages.len() == 2
+        )),
+        "{events:?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, SyncEvent::ThreadFailed { .. }))
+    );
+    // Never saved: the error shows.
+    w.open_thread(ThreadKey::new("me@example.com", B), false);
+    assert!(
+        drain(&rx)
+            .iter()
+            .any(|e| matches!(e, SyncEvent::ThreadFailed { .. }))
+    );
+}
+
+/// Nothing readable lands on disk: not the subject, the body, an address or the id.
+#[test]
+fn saved_threads_are_sealed_on_disk() {
+    let r = Relaunch::new("sealed");
+    r.run(Relaunch::first_script(), true);
+    let mut files = Vec::new();
+    let mut dirs = vec![r.cache_dir.clone()];
+    while let Some(d) = dirs.pop() {
+        for e in std::fs::read_dir(&d).unwrap().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                dirs.push(p);
+            } else {
+                files.push(p);
+            }
+        }
+    }
+    assert!(
+        files
+            .iter()
+            .any(|p| p.extension().is_some_and(|e| e == "thread"))
+    );
+    for p in files {
+        let name = p.to_string_lossy().into_owned();
+        assert!(!name.contains("example") && !name.contains(A), "{name}");
+        let raw = std::fs::read(&p).unwrap();
+        for needle in ["Caf", "plans", "example.com", A] {
+            assert!(
+                !raw.windows(needle.len()).any(|w| w == needle.as_bytes()),
+                "{needle} in {name}"
+            );
+        }
+    }
+    // Signing out removes the thread store with the snapshot, with no key needed.
+    let (mut w, _rx) = worker(r.secrets.clone(), nowhere());
+    w.cache_dir = Some(r.cache_dir.clone());
     w.accounts.insert(
         "me@example.com".into(),
         AccountState::new("rt".into(), None),
     );
     w.remove_account("me@example.com", Revoke::LocalOnly);
-    assert_eq!(files(), 0);
-    let _ = std::fs::remove_dir_all(&cache_dir);
+    assert_eq!(std::fs::read_dir(&r.cache_dir).unwrap().count(), 0);
 }

@@ -6,6 +6,10 @@
 //! data, written atomically with mode 0600 under `$XDG_CACHE_HOME/eloquawk/`. The key lives
 //! only in the Secret Service (`Secrets::cache_key`). A file that is missing, from another
 //! key or format, or tampered with reads as no cache; it is then simply rewritten.
+//!
+//! The snapshot also carries the History cursor it was taken at, so a relaunch can follow
+//! the changes since then instead of listing everything again. Message bodies have their own
+//! store, `thread_cache.rs`, sealed with the same key.
 
 use std::collections::BTreeSet;
 use std::io::Write as _;
@@ -26,6 +30,9 @@ const NONCE_LEN: usize = 24;
 /// What a cache file holds for one account.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Snapshot {
+    /// The Gmail history id this snapshot is consistent with: every change up to it is
+    /// already reflected. `None` when it was taken mid-round, which forces a full sync.
+    pub history_id: Option<u64>,
     pub labels: Vec<Label>,
     /// Page 1 of each cached view, in list order. Searches are never cached.
     pub views: Vec<(ViewKind, Vec<String>)>,
@@ -88,61 +95,73 @@ impl MailCache {
     }
 
     fn seal(&self, account: &str, plain: &[u8]) -> std::io::Result<Vec<u8>> {
-        let mut nonce = [0u8; NONCE_LEN];
-        getrandom::fill(&mut nonce).map_err(std::io::Error::other)?;
-        let sealed = self
-            .cipher
-            .encrypt(
-                &XNonce::from(nonce),
-                Payload {
-                    msg: plain,
-                    aad: account.as_bytes(),
-                },
-            )
-            .map_err(|_| std::io::Error::other("encryption failed"))?;
-        let mut out = Vec::with_capacity(MAGIC.len() + NONCE_LEN + sealed.len());
-        out.extend_from_slice(MAGIC);
-        out.extend_from_slice(&nonce);
-        out.extend_from_slice(&sealed);
-        Ok(out)
+        seal(&self.cipher, MAGIC, account.as_bytes(), plain)
     }
 
     fn open(&self, account: &str, raw: &[u8]) -> Option<Vec<u8>> {
-        let rest = raw.strip_prefix(MAGIC.as_slice())?;
-        if rest.len() < NONCE_LEN {
-            return None;
-        }
-        let (nonce, sealed) = rest.split_at(NONCE_LEN);
-        let nonce = XNonce::try_from(nonce).ok()?;
-        self.cipher
-            .decrypt(
-                &nonce,
-                Payload {
-                    msg: sealed,
-                    aad: account.as_bytes(),
-                },
-            )
-            .ok()
+        open(&self.cipher, MAGIC, account.as_bytes(), raw)
     }
+}
+
+/// `magic ‖ nonce ‖ XChaCha20-Poly1305(plain)` with `aad` authenticated but not stored. A
+/// fresh random nonce each time, so one key can seal any number of files.
+pub(crate) fn seal(
+    cipher: &XChaCha20Poly1305,
+    magic: &[u8; 8],
+    aad: &[u8],
+    plain: &[u8],
+) -> std::io::Result<Vec<u8>> {
+    let mut nonce = [0u8; NONCE_LEN];
+    getrandom::fill(&mut nonce).map_err(std::io::Error::other)?;
+    let sealed = cipher
+        .encrypt(&XNonce::from(nonce), Payload { msg: plain, aad })
+        .map_err(|_| std::io::Error::other("encryption failed"))?;
+    let mut out = Vec::with_capacity(magic.len() + NONCE_LEN + sealed.len());
+    out.extend_from_slice(magic);
+    out.extend_from_slice(&nonce);
+    out.extend_from_slice(&sealed);
+    Ok(out)
+}
+
+/// The inverse of [`seal`]; `None` for another format, key or `aad`, or a changed byte.
+pub(crate) fn open(
+    cipher: &XChaCha20Poly1305,
+    magic: &[u8; 8],
+    aad: &[u8],
+    raw: &[u8],
+) -> Option<Vec<u8>> {
+    let rest = raw.strip_prefix(magic.as_slice())?;
+    if rest.len() < NONCE_LEN {
+        return None;
+    }
+    let (nonce, sealed) = rest.split_at(NONCE_LEN);
+    let nonce = XNonce::try_from(nonce).ok()?;
+    cipher.decrypt(&nonce, Payload { msg: sealed, aad }).ok()
+}
+
+/// First 12 bytes of the SHA-256 of `text`, in hex: a file name that does not leak `text`.
+pub(crate) fn hashed_name(text: &str) -> String {
+    let hash = sha2::Sha256::digest(text.as_bytes());
+    hash[..12].iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// The account's file in `dir`; named by a hash so the address is not in the file name.
 fn path_in(dir: &Path, account: &str) -> PathBuf {
-    let hash = sha2::Sha256::digest(account.as_bytes());
-    let name: String = hash[..12].iter().map(|b| format!("{b:02x}")).collect();
-    dir.join(format!("{name}.cache"))
+    dir.join(format!("{}.cache", hashed_name(account)))
 }
 
-/// Deletes the account's snapshot in `dir`; succeeds when there is none. Needs no key, so
-/// signing out clears it even when the keyring never gave one.
+/// Deletes the account's snapshot and cached threads in `dir`; succeeds when there are none.
+/// Needs no key, so signing out clears them even when the keyring never gave one.
 pub fn remove(dir: &Path, account: &str) -> std::io::Result<()> {
-    match std::fs::remove_file(path_in(dir, account)) {
+    let snapshot = match std::fs::remove_file(path_in(dir, account)) {
         Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
         _ => Ok(()),
-    }
+    };
+    let threads = crate::thread_cache::remove_account(dir, account);
+    snapshot.and(threads)
 }
 
-fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let mut f = std::fs::OpenOptions::new()
         .write(true)
         .create(true)
@@ -157,6 +176,9 @@ fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 
 #[derive(Serialize, Deserialize)]
 struct File {
+    /// Absent in files written before the cursor was kept, which then resume nothing.
+    #[serde(default)]
+    history_id: Option<u64>,
     labels: Vec<FileLabel>,
     views: Vec<(FileView, Vec<String>)>,
     threads: Vec<FileThread>,
@@ -197,6 +219,7 @@ struct FileThread {
 impl File {
     fn from_snapshot(s: &Snapshot) -> Self {
         Self {
+            history_id: s.history_id,
             labels: s
                 .labels
                 .iter()
@@ -252,6 +275,7 @@ impl File {
     fn into_snapshot(self, account: &str) -> Snapshot {
         let account: AccountId = account.to_string();
         Snapshot {
+            history_id: self.history_id,
             labels: self
                 .labels
                 .into_iter()
@@ -328,6 +352,7 @@ mod tests {
 
     fn snapshot() -> Snapshot {
         Snapshot {
+            history_id: Some(4242),
             labels: vec![Label {
                 account: ME.into(),
                 id: "INBOX".into(),

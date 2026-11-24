@@ -39,6 +39,9 @@ pub(super) struct AccountState {
     pub(super) listed: HashMap<ViewKind, Vec<String>>,
     /// Something the summary cache holds changed since it was last written.
     pub(super) dirty: bool,
+    /// This session resumed from a saved cursor: the first round finds what changed while the
+    /// app was closed, which is not new mail, and then refreshes the label list.
+    pub(super) resumed: bool,
 }
 
 impl AccountState {
@@ -60,6 +63,7 @@ impl AccountState {
             labels: BTreeMap::new(),
             listed: HashMap::new(),
             dirty: false,
+            resumed: false,
         }
     }
 
@@ -79,6 +83,12 @@ impl AccountState {
             })
             .collect();
         Snapshot {
+            // Only a state that every change up to the cursor has been applied to. Mid-round
+            // (changes still pending) the saved cursor would skip them, so none is saved and
+            // the next launch lists afresh.
+            history_id: self
+                .history_id
+                .filter(|_| self.synced_once && self.pending_changed.is_empty()),
             labels: self.labels.values().cloned().collect(),
             views: self
                 .listed
@@ -110,6 +120,17 @@ impl AccountState {
             .map(|l| (l.id.clone(), l))
             .collect();
         self.listed = snapshot.views.into_iter().collect();
+        // Resume from the saved cursor when there is one: the History API then yields just
+        // what changed since, in place of listing everything again. Gmail answers 404 for a
+        // cursor it no longer has, which resets the account as ever.
+        if let Some(h) = snapshot.history_id
+            && self.history_id.is_none()
+            && !self.labels.is_empty()
+        {
+            self.history_id = Some(h);
+            self.synced_once = true;
+            self.resumed = true;
+        }
         true
     }
 
@@ -213,6 +234,7 @@ impl AccountState {
         self.missing.clear();
         self.refused.clear();
         self.listed.clear();
+        self.resumed = false;
         self.dirty = true;
         self.deferred
             .retain(|j| !matches!(j, Job::FetchMeta(..) | Job::Refetch(_) | Job::History(_)));
