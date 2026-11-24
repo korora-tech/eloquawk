@@ -3066,7 +3066,7 @@ dependencies = [
  "pastey 0.2.3",
  "serde",
  "task-local",
- "zbus",
+ "zbus 5.19.0",
 ]
 
 [[package]]
