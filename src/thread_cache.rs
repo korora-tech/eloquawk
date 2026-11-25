@@ -29,8 +29,9 @@ use crate::model::{
     ThreadDetail, ThreadKey,
 };
 
-/// Bumped whenever the plaintext shape changes; older files then read as not cached.
-const MAGIC: &[u8; 8] = b"ELQTHR01";
+/// Bumped whenever the plaintext shape or what is cached changes; older files then read as
+/// not cached. 02: bodies cached before HTML was preferred over plain are refetched.
+const MAGIC: &[u8; 8] = b"ELQTHR02";
 const SUBDIR: &str = "threads";
 const EXT: &str = "thread";
 
