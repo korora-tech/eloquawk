@@ -158,9 +158,9 @@ fn join_text_parts(texts: &[String]) -> String {
         .join("\n\n")
 }
 
-/// Converts a Gmail message (`format=full` or `metadata`) into a [`Message`]. Plain text is
-/// preferred over HTML; HTML goes through `html_to_text`, falling back to the snippet when the
-/// conversion fails.
+/// Converts a Gmail message (`format=full` or `metadata`) into a [`Message`]. HTML is preferred
+/// over the plain alternative and goes through `html_to_text` and `sanitise`; plain text is the
+/// fallback when there is no HTML or it will not convert.
 pub fn parse_message(dto: &MessageDto) -> Message {
     let empty = PartDto::default();
     let payload = dto.payload.as_ref().unwrap_or(&empty);
@@ -175,25 +175,34 @@ pub fn parse_message(dto: &MessageDto) -> Message {
         .filter(|t| !t.trim().is_empty() || found.html.is_none());
     let mut html_links = Vec::new();
     let mut rich = None;
-    let (body, body_source, body_truncated) = match (plain, found.html) {
-        (Some(text), _) => (text, BodySource::Plain, found.unfetched_text),
-        (None, Some(part)) => match part_text(part).map(|t| (html_to_text(&t), t)) {
-            Some((Some(c), html)) => {
-                rich = Some(Arc::new(sanitise(&html)));
-                html_links = c.links;
-                (
-                    c.text,
-                    BodySource::Html,
-                    c.truncated || found.unfetched_text,
-                )
-            }
-            Some((None, _)) => (snippet.clone(), BodySource::Html, true),
+    // HTML is what the sender designed, so it wins over the plain alternative whenever it
+    // converts; the plain text is the fallback (and `body` keeps the text form for copying).
+    let html_body = found.html.and_then(|part| {
+        let html = part_text(part)?;
+        let converted = html_to_text(&html)?;
+        Some((converted, html))
+    });
+    // A blank HTML part must not shadow real plain text.
+    let html_body = html_body.filter(|(c, _)| plain.is_none() || !c.text.trim().is_empty());
+    let (body, body_source, body_truncated) = match (html_body, plain, found.html) {
+        (Some((c, html)), _, _) => {
+            rich = Some(Arc::new(sanitise(&html)));
+            html_links = c.links;
+            (
+                c.text,
+                BodySource::Html,
+                c.truncated || found.unfetched_text,
+            )
+        }
+        (None, Some(text), _) => (text, BodySource::Plain, found.unfetched_text),
+        (None, None, Some(part)) => match part_text(part) {
+            Some(_) => (snippet.clone(), BodySource::Html, true),
             None if found.unfetched_text => (snippet.clone(), BodySource::Empty, true),
             None => (String::new(), BodySource::Empty, false),
         },
         // Only an unfetched text part: show the snippet and flag the body as incomplete.
-        (None, None) if found.unfetched_text => (snippet.clone(), BodySource::Empty, true),
-        (None, None) => (String::new(), BodySource::Empty, false),
+        (None, None, None) if found.unfetched_text => (snippet.clone(), BodySource::Empty, true),
+        (None, None, None) => (String::new(), BodySource::Empty, false),
     };
 
     let date = internal_date(dto.internal_date.as_deref())
@@ -410,7 +419,7 @@ mod tests {
     }
 
     #[test]
-    fn alternative_prefers_plain() {
+    fn alternative_prefers_html() {
         let p = multipart(
             "multipart/alternative",
             vec![
@@ -419,9 +428,23 @@ mod tests {
             ],
         );
         let m = parse_message(&msg(Some(p)));
+        assert_eq!(m.body_source, BodySource::Html);
+        assert!(m.rich.is_some());
+        assert!(!m.body_truncated);
+    }
+
+    #[test]
+    fn alternative_falls_back_to_plain_when_html_is_blank() {
+        let p = multipart(
+            "multipart/alternative",
+            vec![
+                leaf("0", "text/plain", vec![], b"plain body\r\nline two\r\n"),
+                leaf("1", "text/html", vec![], b"   "),
+            ],
+        );
+        let m = parse_message(&msg(Some(p)));
         assert_eq!(m.body, "plain body\nline two");
         assert_eq!(m.body_source, BodySource::Plain);
-        assert!(!m.body_truncated);
     }
 
     #[test]
@@ -762,14 +785,15 @@ mod tests {
         assert_eq!(d.messages.len(), 2);
         assert_eq!(d.subject, "Café ☕ plans");
         let first = &d.messages[0];
-        assert_eq!(first.body, "Shall we meet at the café?");
-        assert_eq!(first.body_source, BodySource::Plain);
+        assert_eq!(
+            first.body,
+            "Shall we meet at the café?\n\nMap <https://maps.example/cafe>"
+        );
+        assert_eq!(first.body_source, BodySource::Html);
+        assert!(first.rich.is_some());
         assert_eq!(first.snippet, "Shall we meet at the café?");
         let second = &d.messages[1];
-        assert_eq!(
-            second.body,
-            "Don't forget the plans & tickets.\n\n> Shall we meet at the café?"
-        );
+        assert_eq!(second.body, "Don't forget the plans & tickets.");
         assert_eq!(second.from.email, "bob@example.net");
         assert_eq!(
             second.reply_to,
