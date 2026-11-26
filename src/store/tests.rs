@@ -952,6 +952,55 @@ fn a_sent_message_takes_its_draft_with_it_and_a_failed_one_keeps_it() {
 }
 
 #[test]
+fn a_draft_discarded_during_its_save_is_deleted_when_the_save_ends() {
+    let (mut s, rx) = store();
+    let deletes = |rx: &mpsc::Receiver<Command>| {
+        drain(rx)
+            .into_iter()
+            .filter_map(|c| match c {
+                Command::DeleteDraft { draft_id, .. } => Some(draft_id),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    // The first save creates the draft after the window discarded it.
+    let op = s.save_draft(crate::ui::compose::blank(&ME.to_string()), None);
+    s.discard_after_save(op, ME, None);
+    assert!(
+        deletes(&rx).is_empty(),
+        "nothing to delete before the save ends"
+    );
+    s.apply(SyncEvent::DraftSaved {
+        op,
+        draft_id: "d1".into(),
+    });
+    assert_eq!(deletes(&rx), ["d1"]);
+    assert!(s.draft_op(op).is_none());
+    // A failed save deletes the draft that existed before it.
+    let op = s.save_draft(
+        crate::ui::compose::blank(&ME.to_string()),
+        Some("d2".into()),
+    );
+    s.discard_after_save(op, ME, Some("d2".into()));
+    s.apply(SyncEvent::DraftFailed {
+        op,
+        message: "No".into(),
+    });
+    assert_eq!(deletes(&rx), ["d2"]);
+    // A save that already ended leaves only the known draft to delete.
+    s.discard_after_save(op, ME, Some("d3".into()));
+    assert_eq!(deletes(&rx), ["d3"]);
+    // Without a discard the outcome stays for the window to read.
+    let op = s.save_draft(crate::ui::compose::blank(&ME.to_string()), None);
+    s.apply(SyncEvent::DraftSaved {
+        op,
+        draft_id: "d4".into(),
+    });
+    assert!(deletes(&rx).is_empty());
+    assert!(matches!(s.draft_op(op), Some(DraftOp::Saved(_))));
+}
+
+#[test]
 fn enter_in_the_drafts_view_edits_the_draft_instead_of_opening_it() {
     let (mut s, rx) = inbox_store(3);
     s.apply(SyncEvent::Labels {

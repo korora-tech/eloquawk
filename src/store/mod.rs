@@ -431,6 +431,9 @@ pub struct Store {
     scheduled: HashMap<OpId, Outgoing>,
     /// Draft saves and loads by op, until their window has read the outcome.
     drafts: HashMap<OpId, DraftOp>,
+    /// Draft saves still running whose message was discarded: the account, and the draft's
+    /// id from before the save. Their draft is deleted when the save ends.
+    discard_saves: HashMap<OpId, (AccountId, Option<String>)>,
     /// The load of the draft the user opened in the Drafts view.
     edit_draft: Option<OpId>,
     /// The Gmail draft behind a send, deleted once the send succeeds.
@@ -611,6 +614,7 @@ impl Store {
             drafts: HashMap::new(),
             edit_draft: None,
             send_drafts: HashMap::new(),
+            discard_saves: HashMap::new(),
             abandoned: HashSet::new(),
             send_threads: HashMap::new(),
             next_op: 1,

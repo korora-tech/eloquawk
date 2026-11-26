@@ -388,6 +388,7 @@ impl Demo {
                         .ok_or("An attachment of the original message is no longer available.")?,
                 ),
                 AttachmentSource::Local(path) => compose::read_local(path, budget)?,
+                AttachmentSource::Held(bytes) => bytes.to_vec(),
             };
             budget = budget
                 .checked_sub(bytes.len() as u64)

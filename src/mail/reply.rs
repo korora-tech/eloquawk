@@ -197,6 +197,7 @@ pub fn prefill(
         thread_id: Some(detail.key.id.clone()),
         in_reply_to: t.message_id.clone(),
         references: references(t),
+        html: None,
         attachments,
     })
 }

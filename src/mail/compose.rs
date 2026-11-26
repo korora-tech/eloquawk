@@ -145,10 +145,19 @@ fn build_inner(
         b = b.references(out.references.join(" "));
     }
     let body = out.body.replace("\r\n", "\n");
+    // A draft opened with HTML keeps it next to the text as long as the text is untouched.
+    let html = out.html.as_deref().filter(|h| !h.trim().is_empty());
     let message = if attachments.is_empty() {
-        b.singlepart(SinglePart::plain(body))
+        match html {
+            Some(html) => b.multipart(MultiPart::alternative_plain_html(body, html.to_string())),
+            None => b.singlepart(SinglePart::plain(body)),
+        }
     } else {
-        let mut mixed = MultiPart::mixed().singlepart(SinglePart::plain(body));
+        let mut mixed = match html {
+            Some(html) => MultiPart::mixed()
+                .multipart(MultiPart::alternative_plain_html(body, html.to_string())),
+            None => MultiPart::mixed().singlepart(SinglePart::plain(body)),
+        };
         for (a, bytes) in attachments {
             let ct = ContentType::parse(&a.mime_type).unwrap_or_else(|_| octet_stream());
             mixed = mixed.singlepart(Attachment::new(a.filename.clone()).body(bytes.clone(), ct));
@@ -259,6 +268,7 @@ mod tests {
             thread_id: Some("t1".into()),
             in_reply_to: Some("<m2@mail.example>".into()),
             references: vec!["<m1@mail.example>".into(), "<m2@mail.example>".into()],
+            html: None,
             attachments: vec![],
         }
     }
@@ -381,6 +391,45 @@ mod tests {
         assert_eq!(parts[1].attachment_name(), Some("notes.weird"));
         assert!(parts[1].is_content_type("application", "octet-stream"));
         assert_eq!(&parts[1].decoded()[..], b"abc");
+    }
+
+    #[test]
+    fn a_kept_html_part_goes_out_beside_the_text_and_the_attachments() {
+        let mut out = outgoing();
+        out.html = Some("<p>Hello <b>there</b></p>".into());
+        let raw = build_draft(&out, &[], now(), "<x@eloquawk.local>").unwrap();
+        let m = MessageParser::default().parse(&raw[..]).unwrap();
+        assert!(
+            m.content_type()
+                .is_some_and(|c| c.subtype() == Some("alternative"))
+        );
+        assert!(m.body_html(0).unwrap().contains("<b>there</b>"));
+        assert_eq!(
+            m.body_text(0).unwrap().replace("\r\n", "\n").trim_end(),
+            out.body.trim_end()
+        );
+        // With an attachment the alternative sits inside the mixed part.
+        let att = OutgoingAttachment {
+            filename: "plan.pdf".into(),
+            mime_type: "application/pdf".into(),
+            size: 4,
+            source: AttachmentSource::Held(std::sync::Arc::new(vec![1, 2, 3, 4])),
+        };
+        out.attachments = vec![att.clone()];
+        let raw = build_draft(
+            &out,
+            &[(att, vec![1, 2, 3, 4])],
+            now(),
+            "<x@eloquawk.local>",
+        )
+        .unwrap();
+        let m = MessageParser::default().parse(&raw[..]).unwrap();
+        assert!(
+            m.content_type()
+                .is_some_and(|c| c.subtype() == Some("mixed"))
+        );
+        assert!(m.body_html(0).unwrap().contains("<b>there</b>"));
+        assert_eq!(m.attachments().count(), 1);
     }
 
     #[test]

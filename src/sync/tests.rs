@@ -1332,6 +1332,7 @@ fn outgoing(account: &str, thread_id: Option<&str>) -> Outgoing {
         thread_id: thread_id.map(str::to_string),
         in_reply_to: Some("<m2@mail.example>".into()),
         references: vec!["<m2@mail.example>".into()],
+        html: None,
         attachments: vec![],
     }
 }
@@ -1424,6 +1425,55 @@ fn drafts_are_saved_updated_deleted_and_read_back() {
         ]
         .map(|(m, p)| (m.to_string(), p.to_string()))
     );
+}
+
+#[test]
+fn a_draft_with_html_and_an_attachment_is_read_back_whole() {
+    let draft = r#"{"id":"r1","message":{"id":"m9","threadId":"t9"}}"#;
+    // "<p>Hi <b>you</b></p>" and "PDF!" in base64url.
+    let message = r#"{"id":"m9","threadId":"t9","labelIds":["DRAFT"],"payload":{"mimeType":"multipart/mixed",
+        "headers":[{"name":"From","value":"Me <me@example.com>"},{"name":"To","value":"zoe@example.org"},
+        {"name":"Subject","value":"Plans"}],
+        "parts":[
+          {"partId":"0","mimeType":"text/html","filename":"","body":{"size":20,"data":"PHA-SGkgPGI-eW91PC9iPjwvcD4"}},
+          {"partId":"1","mimeType":"application/pdf","filename":"plan.pdf","body":{"size":4,"data":"UERGIQ"}}
+        ]}}"#;
+    let server = FakeServer::start(vec![
+        Reply::json(200, TOKEN).for_path("/token").sticky(),
+        Reply::json(200, &format!(r#"{{"drafts":[{draft}]}}"#)).for_path("/gmail/drafts"),
+        // Read once for the draft and once more for the attachment's bytes.
+        Reply::json(200, message).for_path("/gmail/messages/m9"),
+        Reply::json(200, message).for_path("/gmail/messages/m9"),
+    ]);
+    let (mut w, rx) = worker(Secrets::memory(), fake_endpoints(&server));
+    signed_in(&mut w, "me@example.com", "rt");
+    w.draft(DraftWork::Load {
+        op: 1,
+        account: "me@example.com".into(),
+        thread_id: "t9".into(),
+    });
+    let events = drain(&rx);
+    let (id, back) = events
+        .iter()
+        .find_map(|e| match e {
+            SyncEvent::DraftLoaded { op: 1, result } => Some(result.clone()),
+            _ => None,
+        })
+        .expect("the draft is read back")
+        .unwrap();
+    assert_eq!(id, "r1");
+    assert!(
+        back.html
+            .as_deref()
+            .is_some_and(|h| h.contains("<b>you</b>"))
+    );
+    assert_eq!(back.attachments.len(), 1);
+    assert_eq!(back.attachments[0].filename, "plan.pdf");
+    match &back.attachments[0].source {
+        AttachmentSource::Held(bytes) => assert_eq!(&bytes[..], b"PDF!"),
+        other => panic!("held in memory, not {other:?}"),
+    }
+    drop(server.finish());
 }
 
 fn history_page(json: &str) -> gmail::HistoryList {

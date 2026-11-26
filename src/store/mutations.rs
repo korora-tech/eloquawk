@@ -340,6 +340,18 @@ impl Store {
         });
     }
 
+    /// The message of save `op` was discarded while the save was still running. The store, not
+    /// the window (which may be gone), deletes the draft once the save lands: deleting now
+    /// would let the save create it again. `known` is the draft's id before the save, deleted
+    /// if the save fails.
+    pub fn discard_after_save(&mut self, op: OpId, account: &str, known: Option<String>) {
+        if matches!(self.drafts.get(&op), Some(DraftOp::Saving)) {
+            self.discard_saves.insert(op, (account.to_string(), known));
+        } else if let Some(id) = known {
+            self.delete_draft(account, &id);
+        }
+    }
+
     /// Reads the draft in conversation `thread_id` for editing; the outcome is read with
     /// [`Store::draft_op`].
     pub fn load_draft(&mut self, account: &str, thread_id: &str) -> OpId {
