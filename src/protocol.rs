@@ -74,6 +74,12 @@ pub enum Command {
         thread_ids: Vec<String>,
         restore: LabelDelta,
     },
+    /// Dismisses nudges: each thread id with the date (ms) of its newest message. The worker
+    /// keeps them encrypted and answers with `NudgeDismissals`.
+    DismissNudges {
+        account: AccountId,
+        entries: Vec<(String, i64)>,
+    },
     Send {
         op: OpId,
         outgoing: Outgoing,
@@ -158,6 +164,11 @@ pub enum SyncEvent {
     Problem(Option<String>),
     /// A one-off message for the toast.
     Notice(String),
+    /// All of an account's dismissed nudges, as the worker holds them.
+    NudgeDismissals {
+        account: AccountId,
+        dismissed: crate::nudges::Dismissed,
+    },
     /// An attachment was saved at `path` (M12): the toast names it and offers "Open folder".
     Saved(PathBuf),
     /// The full list: replaces the account's labels.
@@ -238,6 +249,9 @@ impl fmt::Debug for SyncEvent {
             SyncEvent::Problem(p) => write!(f, "Problem({})", p.is_some()),
             SyncEvent::Notice(_) => f.write_str("Notice"),
             SyncEvent::Saved(_) => f.write_str("Saved"),
+            SyncEvent::NudgeDismissals { dismissed, .. } => {
+                write!(f, "NudgeDismissals({})", dismissed.len())
+            }
             SyncEvent::Labels { labels, .. } => write!(f, "Labels({})", labels.len()),
             SyncEvent::SendAs { aliases, .. } => write!(f, "SendAs({})", aliases.len()),
             SyncEvent::LabelCounts { labels, .. } => write!(f, "LabelCounts({})", labels.len()),
@@ -307,6 +321,7 @@ mod tests {
             message_count: 1,
             label_ids: BTreeSet::new(),
             has_attachments: false,
+            last: None,
         };
         let events = [
             SyncEvent::ThreadsUpdated(vec![summary.clone()]),

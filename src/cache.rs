@@ -21,7 +21,9 @@ use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 use serde::{Deserialize, Serialize};
 use sha2::Digest as _;
 
-use crate::model::{AccountId, Address, Label, LabelKind, ThreadKey, ThreadSummary, ViewKind};
+use crate::model::{
+    AccountId, Address, Label, LabelKind, LastMessage, ThreadKey, ThreadSummary, ViewKind,
+};
 
 /// Bumped whenever the plaintext shape changes; older files then read as no cache.
 const MAGIC: &[u8; 8] = b"ELQCACH1";
@@ -158,7 +160,9 @@ pub fn remove(dir: &Path, account: &str) -> std::io::Result<()> {
         _ => Ok(()),
     };
     let threads = crate::thread_cache::remove_account(dir, account);
-    snapshot.and(threads)
+    snapshot
+        .and(threads)
+        .and(crate::dismissals::remove(dir, account))
 }
 
 pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
@@ -214,6 +218,10 @@ struct FileThread {
     message_count: u32,
     label_ids: BTreeSet<String>,
     has_attachments: bool,
+    /// Absent in files written before nudges: the sender's name and address, and whether the
+    /// account owner sent the newest message.
+    #[serde(default)]
+    last: Option<(Option<String>, String, bool)>,
 }
 
 impl File {
@@ -241,7 +249,7 @@ impl File {
                     let view = match kind {
                         ViewKind::Label(id) => FileView::Label(id.clone()),
                         ViewKind::AllMail => FileView::AllMail,
-                        ViewKind::Search(_) => return None,
+                        ViewKind::Search(_) | ViewKind::Nudges => return None,
                     };
                     Some((view, ids.clone()))
                 })
@@ -266,6 +274,10 @@ impl File {
                         message_count: s.message_count,
                         label_ids: s.label_ids.clone(),
                         has_attachments: s.has_attachments,
+                        last: s
+                            .last
+                            .as_ref()
+                            .map(|l| (l.sender.name.clone(), l.sender.email.clone(), l.from_me)),
                     }
                 })
                 .collect(),
@@ -326,6 +338,10 @@ impl File {
                             message_count: t.message_count,
                             label_ids: t.label_ids,
                             has_attachments: t.has_attachments,
+                            last: t.last.map(|(name, email, from_me)| LastMessage {
+                                sender: Address { name, email },
+                                from_me,
+                            }),
                         },
                     })
                 })
@@ -377,6 +393,10 @@ mod tests {
                     message_count: 2,
                     label_ids: BTreeSet::from(["INBOX".to_string(), "UNREAD".to_string()]),
                     has_attachments: true,
+                    last: Some(LastMessage {
+                        sender: Address::new(Some("Alice"), "alice@example.com"),
+                        from_me: false,
+                    }),
                 },
             }],
         }

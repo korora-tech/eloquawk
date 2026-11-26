@@ -55,6 +55,9 @@ pub enum ViewKind {
     Label(String),
     AllMail,
     Search(String),
+    /// Mail Gmail would nudge about, found with a search and then narrowed by
+    /// [`crate::nudges`]. Never cached, like a search.
+    Nudges,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -141,6 +144,17 @@ pub struct ThreadSummary {
     pub message_count: u32,
     pub label_ids: BTreeSet<String>,
     pub has_attachments: bool,
+    /// The newest message's sender; `None` when unknown (a summary cached before this was
+    /// kept), which never counts as a nudge.
+    pub last: Option<LastMessage>,
+}
+
+/// Who sent a thread's newest message, for nudge detection.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LastMessage {
+    pub sender: Address,
+    /// The message carries the `SENT` label: the account owner wrote it.
+    pub from_me: bool,
 }
 
 impl ThreadSummary {
@@ -598,6 +612,7 @@ mod tests {
             message_count: 1,
             label_ids: ["UNREAD", "STARRED"].map(String::from).into(),
             has_attachments: false,
+            last: None,
         };
         assert!(s.unread() && s.starred() && !s.in_label("INBOX"));
     }

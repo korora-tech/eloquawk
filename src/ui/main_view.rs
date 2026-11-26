@@ -27,10 +27,10 @@ use super::theme::{self, CONTROL_H, HEADER_H, ICON_SLOT, LIST_W, SIDEBAR_W, pale
 use super::widgets::{ButtonStyle, button, ghost_button};
 use super::{
     ApplySuggestion1, ApplySuggestion2, ApplySuggestion3, Archive, BackToList, CancelSearch,
-    CloseSearch, CloseWindow, CollapseAll, Compose, DismissTriage, ExpandAll, FocusSearch, Forward,
-    GoAllMail, GoDrafts, GoInbox, GoSent, GoStarred, MarkRead, MarkUnread, NextAccount,
-    NextMessage, NextThread, OpenCommandPalette, OpenLabelPicker, OpenSettings, OpenThread,
-    PrevAccount, PrevMessage, PrevThread, Quit, Refresh, Reply, ReplyAll, ReportSpam,
+    CloseSearch, CloseWindow, CollapseAll, Compose, DismissNudge, DismissTriage, ExpandAll,
+    FocusSearch, Forward, GoAllMail, GoDrafts, GoInbox, GoSent, GoStarred, MarkRead, MarkUnread,
+    NextAccount, NextMessage, NextThread, OpenCommandPalette, OpenLabelPicker, OpenSettings,
+    OpenThread, PrevAccount, PrevMessage, PrevThread, Quit, Refresh, Reply, ReplyAll, ReportSpam,
     ScrollReaderDown, ScrollReaderUp, ToggleHelp, ToggleSelect, ToggleSidebar, ToggleStar, Trash,
     Undo,
 };
@@ -359,6 +359,7 @@ impl MainView {
             PaletteCommand::Drafts => self.go_label(labels::DRAFT, window, cx),
             PaletteCommand::AllMail => self.go(ViewKind::AllMail, window, cx),
             PaletteCommand::Archive => self.archive(&Archive, window, cx),
+            PaletteCommand::DismissNudge => self.dismiss_nudge(&DismissNudge, window, cx),
             PaletteCommand::Trash => self.trash(&Trash, window, cx),
             PaletteCommand::Star => self.toggle_star(&ToggleStar, window, cx),
             PaletteCommand::MarkRead => self.mark_read(&MarkRead, window, cx),
@@ -538,6 +539,16 @@ impl MainView {
 
     fn archive(&mut self, _: &Archive, _: &mut Window, cx: &mut Context<Self>) {
         self.mutate(Store::archive_kind, cx);
+    }
+
+    /// `d`: dismisses the targets' nudges; says so when there is nothing to dismiss.
+    fn dismiss_nudge(&mut self, _: &DismissNudge, _: &mut Window, cx: &mut Context<Self>) {
+        self.store.update(cx, |s, cx| {
+            if s.dismiss_nudges() == 0 {
+                s.inform("That conversation is not a nudge");
+            }
+            cx.notify();
+        });
     }
 
     fn trash(&mut self, _: &Trash, _: &mut Window, cx: &mut Context<Self>) {
@@ -800,6 +811,7 @@ impl MainView {
                     Some(ViewKind::Label(id)) => id.clone(),
                     Some(ViewKind::AllMail) => "ALL_MAIL".into(),
                     Some(ViewKind::Search(_)) => "search".into(),
+                    Some(ViewKind::Nudges) => "NUDGES".into(),
                     None => "none".into(),
                 };
                 (actual == *want, actual)
@@ -1349,6 +1361,7 @@ impl Render for MainView {
                             .on_action(cx.listener(unless_help(Self::scroll_up)))
                             .on_action(cx.listener(unless_help(Self::toggle_select)))
                             .on_action(cx.listener(unless_help(Self::archive)))
+                            .on_action(cx.listener(unless_help(Self::dismiss_nudge)))
                             .on_action(cx.listener(unless_help(Self::trash)))
                             .on_action(cx.listener(unless_help(Self::toggle_star)))
                             .on_action(cx.listener(unless_help(Self::mark_read)))

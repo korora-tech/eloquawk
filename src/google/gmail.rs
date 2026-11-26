@@ -745,6 +745,7 @@ pub fn threads_query(
         }
         ViewKind::AllMail => {}
         ViewKind::Search(text) => q.push(("q", text.clone())),
+        ViewKind::Nudges => q.push(("q", crate::nudges::QUERY.to_string())),
     }
     q.push(("maxResults", max.to_string()));
     if let Some(t) = page_token {
@@ -946,6 +947,9 @@ mod tests {
         let search = threads_query(&ViewKind::Search("from:bob".into()), None, 50);
         assert!(has(&search, "q", "from:bob"));
         assert!(!search.iter().any(|(k, _)| *k == "labelIds"));
+        let nudges = threads_query(&ViewKind::Nudges, None, 50);
+        assert!(has(&nudges, "q", crate::nudges::QUERY));
+        assert!(!nudges.iter().any(|(k, _)| *k == "labelIds"));
     }
 
     #[test]

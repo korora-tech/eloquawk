@@ -42,6 +42,8 @@ pub(super) struct AccountState {
     /// This session resumed from a saved cursor: the first round finds what changed while the
     /// app was closed, which is not new mail, and then refreshes the label list.
     pub(super) resumed: bool,
+    /// Dismissed nudges, as sealed on disk (`dismissals.rs`).
+    pub(super) dismissed: Dismissed,
 }
 
 impl AccountState {
@@ -64,6 +66,7 @@ impl AccountState {
             listed: HashMap::new(),
             dirty: false,
             resumed: false,
+            dismissed: Dismissed::new(),
         }
     }
 
@@ -104,7 +107,13 @@ impl AccountState {
         if !self.known.is_empty() || !self.labels.is_empty() {
             return false;
         }
-        for t in snapshot.threads {
+        // A summary cached before the newest sender was kept cannot be judged for nudges; it
+        // is left out so the next listing fetches it again.
+        for t in snapshot
+            .threads
+            .into_iter()
+            .filter(|t| t.summary.last.is_some())
+        {
             self.known.insert(
                 t.summary.key.id.clone(),
                 Known {

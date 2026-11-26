@@ -69,6 +69,7 @@ struct Demo {
     want: Option<ViewKey>,
     next_history: u64,
     next_sent: u64,
+    dismissed: HashMap<AccountId, crate::nudges::Dismissed>,
 }
 
 impl Demo {
@@ -89,6 +90,7 @@ impl Demo {
             want: None,
             next_history,
             next_sent: 1,
+            dismissed: HashMap::new(),
         }
     }
 
@@ -169,6 +171,12 @@ impl Demo {
                 } else if self.has_more.get(&view).copied().unwrap_or(false) {
                     self.page(&view, PageMode::Append);
                 }
+            }
+            Command::DismissNudges { account, entries } => {
+                let dismissed = self.dismissed.entry(account.clone()).or_default();
+                dismissed.extend(entries);
+                let dismissed = dismissed.clone();
+                self.emit(SyncEvent::NudgeDismissals { account, dismissed });
             }
             Command::OpenThread(key) => match self.threads.get(&key) {
                 Some((_, detail)) => self.emit(SyncEvent::ThreadDetail(detail.clone())),
@@ -258,6 +266,10 @@ impl Demo {
                         }
                         ViewKind::Label(id) => s.in_label(id) && !hidden(s),
                         ViewKind::AllMail => !hidden(s),
+                        // The store narrows this to the real nudges.
+                        ViewKind::Nudges => {
+                            (s.in_label(labels::INBOX) || s.in_label(labels::SENT)) && !hidden(s)
+                        }
                         ViewKind::Search(_) => query
                             .as_ref()
                             .is_some_and(|q| q.matches(s, Some(d), &all_labels, &now)),

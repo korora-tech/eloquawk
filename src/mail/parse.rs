@@ -12,8 +12,8 @@ use jiff::Timestamp;
 
 use crate::google::gmail::{Header, LabelDto, MessageDto, PartDto, ThreadDto};
 use crate::model::{
-    AccountId, Address, Attachment, BodySource, Label, LabelKind, Message, ThreadDetail, ThreadKey,
-    ThreadSummary, labels,
+    AccountId, Address, Attachment, BodySource, Label, LabelKind, LastMessage, Message,
+    ThreadDetail, ThreadKey, ThreadSummary, labels,
 };
 
 use super::address::{parse_address, parse_list, participants};
@@ -275,6 +275,15 @@ fn label_union(dto: &ThreadDto) -> BTreeSet<String> {
         .collect()
 }
 
+/// The newest message's sender and whether the account owner sent it.
+fn last_message(m: &MessageDto) -> Option<LastMessage> {
+    let from = header(&m.payload.as_ref()?.headers, "From")?;
+    Some(LastMessage {
+        sender: parse_address(from)?,
+        from_me: m.label_ids.iter().any(|l| l == labels::SENT),
+    })
+}
+
 /// Builds the list-row summary of a thread from `format=metadata` (or `full`). `None` when the
 /// thread has no messages.
 ///
@@ -325,6 +334,7 @@ pub fn thread_summary(account: &AccountId, dto: &ThreadDto) -> Option<ThreadSumm
         message_count: u32::try_from(dto.messages.len()).unwrap_or(u32::MAX),
         label_ids: label_union(dto),
         has_attachments,
+        last: last_message(last),
     })
 }
 
@@ -775,6 +785,22 @@ mod tests {
         );
         // multipart/mixed payload in metadata format.
         assert!(s.has_attachments);
+        // The newest message is Bob's, not the account owner's.
+        let last = s.last.unwrap();
+        assert_eq!(last.sender.email, "bob@example.net");
+        assert!(!last.from_me);
+    }
+
+    #[test]
+    fn last_message_is_the_owners_when_it_carries_sent() {
+        let mut dto: ThreadDto = serde_json::from_str(fixtures::THREAD_META).unwrap();
+        dto.messages
+            .last_mut()
+            .unwrap()
+            .label_ids
+            .push("SENT".into());
+        let s = thread_summary(&"you@example.com".to_string(), &dto).unwrap();
+        assert!(s.last.unwrap().from_me);
     }
 
     #[test]

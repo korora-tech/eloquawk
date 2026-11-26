@@ -389,6 +389,7 @@ mod tests {
             message_count: 1,
             label_ids: label_ids.iter().map(|s| s.to_string()).collect(),
             has_attachments: false,
+            last: None,
         }
     }
 

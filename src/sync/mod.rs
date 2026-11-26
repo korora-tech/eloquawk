@@ -36,6 +36,7 @@ use jiff::Timestamp;
 
 use crate::cache::{CachedThread, MailCache, Snapshot};
 use crate::config::Prefs;
+use crate::dismissals::DismissalStore;
 use crate::google::api::{self, ApiError, Endpoints};
 use crate::google::gmail;
 use crate::google::oauth::{self, AuthError, ClientCredentials, TokenResponse};
@@ -45,6 +46,7 @@ use crate::model::{
     MAX_OUTGOING_ATTACHMENTS, Outgoing, OutgoingAttachment, SendAs, ThreadKey, ThreadSummary,
     ViewKey, ViewKind, labels,
 };
+use crate::nudges::Dismissed;
 use crate::protocol::{AuthState, Command, OpId, PageMode, SendError, SyncEvent, SyncHandle};
 use crate::secrets::{SecretError, Secrets};
 use crate::thread_cache::{self, ThreadCache};

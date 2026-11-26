@@ -42,6 +42,7 @@ fn summary(n: usize, labels: &[&str]) -> ThreadSummary {
         message_count: 1,
         label_ids: labels.iter().map(|s| s.to_string()).collect(),
         has_attachments: false,
+        last: None,
     }
 }
 
@@ -1364,6 +1365,7 @@ fn labels_for_orders_and_nests() {
         names,
         [
             ("Inbox", 0, Some(2)),
+            ("Nudges", 0, None),
             ("Starred", 0, None),
             ("Important", 0, None),
             ("Sent", 0, None),
@@ -2408,7 +2410,14 @@ fn demo_end_to_end() {
     assert_eq!(s.accounts.len(), 2);
     assert!(s.unread_badge(ME, "INBOX").is_some_and(|n| n > 0));
     assert_eq!(s.view, Some(inbox.clone()));
-    assert_eq!(s.visible_rows().len(), page_size);
+    // The inbox leaves nudges (old unanswered mail) to their own list.
+    assert_eq!(s.lists[&inbox].ids.len(), page_size);
+    let nudges = s.lists[&inbox]
+        .ids
+        .iter()
+        .filter(|id| s.nudge_of(&s.threads[&key(id)]).is_some())
+        .count();
+    assert_eq!(s.visible_rows().len(), page_size - nudges);
     assert!(s.lists[&inbox].has_more);
 
     // Open the cursor row: a detail arrives and the thread is marked read.

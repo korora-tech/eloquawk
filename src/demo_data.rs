@@ -14,8 +14,8 @@ use crate::google::gmail::Header;
 use crate::mail::rich::{RichDoc, sanitise};
 use crate::mail::{address, auth, html};
 use crate::model::{
-    AccountId, Address, Attachment, BodySource, Label, LabelKind, Message, MessageSignals,
-    ThreadDetail, ThreadKey, ThreadSummary, labels,
+    AccountId, Address, Attachment, BodySource, Label, LabelKind, LastMessage, Message,
+    MessageSignals, ThreadDetail, ThreadKey, ThreadSummary, labels,
 };
 
 pub const PERSONAL: &str = "you@example.com";
@@ -268,6 +268,10 @@ pub fn summary_of(detail: &ThreadDetail, history_id: u64) -> ThreadSummary {
         message_count: detail.messages.len() as u32,
         label_ids,
         has_attachments: detail.messages.iter().any(|m| !m.attachments.is_empty()),
+        last: detail.messages.last().map(|m| LastMessage {
+            sender: m.from.clone(),
+            from_me: m.label_ids.contains(labels::SENT),
+        }),
     }
 }
 

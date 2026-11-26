@@ -19,6 +19,7 @@ use super::triage;
 use super::widgets::{checkbox, ghost_button};
 use crate::ai::jev::Verdict;
 use crate::model::{LabelDelta, ThreadSummary, ViewKind};
+use crate::nudges::{self, Nudge};
 use crate::store::{MutationKind, Row, Store};
 
 /// Rows from the end at which the next page is requested.
@@ -31,6 +32,7 @@ fn view_title(store: &Store) -> String {
     };
     match &view.kind {
         ViewKind::AllMail => "All Mail".into(),
+        ViewKind::Nudges => "Nudges".into(),
         ViewKind::Search(q) => format!("Search results for \u{201c}{q}\u{201d}"),
         ViewKind::Label(id) => store
             .labels
@@ -206,6 +208,7 @@ impl MainView {
     fn render_rows(&mut self, range: Range<usize>, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let p = palette(cx);
         let now = ZonedDateTime::now();
+        let now_ts = now.timestamp();
         let store = self.store.read(cx);
         let rows = store.visible_rows();
         // Near the end of what is loaded: ask for more (the store sends it once).
@@ -225,6 +228,17 @@ impl MainView {
                         cursor: cursor.as_ref() == Some(&s.key),
                         selected: store.selected.contains(&s.key),
                         verdict: store.ai_badge_verdict(&s.key),
+                        nudge: store
+                            .viewing_nudges()
+                            .then(|| store.nudge_of(s))
+                            .flatten()
+                            .map(|n| {
+                                let what = match n {
+                                    Nudge::Reply => "Reply",
+                                    Nudge::FollowUp => "Follow up",
+                                };
+                                format!("{what} \u{b7} {}", nudges::age_text(s, now_ts))
+                            }),
                     };
                     self.thread_row(p, ix, s, label, state, &now, clock, cx)
                 }
@@ -278,6 +292,15 @@ impl MainView {
             let key = star_key.clone();
             this.store.update(cx, |st, cx| {
                 st.mutate_threads(vec![key], MutationKind::Labels(delta));
+                cx.notify();
+            });
+        });
+        let dismiss_key = s.key.clone();
+        let dismiss = cx.listener(move |this, _: &ClickEvent, _, cx| {
+            cx.stop_propagation();
+            let key = dismiss_key.clone();
+            this.store.update(cx, |st, cx| {
+                st.dismiss_nudge_of(key);
                 cx.notify();
             });
         });
@@ -399,7 +422,9 @@ impl MainView {
                                         FontWeight::NORMAL
                                     })
                                     .text_color(rgb(if unread { p.accent_text } else { p.caption }))
-                                    .child(format::list_date(s.last_date, now, clock_24h)),
+                                    .child(state.nudge.clone().unwrap_or_else(|| {
+                                        format::list_date(s.last_date, now, clock_24h)
+                                    })),
                             ),
                     )
                     .child(
@@ -424,6 +449,21 @@ impl MainView {
                                 triage::badge(p, v.level, v.kind, row_bg)
                             }))
                             .when(s.has_attachments, |d| d.child(attachment_mark(p)))
+                            .when(state.nudge.is_some(), |d| {
+                                d.child(
+                                    div()
+                                        .id(("dismiss-nudge", ix))
+                                        .flex_shrink_0()
+                                        .px(px(6.0))
+                                        .rounded(px(4.0))
+                                        .text_size(px(12.0))
+                                        .line_height(px(20.0))
+                                        .text_color(rgb(p.muted))
+                                        .hover(|h| h.opacity(0.75))
+                                        .on_click(dismiss)
+                                        .child("Dismiss"),
+                                )
+                            })
                             .child(
                                 div()
                                     .id(("star", ix))
@@ -444,12 +484,14 @@ impl MainView {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct RowState {
     cursor: bool,
     selected: bool,
     /// The AI verdict behind the row's badge, when it has one.
     verdict: Option<Verdict>,
+    /// "Reply · 5 days ago": what the row is a nudge for, in the Nudges view only.
+    nudge: Option<String>,
 }
 
 /// A paper clip drawn with divs (the UI font has no clip glyph and emoji are not used): the

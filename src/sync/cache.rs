@@ -11,6 +11,7 @@ impl Worker {
             match self.secrets.cache_key() {
                 Ok(key) => {
                     self.threads = Some(ThreadCache::new(dir.clone(), &key));
+                    self.dismissals = Some(DismissalStore::new(dir.clone(), &key));
                     self.cache = Some(MailCache::new(dir, &key));
                 }
                 Err(e) => {
@@ -27,6 +28,7 @@ impl Worker {
     /// so only changed threads are fetched.
     pub(super) fn restore(&mut self, email: &str) {
         let Some(snapshot) = self.open_cache().and_then(|c| c.load(email)) else {
+            self.restore_dismissals(email);
             return;
         };
         let Some(account) = self.accounts.get_mut(email) else {
@@ -35,6 +37,10 @@ impl Worker {
         if !account.restore(snapshot) {
             return;
         }
+        self.restore_dismissals(email);
+        let Some(account) = self.accounts.get_mut(email) else {
+            return;
+        };
         let labels: Vec<Label> = account.labels.values().cloned().collect();
         let mut pages = Vec::new();
         for (kind, ids) in &account.listed {
@@ -66,6 +72,54 @@ impl Worker {
                 has_more: false,
             });
         }
+    }
+
+    /// Loads an account's dismissed nudges and tells the store.
+    fn restore_dismissals(&mut self, email: &str) {
+        if self.open_cache().is_none() {
+            return;
+        }
+        let dismissed = self.dismissals.as_ref().map(|d| d.load(email));
+        let Some(dismissed) = dismissed.filter(|d| !d.is_empty()) else {
+            return;
+        };
+        self.emit(SyncEvent::NudgeDismissals {
+            account: email.to_string(),
+            dismissed: dismissed.clone(),
+        });
+        if let Some(account) = self.accounts.get_mut(email) {
+            account.dismissed = dismissed;
+        }
+    }
+
+    /// Records dismissed nudges, keeps them sealed on disk and reports them.
+    pub(super) fn dismiss_nudges(&mut self, email: &str, entries: Vec<(String, i64)>) {
+        // Read what is on disk first, so a dismissal never overwrites an unread file.
+        if self
+            .accounts
+            .get(email)
+            .is_some_and(|a| a.dismissed.is_empty())
+        {
+            self.restore_dismissals(email);
+        }
+        let Some(account) = self.accounts.get_mut(email) else {
+            return;
+        };
+        account.dismissed.extend(entries);
+        let dismissed = account.dismissed.clone();
+        if self.open_cache().is_some()
+            && let Some(store) = &self.dismissals
+            && let Err(e) = store.save(email, &dismissed, Timestamp::now().as_millisecond())
+        {
+            eprintln!(
+                "eloquawk: could not write the dismissed nudges: {}",
+                e.kind()
+            );
+        }
+        self.emit(SyncEvent::NudgeDismissals {
+            account: email.to_string(),
+            dismissed,
+        });
     }
 
     /// Writes every changed account's snapshot.

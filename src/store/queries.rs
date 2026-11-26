@@ -6,8 +6,7 @@ impl Store {
     pub(super) fn current_ids(&self) -> Vec<String> {
         self.view
             .as_ref()
-            .and_then(|v| self.lists.get(v))
-            .map(|l| l.ids.clone())
+            .map(|v| self.shown_ids(v))
             .unwrap_or_default()
     }
 
@@ -21,11 +20,8 @@ impl Store {
         let Some(view) = &self.view else {
             return Vec::new();
         };
-        let Some(list) = self.lists.get(view) else {
-            return Vec::new();
-        };
-        list.ids
-            .iter()
+        let ids = self.shown_ids(view);
+        ids.into_iter()
             .map(|id| {
                 let key = ThreadKey::new(view.account.as_str(), id.as_str());
                 match self.threads.get(&key) {
@@ -58,6 +54,15 @@ impl Store {
                 count: self.unread_badge(account, id),
                 color: None,
             });
+            if *id == labels::INBOX {
+                out.push(SidebarEntry {
+                    view: ViewKind::Nudges,
+                    name: "Nudges".into(),
+                    depth: 0,
+                    count: Some(self.nudge_count(account)).filter(|n| *n > 0),
+                    color: None,
+                });
+            }
         }
         let mut user: Vec<&Label> = all
             .iter()
@@ -112,11 +117,7 @@ impl Store {
         if cursor.account != view.account {
             return None;
         }
-        self.lists
-            .get(view)?
-            .ids
-            .iter()
-            .position(|id| *id == cursor.id)
+        self.shown_ids(view).iter().position(|id| *id == cursor.id)
     }
 
     /// The sender label for a thread row, with the thread's account as "me".

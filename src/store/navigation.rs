@@ -8,16 +8,15 @@ impl Store {
     pub fn set_view(&mut self, view: ViewKey) {
         self.selected.clear();
         self.open = None;
-        let list = self.lists.entry(view.clone()).or_default();
-        list.loading = true;
-        self.cursor = list
-            .ids
+        self.lists.entry(view.clone()).or_default().loading = true;
+        self.cursor = self
+            .shown_ids(&view)
             .first()
             .map(|id| ThreadKey::new(view.account.as_str(), id.as_str()));
         let remembered = match &view.kind {
             ViewKind::Label(id) => Some(id.clone()),
             ViewKind::AllMail => Some(ALL_MAIL_ID.to_string()),
-            ViewKind::Search(_) => None,
+            ViewKind::Search(_) | ViewKind::Nudges => None,
         };
         if let Some(id) = remembered {
             let last = Some((view.account.clone(), id));
