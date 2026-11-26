@@ -310,10 +310,23 @@ impl Store {
             }
             SyncEvent::MutationFinished { op, error } => self.on_mutation_finished(op, error),
             SyncEvent::DraftSaved { op, draft_id } => {
-                self.drafts.insert(op, DraftOp::Saved(draft_id));
+                if let Some((account, _)) = self.discard_saves.remove(&op) {
+                    // Discarded while saving: the save made (or kept) a draft nobody wants.
+                    self.drafts.remove(&op);
+                    self.delete_draft(&account, &draft_id);
+                } else {
+                    self.drafts.insert(op, DraftOp::Saved(draft_id));
+                }
             }
             SyncEvent::DraftFailed { op, message } => {
-                self.drafts.insert(op, DraftOp::Failed(message));
+                if let Some((account, known)) = self.discard_saves.remove(&op) {
+                    self.drafts.remove(&op);
+                    if let Some(id) = known {
+                        self.delete_draft(&account, &id);
+                    }
+                } else {
+                    self.drafts.insert(op, DraftOp::Failed(message));
+                }
             }
             SyncEvent::DraftLoaded { op, result } => {
                 self.drafts.insert(op, DraftOp::Loaded(result));

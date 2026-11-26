@@ -158,6 +158,16 @@ fn join_text_parts(texts: &[String]) -> String {
         .join("\n\n")
 }
 
+/// The raw HTML part of a message, when it has one with its text in the payload. Only for a
+/// draft opened for editing, which sends it back as it was; reading goes through the
+/// sanitiser in [`parse_message`].
+pub fn html_source(dto: &MessageDto) -> Option<String> {
+    let empty = PartDto::default();
+    let mut found = Walk::default();
+    walk(dto.payload.as_ref().unwrap_or(&empty), &mut found);
+    part_text(found.html?).filter(|h| !h.trim().is_empty())
+}
+
 /// Converts a Gmail message (`format=full` or `metadata`) into a [`Message`]. HTML is preferred
 /// over the plain alternative and goes through `html_to_text` and `sanitise`; plain text is the
 /// fallback when there is no HTML or it will not convert.

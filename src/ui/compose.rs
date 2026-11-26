@@ -54,6 +54,7 @@ pub fn blank(account: &AccountId) -> Outgoing {
         thread_id: None,
         in_reply_to: None,
         references: Vec::new(),
+        html: None,
         attachments: Vec::new(),
     }
 }
@@ -197,6 +198,12 @@ pub struct ComposeView {
     draft_id: Option<String>,
     /// A draft save in flight.
     saving: Option<OpId>,
+    /// The account the save in flight belongs to.
+    saving_account: AccountId,
+    /// The HTML of the draft this window opened, sent back unchanged while the body is still
+    /// `html_text`; editing the body leaves plain text.
+    html: Option<String>,
+    html_text: String,
     /// What the draft on Gmail holds, to tell whether there is anything new to save.
     saved: Snapshot,
     /// The snapshot the save in flight carries.
@@ -295,6 +302,9 @@ impl ComposeView {
             sending: Sending::Editing,
             draft_id,
             saving: None,
+            saving_account: prefill.account.clone(),
+            html: prefill.html,
+            html_text: String::new(),
             saved: Snapshot::default(),
             saved_pending: None,
             draft_error: None,
@@ -317,6 +327,7 @@ impl ComposeView {
             },
             _subscriptions: subscriptions,
         };
+        this.html_text = this.body.read(cx).text().to_string();
         this.baseline = this.snapshot(cx);
         this.saved = this.baseline.clone();
         this.validate(cx);
@@ -424,6 +435,10 @@ impl ComposeView {
             bcc: parse_list(self.bcc.read(cx).text()),
             subject: self.subject.read(cx).text().to_string(),
             body: self.body.read(cx).text().to_string(),
+            html: self
+                .html
+                .clone()
+                .filter(|_| self.body.read(cx).text() == self.html_text),
             thread_id: self
                 .thread_id
                 .clone()
@@ -529,6 +544,7 @@ impl ComposeView {
         }
         let out = self.outgoing(cx);
         let draft_id = self.draft_id.clone();
+        self.saving_account = self.account.clone();
         self.saving = Some(self.store.update(cx, |s, cx| {
             let op = s.save_draft(out, draft_id);
             cx.notify();
@@ -607,8 +623,16 @@ impl ComposeView {
     /// Deletes Gmail's copy when the message is discarded.
     fn drop_draft(&mut self, cx: &mut Context<Self>) {
         self.autosave_timer = None;
-        if let Some(id) = self.draft_id.take() {
-            let account = self.draft_account.clone();
+        let known = self.draft_id.take();
+        let account = self.draft_account.clone();
+        if let Some(op) = self.saving.take() {
+            // A save is running: it may yet create the draft, or put it back after a delete.
+            // The store deletes it when the save ends, even if this window is gone by then.
+            self.saved_pending = None;
+            self.store.update(cx, |s, _| {
+                s.discard_after_save(op, &self.saving_account, known)
+            });
+        } else if let Some(id) = known {
             self.store.read(cx).delete_draft(&account, &id);
         }
     }
@@ -755,6 +779,7 @@ impl ComposeView {
                 source: AttachmentSource::Local(path),
             });
         }
+        self.schedule_autosave(cx);
         cx.notify();
     }
 
@@ -788,6 +813,7 @@ impl ComposeView {
         if ix < self.attachments.len() {
             self.attachments.remove(ix);
             self.attach_error = None;
+            self.schedule_autosave(cx);
             cx.notify();
         }
     }
@@ -819,7 +845,7 @@ impl ComposeView {
                 )
             }
             Cond::ComposeError(want) => {
-                let actual = self.error_text();
+                let actual = self.error_text(cx);
                 (actual == *want, actual.unwrap_or_else(|| "none".into()))
             }
             Cond::Attached(n) => (
@@ -841,14 +867,26 @@ impl ComposeView {
     }
 
     /// The inline error shown, if any: a failed send, else an attachment problem.
-    fn error_text(&self) -> Option<String> {
+    fn error_text(&self, cx: &App) -> Option<String> {
         match &self.sending {
             Sending::Failed { message, .. } => Some(message.clone()),
-            _ => self.attach_error.clone().or_else(|| {
-                self.draft_error
-                    .as_ref()
-                    .map(|m| format!("Couldn't save the draft: {m}"))
-            }),
+            _ => self
+                .attach_error
+                .clone()
+                .or_else(|| {
+                    self.draft_error
+                        .as_ref()
+                        .map(|m| format!("Couldn't save the draft: {m}"))
+                })
+                .or_else(|| {
+                    // The draft was formatted; the edited text is plain.
+                    (self.html.is_some() && self.html_text != self.body.read(cx).text()).then(
+                        || {
+                            "Formatting from the original draft is dropped once you edit the text."
+                                .to_string()
+                        },
+                    )
+                }),
         }
     }
 
@@ -1074,7 +1112,7 @@ impl Focusable for ComposeView {
 impl Render for ComposeView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
-        let error = self.error_text();
+        let error = self.error_text(cx);
         let show_cc = self.show_cc;
         div()
             .key_context("Compose")

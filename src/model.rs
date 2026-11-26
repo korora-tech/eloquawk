@@ -414,6 +414,9 @@ pub struct Outgoing {
     pub bcc: Vec<Address>,
     pub subject: String,
     pub body: String,
+    /// The HTML alternative of a draft opened for editing, kept while `body` is still the
+    /// text it was read as. The composer drops it once the body is edited.
+    pub html: Option<String>,
     pub thread_id: Option<String>,
     pub in_reply_to: Option<String>,
     pub references: Vec<String>,
@@ -435,10 +438,33 @@ impl fmt::Debug for Outgoing {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub enum AttachmentSource {
     Local(PathBuf),
-    Gmail { message_id: String, part_id: String },
+    Gmail {
+        message_id: String,
+        part_id: String,
+    },
+    /// Bytes already in memory: an attachment of a draft opened for editing. Gmail replaces a
+    /// draft's message on every save, so a reference to the old message would go stale.
+    Held(Arc<Vec<u8>>),
+}
+
+impl fmt::Debug for AttachmentSource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Local(path) => f.debug_tuple("Local").field(path).finish(),
+            Self::Gmail {
+                message_id,
+                part_id,
+            } => f
+                .debug_struct("Gmail")
+                .field("message_id", message_id)
+                .field("part_id", part_id)
+                .finish(),
+            Self::Held(bytes) => write!(f, "Held({} bytes)", bytes.len()),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -507,6 +533,7 @@ mod tests {
             bcc: vec![],
             subject: "Secret subject".into(),
             body: "secret body".into(),
+            html: None,
             thread_id: None,
             in_reply_to: None,
             references: vec![],

@@ -53,6 +53,7 @@ pub fn parse(url: &str, account: &AccountId, from: Address) -> Option<Outgoing> 
         thread_id: None,
         in_reply_to: None,
         references: vec![],
+        html: None,
         attachments: vec![],
     };
     // A fragment is not part of the hfields.

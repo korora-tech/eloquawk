@@ -214,7 +214,8 @@ impl Worker {
     }
 
     /// Finds the draft in conversation `thread_id` and reads it back as a composer prefill.
-    /// A draft with attachments is refused: they would be lost on the next save.
+    /// Its attachments are downloaded into memory and its HTML is kept, so saving again loses
+    /// neither.
     fn load_draft(
         &mut self,
         account: &str,
@@ -250,8 +251,27 @@ impl Worker {
             })
             .map_err(|e| change_message(&e))?;
         let m = parse::parse_message(&dto);
-        if !m.attachments.is_empty() {
-            return Err("Drafts with attachments can't be edited here yet.".into());
+        let html =
+            parse::html_source(&dto).filter(|_| m.body_source == crate::model::BodySource::Html);
+        let mut attachments = Vec::with_capacity(m.attachments.len());
+        let mut budget = MAX_OUTGOING_ATTACHMENTS;
+        for a in &m.attachments {
+            let name = files::sanitise(&a.filename);
+            if a.size > budget {
+                return Err(format!("Couldn't open this draft: {name} is too large."));
+            }
+            let data = self
+                .attachment_base64(account, &m.id, &a.part_id)
+                .map_err(|e| format!("Couldn't open this draft: {}", attachment_message(&e)))?;
+            let bytes = b64::decode(&data)
+                .map_err(|_| format!("Couldn't open this draft: {ATTACHMENT_UNREADABLE}"))?;
+            budget = budget.saturating_sub(bytes.len() as u64);
+            attachments.push(OutgoingAttachment {
+                filename: a.filename.clone(),
+                mime_type: a.mime_type.clone(),
+                size: bytes.len() as u64,
+                source: AttachmentSource::Held(Arc::new(bytes)),
+            });
         }
         let reply = m.in_reply_to.is_some();
         let from = if m.from.email.is_empty() {
@@ -274,10 +294,11 @@ impl Worker {
                 bcc: m.bcc,
                 subject: m.subject,
                 body: m.body,
+                html,
                 thread_id: Some(m.thread_id).filter(|t| !t.is_empty()),
                 in_reply_to: m.in_reply_to,
                 references: m.references,
-                attachments: Vec::new(),
+                attachments,
             }),
         ))
     }

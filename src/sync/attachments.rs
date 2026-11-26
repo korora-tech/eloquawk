@@ -37,6 +37,7 @@ pub(super) fn gather_attachments(
                 ))
             })?,
             AttachmentSource::Local(path) => compose::read_local(path, budget).map_err(refuse)?,
+            AttachmentSource::Held(bytes) => bytes.to_vec(),
         };
         budget = budget
             .checked_sub(bytes.len() as u64)
