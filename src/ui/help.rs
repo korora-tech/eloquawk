@@ -64,6 +64,7 @@ pub const SHORTCUTS: &[Shortcut] = &[
     ),
     row(&["x"], "ToggleSelect", "Mail", "Select conversation"),
     row(&["e"], "Archive", "Mail", "Archive, or Not spam"),
+    row(&["d"], "DismissNudge", "Mail", "Dismiss a nudge"),
     row(&["#"], "Trash", "Mail", "Trash, or Restore"),
     row(&["s"], "ToggleStar", "Mail", "Star or unstar"),
     row(&["shift-i"], "MarkRead", "Mail", "Mark as read"),

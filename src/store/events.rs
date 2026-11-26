@@ -257,6 +257,9 @@ impl Store {
             }
             SyncEvent::Problem(p) => self.problem = p,
             SyncEvent::Notice(text) => self.post_notice(text, None),
+            SyncEvent::NudgeDismissals { account, dismissed } => {
+                self.on_nudge_dismissals(account, dismissed)
+            }
             SyncEvent::Saved(path) => {
                 let text = saved_text(&path);
                 self.post_notice(text, Some(NoticeAction::OpenFolder(path)));

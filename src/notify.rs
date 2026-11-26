@@ -210,6 +210,7 @@ mod tests {
             message_count: 2,
             label_ids: ["INBOX", "UNREAD"].iter().map(|s| s.to_string()).collect(),
             has_attachments: false,
+            last: None,
         }
     }
 

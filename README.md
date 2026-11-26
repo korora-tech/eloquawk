@@ -108,6 +108,7 @@ These are the keys the `?` overlay shows. Mail keys do nothing while a text fiel
 | `Shift Space` or `Page Up` | Scroll up a page | Mail |
 | `x` | Select conversation | Mail |
 | `e` | Archive, or Not spam | Mail |
+| `d` | Dismiss a nudge | Mail |
 | `#` | Trash, or Restore | Mail |
 | `s` | Star or unstar | Mail |
 | `Shift I` | Mark as read | Mail |

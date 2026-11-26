@@ -63,6 +63,8 @@ actions!(
         MarkUnread,
         /// Reports spam (Not spam in the Spam view).
         ReportSpam,
+        /// Dismisses the targets' nudges (the Nudges view).
+        DismissNudge,
         /// Hides the open thread's AI banner for the session (not bound to a key).
         DismissTriage,
         /// Applies the open thread's first suggested label (M17).
@@ -143,6 +145,7 @@ pub fn bindings() -> Vec<KeyBinding> {
         KeyBinding::new("pageup", ScrollReaderUp, mail),
         KeyBinding::new("x", ToggleSelect, mail),
         KeyBinding::new("e", Archive, mail),
+        KeyBinding::new("d", DismissNudge, mail),
         KeyBinding::new("#", Trash, mail),
         KeyBinding::new("s", ToggleStar, mail),
         KeyBinding::new("shift-i", MarkRead, mail),

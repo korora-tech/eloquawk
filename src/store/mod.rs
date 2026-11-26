@@ -442,6 +442,8 @@ pub struct Store {
     send_threads: HashMap<OpId, ThreadKey>,
     next_op: OpId,
     new_mail: Vec<ThreadSummary>,
+    /// Dismissed nudges per account, as the worker last reported them.
+    nudge_dismissed: HashMap<AccountId, crate::nudges::Dismissed>,
 }
 
 /// The toast for a saved attachment: "Saved <file> to <dir>", with the home folder shown as
@@ -475,6 +477,8 @@ fn removed_by(kind: &ViewKind, delta: &LabelDelta, all_labels: &[Label]) -> bool
         // Like Gmail, a search leaves out Spam and Trash unless it asks for them, so moving a
         // result there takes it out. Other label changes leave the results alone until the
         // search runs again, since the query may not even look at labels.
+        // The nudge filter drops a thread that stops qualifying, whatever the change.
+        ViewKind::Nudges => false,
         ViewKind::Search(q) => {
             (adds(labels::TRASH) || adds(labels::SPAM))
                 && !Query::parse(q).wants_spam_or_trash(all_labels)
@@ -497,7 +501,7 @@ fn gained_by(kind: &ViewKind, delta: &LabelDelta, after: &ThreadSummary) -> bool
                 .any(|r| r == labels::TRASH || r == labels::SPAM)
                 && !hidden("")
         }
-        ViewKind::Search(_) => false,
+        ViewKind::Search(_) | ViewKind::Nudges => false,
     }
 }
 
@@ -615,6 +619,7 @@ impl Store {
             send_threads: HashMap::new(),
             next_op: 1,
             new_mail: Vec::new(),
+            nudge_dismissed: HashMap::new(),
         }
     }
 
@@ -773,6 +778,9 @@ mod events;
 mod label_ops;
 mod mutations;
 mod navigation;
+#[cfg(test)]
+mod nudge_tests;
+mod nudges;
 mod queries;
 #[cfg(test)]
 mod tests;
